@@ -1,0 +1,365 @@
+#include "mac/video_vt.h"
+
+#import <CoreMedia/CoreMedia.h>
+#import <CoreVideo/CoreVideo.h>
+#import <Foundation/Foundation.h>
+#import <VideoToolbox/VideoToolbox.h>
+
+#include <cstring>
+#include <mutex>
+#include <optional>
+
+namespace rdaccel::platform {
+namespace {
+
+std::string OsStatusText(const char* what, OSStatus st) {
+  return std::string(what) + " failed (OSStatus " + std::to_string(st) + ")";
+}
+
+void SetProp(VTSessionRef s, CFStringRef key, CFTypeRef value) {
+  // Unsupported properties are not fatal; the encoder just ignores them.
+  VTSessionSetProperty(s, key, value);
+}
+
+void SetIntProp(VTSessionRef s, CFStringRef key, int64_t v) {
+  CFNumberRef n = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt64Type, &v);
+  SetProp(s, key, n);
+  CFRelease(n);
+}
+
+// ---------------------------------------------------------------------------
+// Encoder
+// ---------------------------------------------------------------------------
+
+class VtHevcEncoder final : public codec::IHevcEncoder {
+ public:
+  ~VtHevcEncoder() override {
+    if (session_) {
+      VTCompressionSessionCompleteFrames(session_, kCMTimeInvalid);
+      VTCompressionSessionInvalidate(session_);
+      CFRelease(session_);
+    }
+  }
+
+  bool Init(const codec::EncoderConfig& cfg, std::string* error) {
+    cfg_ = cfg;
+    NSDictionary* source_attrs = @{
+      (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
+      (id)kCVPixelBufferWidthKey : @(cfg.width),
+      (id)kCVPixelBufferHeightKey : @(cfg.height),
+      (id)kCVPixelBufferIOSurfacePropertiesKey : @{},
+    };
+    // Try low-latency rate control first; fall back to the normal hardware
+    // path if this macOS/chip combination does not offer it for HEVC.
+    for (bool low_latency : {true, false}) {
+      NSMutableDictionary* spec = [NSMutableDictionary dictionary];
+      spec[(id)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder] = @YES;
+      if (low_latency) spec[(id)kVTVideoEncoderSpecification_EnableLowLatencyRateControl] = @YES;
+      const OSStatus st = VTCompressionSessionCreate(
+          kCFAllocatorDefault, cfg.width, cfg.height, kCMVideoCodecType_HEVC,
+          (__bridge CFDictionaryRef)spec, (__bridge CFDictionaryRef)source_attrs, kCFAllocatorDefault,
+          &VtHevcEncoder::OnOutput, this, &session_);
+      if (st == noErr) {
+        low_latency_ = low_latency;
+        break;
+      }
+      session_ = nullptr;
+      if (!low_latency && error) *error = OsStatusText("VTCompressionSessionCreate(HEVC)", st);
+    }
+    if (!session_) return false;
+
+    SetProp(session_, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue);
+    SetProp(session_, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
+    SetProp(session_, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_HEVC_Main_AutoLevel);
+    // No periodic keyframes: the host asks for one when it needs it.
+    SetIntProp(session_, kVTCompressionPropertyKey_MaxKeyFrameInterval, 1 << 30);
+    SetIntProp(session_, kVTCompressionPropertyKey_ExpectedFrameRate, cfg.fps);
+    SetIntProp(session_, kVTCompressionPropertyKey_AverageBitRate, cfg.bitrate_bps);
+    SetProp(session_, kVTCompressionPropertyKey_ColorPrimaries, kCVImageBufferColorPrimaries_ITU_R_709_2);
+    SetProp(session_, kVTCompressionPropertyKey_TransferFunction,
+            kCVImageBufferTransferFunction_ITU_R_709_2);
+    SetProp(session_, kVTCompressionPropertyKey_YCbCrMatrix, kCVImageBufferYCbCrMatrix_ITU_R_709_2);
+    VTCompressionSessionPrepareToEncodeFrames(session_);
+    return true;
+  }
+
+  std::string name() const override {
+    return low_latency_ ? "VideoToolbox HEVC (low-latency)" : "VideoToolbox HEVC";
+  }
+  const std::string& last_error() const override { return error_; }
+
+  void SetBitrate(int64_t bps) override {
+    SetIntProp(session_, kVTCompressionPropertyKey_AverageBitRate, bps);
+  }
+
+  std::optional<codec::HevcAccessUnit> Encode(const tile::ImageView& img, uint64_t pts_us,
+                                              bool force_keyframe) override {
+    if (img.width != cfg_.width || img.height != cfg_.height) {
+      error_ = "frame size changed; recreate the encoder";
+      return std::nullopt;
+    }
+    CVPixelBufferRef pb = nullptr;
+    CVPixelBufferPoolRef pool = VTCompressionSessionGetPixelBufferPool(session_);
+    if (!pool || CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &pb) != kCVReturnSuccess) {
+      error_ = "could not get a pixel buffer from the encoder pool";
+      return std::nullopt;
+    }
+    // M0 copies the frame; M1 will pass the captured IOSurface straight in.
+    CVPixelBufferLockBaseAddress(pb, 0);
+    auto* dst = static_cast<uint8_t*>(CVPixelBufferGetBaseAddress(pb));
+    const size_t dst_stride = CVPixelBufferGetBytesPerRow(pb);
+    const size_t row = static_cast<size_t>(img.width) * 4;
+    for (int32_t y = 0; y < img.height; ++y) {
+      std::memcpy(dst + y * dst_stride, img.data + static_cast<size_t>(y) * img.stride, row);
+    }
+    CVPixelBufferUnlockBaseAddress(pb, 0);
+
+    NSDictionary* props = force_keyframe ? @{(id)kVTEncodeFrameOptionKey_ForceKeyFrame : @YES} : nil;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      pending_.reset();
+      callback_error_.clear();
+    }
+    const CMTime pts = CMTimeMake(static_cast<int64_t>(pts_us), 1'000'000);
+    OSStatus st = VTCompressionSessionEncodeFrame(session_, pb, pts, kCMTimeInvalid,
+                                                  (__bridge CFDictionaryRef)props, nullptr, nullptr);
+    CVPixelBufferRelease(pb);
+    if (st != noErr) {
+      error_ = OsStatusText("VTCompressionSessionEncodeFrame", st);
+      return std::nullopt;
+    }
+    // Wait for this frame's output so Encode() is synchronous, which keeps
+    // M0 simple. With low-latency mode this costs nothing extra.
+    st = VTCompressionSessionCompleteFrames(session_, kCMTimeInvalid);
+    if (st != noErr) {
+      error_ = OsStatusText("VTCompressionSessionCompleteFrames", st);
+      return std::nullopt;
+    }
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!callback_error_.empty()) error_ = callback_error_;
+    auto out = std::move(pending_);
+    pending_.reset();
+    return out;
+  }
+
+ private:
+  static void OnOutput(void* refcon, void*, OSStatus status, VTEncodeInfoFlags flags,
+                       CMSampleBufferRef sample) {
+    static_cast<VtHevcEncoder*>(refcon)->HandleOutput(status, flags, sample);
+  }
+
+  void HandleOutput(OSStatus status, VTEncodeInfoFlags flags, CMSampleBufferRef sample) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (status != noErr) {
+      callback_error_ = OsStatusText("encoder callback", status);
+      return;
+    }
+    if ((flags & kVTEncodeInfo_FrameDropped) || !sample) return;
+
+    codec::HevcAccessUnit au;
+    CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(sample, false);
+    au.keyframe = true;
+    if (attachments && CFArrayGetCount(attachments) > 0) {
+      auto dict = static_cast<CFDictionaryRef>(CFArrayGetValueAtIndex(attachments, 0));
+      au.keyframe = !CFDictionaryContainsKey(dict, kCMSampleAttachmentKey_NotSync);
+    }
+
+    int nal_len_size = 4;
+    if (au.keyframe) {
+      CMFormatDescriptionRef fmt = CMSampleBufferGetFormatDescription(sample);
+      size_t count = 0;
+      if (CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(fmt, 0, nullptr, nullptr, &count,
+                                                             &nal_len_size) != noErr) {
+        callback_error_ = "could not read HEVC parameter sets";
+        return;
+      }
+      for (size_t i = 0; i < count; ++i) {
+        const uint8_t* ps = nullptr;
+        size_t ps_size = 0;
+        if (CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(fmt, i, &ps, &ps_size, nullptr,
+                                                               nullptr) == noErr) {
+          au.parameter_sets.emplace_back(ps, ps + ps_size);
+        }
+      }
+    }
+
+    CMBlockBufferRef block = CMSampleBufferGetDataBuffer(sample);
+    const size_t total = CMBlockBufferGetDataLength(block);
+    std::vector<uint8_t> raw(total);
+    if (CMBlockBufferCopyDataBytes(block, 0, total, raw.data()) != kCMBlockBufferNoErr) {
+      callback_error_ = "could not copy encoded data";
+      return;
+    }
+    if (nal_len_size == 4) {
+      au.nal_data = std::move(raw);
+    } else {
+      // Re-frame with 4-byte lengths, which is what the wire format uses.
+      size_t i = 0;
+      while (i + static_cast<size_t>(nal_len_size) <= raw.size()) {
+        size_t len = 0;
+        for (int b = 0; b < nal_len_size; ++b) len = (len << 8) | raw[i + b];
+        i += static_cast<size_t>(nal_len_size);
+        if (len > raw.size() - i) break;
+        codec::AppendLengthPrefixed({raw.data() + i, len}, au.nal_data);
+        i += len;
+      }
+    }
+    pending_ = std::move(au);
+  }
+
+  codec::EncoderConfig cfg_;
+  VTCompressionSessionRef session_ = nullptr;
+  bool low_latency_ = false;
+  std::mutex mu_;
+  std::optional<codec::HevcAccessUnit> pending_;
+  std::string callback_error_;
+  std::string error_;
+};
+
+// ---------------------------------------------------------------------------
+// Decoder
+// ---------------------------------------------------------------------------
+
+class VtHevcDecoder final : public codec::IHevcDecoder {
+ public:
+  ~VtHevcDecoder() override { Reset(); }
+
+  std::string name() const override { return "VideoToolbox HEVC"; }
+  const std::string& last_error() const override { return error_; }
+
+  bool Decode(const std::vector<std::vector<uint8_t>>& parameter_sets,
+              const std::vector<uint8_t>& nal_data, uint64_t pts_us,
+              const codec::DecodedFrameFn& on_frame) override {
+    if (!parameter_sets.empty() && !UpdateFormat(parameter_sets)) return false;
+    if (!session_) {
+      error_ = "no keyframe received yet";
+      return false;
+    }
+
+    CMBlockBufferRef block = nullptr;
+    // The block points at nal_data without copying; decoding is synchronous
+    // so the data outlives its use.
+    OSStatus st = CMBlockBufferCreateWithMemoryBlock(
+        kCFAllocatorDefault, const_cast<uint8_t*>(nal_data.data()), nal_data.size(), kCFAllocatorNull,
+        nullptr, 0, nal_data.size(), 0, &block);
+    if (st != kCMBlockBufferNoErr) {
+      error_ = OsStatusText("CMBlockBufferCreateWithMemoryBlock", st);
+      return false;
+    }
+    CMSampleBufferRef sample = nullptr;
+    const size_t size = nal_data.size();
+    CMSampleTimingInfo timing = {kCMTimeInvalid, CMTimeMake(static_cast<int64_t>(pts_us), 1'000'000),
+                                 kCMTimeInvalid};
+    st = CMSampleBufferCreateReady(kCFAllocatorDefault, block, format_, 1, 1, &timing, 1, &size,
+                                   &sample);
+    CFRelease(block);
+    if (st != noErr) {
+      error_ = OsStatusText("CMSampleBufferCreateReady", st);
+      return false;
+    }
+
+    decoded_ = nullptr;
+    decode_status_ = noErr;
+    VTDecodeInfoFlags info = 0;
+    st = VTDecompressionSessionDecodeFrame(session_, sample, 0, nullptr, &info);
+    CFRelease(sample);
+    VTDecompressionSessionWaitForAsynchronousFrames(session_);
+    if (st != noErr || decode_status_ != noErr) {
+      error_ = OsStatusText("VTDecompressionSessionDecodeFrame", st != noErr ? st : decode_status_);
+      if (decoded_) CVPixelBufferRelease(decoded_);
+      decoded_ = nullptr;
+      return false;
+    }
+    if (decoded_) {
+      CVPixelBufferLockBaseAddress(decoded_, kCVPixelBufferLock_ReadOnly);
+      tile::ImageView view{static_cast<const uint8_t*>(CVPixelBufferGetBaseAddress(decoded_)),
+                           static_cast<int32_t>(CVPixelBufferGetWidth(decoded_)),
+                           static_cast<int32_t>(CVPixelBufferGetHeight(decoded_)),
+                           static_cast<int32_t>(CVPixelBufferGetBytesPerRow(decoded_))};
+      on_frame(view, pts_us);
+      CVPixelBufferUnlockBaseAddress(decoded_, kCVPixelBufferLock_ReadOnly);
+      CVPixelBufferRelease(decoded_);
+      decoded_ = nullptr;
+    }
+    return true;
+  }
+
+ private:
+  static void OnDecoded(void* refcon, void*, OSStatus status, VTDecodeInfoFlags,
+                        CVImageBufferRef image, CMTime, CMTime) {
+    auto* self = static_cast<VtHevcDecoder*>(refcon);
+    self->decode_status_ = status;
+    if (status == noErr && image) self->decoded_ = CVPixelBufferRetain(image);
+  }
+
+  bool UpdateFormat(const std::vector<std::vector<uint8_t>>& ps) {
+    std::vector<const uint8_t*> ptrs;
+    std::vector<size_t> sizes;
+    for (const auto& p : ps) {
+      ptrs.push_back(p.data());
+      sizes.push_back(p.size());
+    }
+    CMFormatDescriptionRef fmt = nullptr;
+    OSStatus st = CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+        kCFAllocatorDefault, ptrs.size(), ptrs.data(), sizes.data(), 4, nullptr, &fmt);
+    if (st != noErr) {
+      error_ = OsStatusText("CMVideoFormatDescriptionCreateFromHEVCParameterSets", st);
+      return false;
+    }
+    if (session_ && VTDecompressionSessionCanAcceptFormatDescription(session_, fmt)) {
+      CFRelease(format_);
+      format_ = fmt;
+      return true;
+    }
+    Reset();
+    format_ = fmt;
+    NSDictionary* dest = @{
+      (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
+      (id)kCVPixelBufferIOSurfacePropertiesKey : @{},
+    };
+    VTDecompressionOutputCallbackRecord cb = {&VtHevcDecoder::OnDecoded, this};
+    st = VTDecompressionSessionCreate(kCFAllocatorDefault, format_, nullptr,
+                                      (__bridge CFDictionaryRef)dest, &cb, &session_);
+    if (st != noErr) {
+      session_ = nullptr;
+      error_ = OsStatusText("VTDecompressionSessionCreate", st);
+      return false;
+    }
+    SetProp(session_, kVTDecompressionPropertyKey_RealTime, kCFBooleanTrue);
+    return true;
+  }
+
+  void Reset() {
+    if (session_) {
+      VTDecompressionSessionWaitForAsynchronousFrames(session_);
+      VTDecompressionSessionInvalidate(session_);
+      CFRelease(session_);
+      session_ = nullptr;
+    }
+    if (format_) {
+      CFRelease(format_);
+      format_ = nullptr;
+    }
+  }
+
+  VTDecompressionSessionRef session_ = nullptr;
+  CMFormatDescriptionRef format_ = nullptr;
+  CVPixelBufferRef decoded_ = nullptr;
+  OSStatus decode_status_ = noErr;
+  std::string error_;
+};
+
+}  // namespace
+
+std::unique_ptr<codec::IHevcEncoder> CreateVtHevcEncoder(const codec::EncoderConfig& cfg,
+                                                         std::string* error) {
+  auto enc = std::make_unique<VtHevcEncoder>();
+  if (!enc->Init(cfg, error)) return nullptr;
+  return enc;
+}
+
+std::unique_ptr<codec::IHevcDecoder> CreateVtHevcDecoder(std::string*) {
+  return std::make_unique<VtHevcDecoder>();
+}
+
+}  // namespace rdaccel::platform
