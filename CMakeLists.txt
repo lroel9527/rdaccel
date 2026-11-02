@@ -45,7 +45,10 @@ set(RDACCEL_SOURCES
   core/proto/wire.cpp
   core/proto/messages.cpp
   core/tile/tile_diff.cpp
+  core/tile/motion.cpp
+  core/tile/tile_cache.cpp
   core/codec/hevc_bitstream.cpp
+  core/codec/lossless.cpp
   core/capture/synthetic_capturer.cpp
   core/transport/local_pipe.cpp
   core/transport/tcp_transport.cpp
@@ -85,7 +88,8 @@ target_include_directories(rdaccel
     ${CMAKE_CURRENT_SOURCE_DIR}/platform)
 target_compile_definitions(rdaccel PRIVATE RDACCEL_VERSION_STRING="${PROJECT_VERSION}")
 find_package(Threads REQUIRED)
-target_link_libraries(rdaccel PRIVATE Threads::Threads)
+find_package(ZLIB REQUIRED)
+target_link_libraries(rdaccel PRIVATE Threads::Threads ZLIB::ZLIB)
 
 if(APPLE)
   target_compile_options(rdaccel PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
@@ -166,7 +170,10 @@ if(RDACCEL_BUILD_TESTS)
     tests/test_wire.cpp
     tests/test_messages.cpp
     tests/test_tile_diff.cpp
+    tests/test_motion.cpp
+    tests/test_tile_cache.cpp
     tests/test_hevc_bitstream.cpp
+    tests/test_lossless.cpp
     tests/test_local_pipe.cpp
     tests/test_tcp_transport.cpp
     tests/test_session.cpp

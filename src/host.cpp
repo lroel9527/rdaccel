@@ -49,7 +49,8 @@ struct Host::Impl {
       return false;
     }
     if (!session) {
-      codec::EncoderConfig cfg{f.bgra.width, f.bgra.height, config.fps, config.bitrate_bps};
+      codec::EncoderConfig cfg{f.bgra.width, f.bgra.height, config.fps, config.bitrate_bps,
+                               config.min_qp};
       std::string err;
       auto enc = platform::CreateHevcEncoder(cfg, config.encoder, &err);
       if (!enc) {
@@ -64,8 +65,16 @@ struct Host::Impl {
       }
       width = f.bgra.width;
       height = f.bgra.height;
+      session::HostOptions opts;
+      opts.lossless = config.lossless;
+      opts.lossless_max_colors = config.lossless_max_colors;
+      opts.lossless_max_colors_hot = config.lossless_max_colors_hot;
+      opts.detect_moves = config.detect_moves;
+      opts.refine_frames = config.refine_frames;
+      opts.tile_cache = config.tile_cache;
+      opts.refresh = config.refresh;
       session = std::make_unique<session::HostSession>(transport.get(), std::move(enc), width,
-                                                       height);
+                                                       height, opts);
       session->SetInputHandler([this](const InputEvent& ev) {
         InputHandler fn;
         {

@@ -1,6 +1,7 @@
 #include "session/host_session.h"
 
 #include <algorithm>
+#include <cstring>
 
 namespace rdaccel::session {
 
@@ -25,8 +26,14 @@ std::vector<Rect> TilesToRegions(const std::vector<tile::TileChange>& changes) {
 
 HostSession::HostSession(transport::ITransport* transport,
                          std::unique_ptr<codec::IHevcEncoder> encoder, int32_t width,
-                         int32_t height)
-    : transport_(transport), encoder_(std::move(encoder)), width_(width), height_(height) {
+                         int32_t height, HostOptions options)
+    : transport_(transport),
+      encoder_(std::move(encoder)),
+      width_(width),
+      height_(height),
+      options_(options),
+      enc_input_(static_cast<size_t>(width) * height * 4, 0),
+      prev_(enc_input_.size(), 0) {
   transport_->SetReceiver(
       [this](transport::Channel ch, std::span<const uint8_t> bytes) { OnReceive(ch, bytes); });
   Send(transport::Channel::kControl,
@@ -51,56 +58,322 @@ void HostSession::Send(transport::Channel ch, const proto::Message& m) {
   stats_.bytes_sent += bytes.size();
 }
 
+namespace {
+
+void CopyRectInto(const tile::ImageView& src, const Rect& r, uint8_t* dst, int32_t dst_stride) {
+  const size_t row = static_cast<size_t>(r.w) * 4;
+  for (int32_t y = r.y; y < r.bottom(); ++y) {
+    std::memcpy(dst + static_cast<size_t>(y) * dst_stride + static_cast<size_t>(r.x) * 4,
+                src.data + static_cast<size_t>(y) * src.stride + static_cast<size_t>(r.x) * 4, row);
+  }
+}
+
+void FillRect(const Rect& r, uint32_t rgb, uint8_t* dst, int32_t dst_stride) {
+  const uint32_t px = rgb | 0xff000000u;
+  for (int32_t y = r.y; y < r.bottom(); ++y) {
+    uint8_t* p = dst + static_cast<size_t>(y) * dst_stride + static_cast<size_t>(r.x) * 4;
+    for (int32_t x = 0; x < r.w; ++x) std::memcpy(p + x * 4, &px, 4);
+  }
+}
+
+}  // namespace
+
 bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* error) {
   {
     std::lock_guard<std::mutex> lock(mu_);
     ++stats_.frames_captured;
   }
   const bool key = force_keyframe_.exchange(false);
-  auto changes = differ_.Diff(frame.bgra, frame.dirty);
-  if (changes.empty() && !key) {
+  // A keyframe classifies every tile, so the encoder input is rebuilt fully.
+  if (key) differ_.Reset();
+  auto changes = differ_.Diff(frame.bgra, key ? std::span<const Rect>() : frame.dirty);
+  const size_t n_tiles = static_cast<size_t>(differ_.cols()) * differ_.rows();
+  if (refine_.size() != n_tiles) {
+    refine_.assign(n_tiles, 0);
+    refining_ = 0;
+    born_.assign(n_tiles, 0);
+    quality_.assign(n_tiles, kRough);
+  }
+  ++frame_no_;
+  // Tiles the viewer shows at first-pass video quality (or copies of such)
+  // that have been static for a while get sent again properly.
+  std::vector<size_t> refresh;
+  if (!key && options_.refresh) {
+    for (size_t i = 0; i < n_tiles && refresh.size() < kMaxRefreshPerFrame; ++i) {
+      if (quality_[i] == kRough && refine_[i] == 0 && frame_no_ - born_[i] >= kRefreshDelay) {
+        refresh.push_back(i);
+      }
+    }
+  }
+  if (changes.empty() && !key && refining_ == 0 && refresh.empty()) {
     std::lock_guard<std::mutex> lock(mu_);
     ++stats_.frames_skipped;
     return true;
   }
 
   const uint64_t t0 = capture::MonotonicMicros();
-  auto au = encoder_->Encode(frame.bgra, frame.capture_time_us, key);
-  const uint64_t t1 = capture::MonotonicMicros();
-  if (!au) {
-    // The encoder dropped or failed this frame; make sure the next one fully
-    // refreshes the viewer.
-    force_keyframe_ = true;
-    differ_.Reset();
-    // An empty error means the encoder chose to drop the frame, which is
-    // not a failure.
-    const std::string& why = encoder_->last_error();
-    if (why.empty()) return true;
-    if (error) *error = why;
-    std::lock_guard<std::mutex> lock(mu_);
-    ++stats_.encode_errors;
-    return false;
+  const int32_t enc_stride = width_ * 4;
+  auto tile_index = [&](const tile::TileChange& c) {
+    return static_cast<size_t>(c.row) * differ_.cols() + c.col;
+  };
+
+  // Tile cache, part 1: before this frame's updates, keep what the viewer
+  // shows for tiles that are about to change, if that content is likely to
+  // come back: it was on screen for a while (a window about to be covered),
+  // or it has been seen before (a cycling animation).
+  std::vector<proto::CacheStore> stores;
+  if (key) cache_.Clear();
+  if (!key && options_.tile_cache) {
+    // Recurrence alone is a weak signal (scrolling by a multiple of the tile
+    // size makes every tile "recur"), so only a few such stores per frame.
+    size_t recurring_budget = kMaxRecurringStores;
+    for (const auto& c : changes) {
+      if (c.prev_hash == 0) continue;
+      const bool stable = frame_no_ - born_[tile_index(c)] >= kStableFrames;
+      bool recurring = false;
+      if (!stable && recurring_budget > 0) {
+        auto seen = seen_.find(c.prev_hash);
+        recurring = seen != seen_.end() && seen->second >= 2;
+      }
+      if ((stable || recurring) && !cache_.Find(c.prev_hash)) {
+        if (!stable) --recurring_budget;
+        const uint32_t slot = cache_.Insert(c.prev_hash);
+        slot_quality_[slot] = quality_[tile_index(c)];
+        stores.push_back({0, slot, c.rect});
+      }
+    }
+  }
+  if (seen_.size() > kMaxSeen) seen_.clear();
+  std::vector<bool> hot(changes.size());
+  for (size_t i = 0; i < changes.size(); ++i) {
+    uint8_t& n = seen_[changes[i].hash];
+    if (n < 255) ++n;
+    uint64_t& born = born_[tile_index(changes[i])];
+    hot[i] = !key && frame_no_ - born <= 1;
+    born = frame_no_;
   }
 
-  const uint64_t id = next_frame_id_++;
-  proto::VideoData vd;
-  vd.frame_id = id;
-  vd.keyframe = au->keyframe;
-  vd.parameter_sets = std::move(au->parameter_sets);
-  vd.nal_data = std::move(au->nal_data);
-  if (!au->keyframe) vd.regions = TilesToRegions(changes);  // keyframe = whole screen
+  std::vector<tile::Move> moves;
+  std::vector<bool> moved;
+  std::vector<std::vector<Rect>> residual;
+  if (!key && options_.detect_moves) {
+    moves = tile::DetectMoves({prev_.data(), width_, height_, enc_stride}, frame.bgra, changes,
+                              moved, residual);
+    // The encoder's picture is left as it was under moved tiles: the viewer
+    // does not take video there, and unchanged pixels cost the encoder
+    // nothing, while moved ones would make it code the motion.
+  }
+  // A moved rect is as good as the worst tile it was copied from.
+  auto quality_under = [&](const Rect& r) {
+    uint8_t q = kExact;
+    for (int32_t row = r.y / kTileSize; row <= (r.bottom() - 1) / kTileSize; ++row) {
+      for (int32_t col = r.x / kTileSize; col <= (r.right() - 1) / kTileSize; ++col) {
+        q = std::min(q, quality_[static_cast<size_t>(row) * differ_.cols() + col]);
+      }
+    }
+    return q;
+  };
+  std::vector<uint8_t> move_quality;
+  for (const auto& m : moves) move_quality.push_back(quality_under(m.src()));
+  // Quality of what each moved tile receives from the moves.
+  auto moved_in_quality = [&](const Rect& tile_rect) {
+    uint8_t q = kExact;
+    for (size_t k = 0; k < moves.size(); ++k) {
+      const Rect& d = moves[k].dst;
+      if (d.x < tile_rect.right() && tile_rect.x < d.right() && d.y < tile_rect.bottom() &&
+          tile_rect.y < d.bottom()) {
+        q = std::min(q, move_quality[k]);
+      }
+    }
+    return q;
+  };
+  size_t moved_tiles = 0;
+  std::vector<proto::CacheLoad> loads;
+  std::vector<codec::PaletteTile> lossless_tiles;
+  std::vector<tile::TileChange> video_tiles;  // video coded, whole or in part
+  const auto refine_frames = static_cast<uint8_t>(std::clamp(options_.refine_frames, 0, 255));
+  auto set_refine = [&](const tile::TileChange& c, uint8_t v) {
+    uint8_t& r = refine_[tile_index(c)];
+    refining_ += (v > 0) - (r > 0);
+    r = v;
+  };
+  // Codes `r` (all or part of tile `c`) losslessly if it has few colours,
+  // else through the video encoder. Returns true for video.
+  auto code_rect = [&](const tile::TileChange& c, const Rect& r, bool is_hot) {
+    // Lossless pays off on content that stays, or on a thin sliver; content
+    // that keeps changing is cheaper as video unless it is very simple.
+    const bool sliver = r.h * 4 <= kTileSize || r.w * 4 <= kTileSize;
+    int max_colors =
+        is_hot && !sliver ? options_.lossless_max_colors_hot : options_.lossless_max_colors;
+    // Narrow vertical slivers (the sides of a dragged window) are new every
+    // frame and each carries its own palette, which then outweighs the pixels
+    // (3 bytes a colour). Horizontal slivers are mostly the rows a scroll
+    // uncovers, which stay on screen and are worth keeping exact.
+    if (is_hot && r.w < r.h) {
+      max_colors = std::max(std::min(max_colors, r.w * r.h / 6), options_.lossless_max_colors_hot);
+    }
+    codec::PaletteTile t;
+    if (options_.lossless && codec::ExtractPalette(frame.bgra, r, max_colors, t)) {
+      FillRect(r, t.colors[0], enc_input_.data(), enc_stride);
+      lossless_tiles.push_back(std::move(t));
+      return false;
+    }
+    CopyRectInto(frame.bgra, r, enc_input_.data(), enc_stride);
+    tile::TileChange part = c;
+    part.rect = r;
+    video_tiles.push_back(part);
+    return true;
+  };
+  // Refreshed tiles are coded like changed ones (their content is current in
+  // `frame`, as they did not change).
+  for (size_t idx : refresh) {
+    const auto col = static_cast<int32_t>(idx % differ_.cols());
+    const auto row = static_cast<int32_t>(idx / differ_.cols());
+    Rect rect{col * kTileSize, row * kTileSize, kTileSize, kTileSize};
+    rect.w = std::min(rect.w, width_ - rect.x);
+    rect.h = std::min(rect.h, height_ - rect.y);
+    changes.push_back({col, row, 0, 0, rect});
+  }
+  const size_t n_changed = changes.size() - refresh.size();
+  std::vector<size_t> refine_after;  // tiles that went to video whole
+  for (size_t i = 0; i < changes.size(); ++i) {
+    const auto& c = changes[i];
+    const size_t idx = tile_index(c);
+    if (i < n_changed) CopyRectInto(frame.bgra, c.rect, prev_.data(), enc_stride);
+    // Whatever happens below, the viewer must not take this tile from a
+    // refining video picture any more (lossless tiles are flattened in it).
+    set_refine(c, 0);
+    if (i < n_changed && !moved.empty() && moved[i]) {
+      ++moved_tiles;
+      uint8_t q = moved_in_quality(c.rect);
+      if (!residual[i].empty()) q = std::min(q, quality_[idx]);  // rows that stayed put
+      // Only the rows that did not move or stay put are left to code.
+      for (const Rect& r : residual[i]) {
+        if (code_rect(c, r, hot[i])) q = kRough;
+      }
+      quality_[idx] = q;
+      continue;
+    }
+    // Tile cache, part 2: content the viewer has kept. Like moves, the
+    // encoder's picture is left alone here.
+    if (i < n_changed && !key && options_.tile_cache) {
+      if (auto slot = cache_.Find(c.hash)) {
+        loads.push_back({0, *slot, c.rect});
+        quality_[idx] = slot_quality_[*slot];
+        continue;
+      }
+    }
+    if (code_rect(c, c.rect, i < n_changed && hot[i])) {
+      refine_after.push_back(i);
+      quality_[idx] = kRough;
+    } else {
+      quality_[idx] = kExact;
+    }
+  }
+  // The viewer takes this frame's video tiles plus the ones still refining.
+  std::vector<tile::TileChange> region_tiles = video_tiles;
+  if (refining_ > 0) {
+    for (int32_t row = 0; row < differ_.rows(); ++row) {
+      for (int32_t col = 0; col < differ_.cols(); ++col) {
+        uint8_t& r = refine_[static_cast<size_t>(row) * differ_.cols() + col];
+        if (r == 0) continue;
+        Rect rect{col * kTileSize, row * kTileSize, kTileSize, kTileSize};
+        rect.w = std::min(rect.w, width_ - rect.x);
+        rect.h = std::min(rect.h, height_ - rect.y);
+        region_tiles.push_back({col, row, 0, 0, rect});
+        if (--r == 0) {
+          --refining_;
+          // The encoder has had its chance to sharpen this tile.
+          quality_[static_cast<size_t>(row) * differ_.cols() + col] = kRefined;
+        }
+      }
+    }
+  }
+  for (size_t i : refine_after) {
+    set_refine(changes[i], refine_frames);
+    // With no refinement planned, a refresh would not do better either.
+    if (refine_frames == 0) quality_[tile_index(changes[i])] = kRefined;
+  }
+  const uint64_t t1 = capture::MonotonicMicros();
 
+  std::optional<codec::HevcAccessUnit> au;
+  if (key || !region_tiles.empty()) {
+    au = encoder_->Encode({enc_input_.data(), width_, height_, enc_stride}, frame.capture_time_us,
+                          key);
+    if (!au) {
+      // The encoder dropped or failed this frame; make sure the next one fully
+      // refreshes the viewer.
+      force_keyframe_ = true;
+      differ_.Reset();
+      std::fill(refine_.begin(), refine_.end(), 0);
+      refining_ = 0;
+      std::fill(quality_.begin(), quality_.end(), kRough);
+      // An empty error means the encoder chose to drop the frame, which is
+      // not a failure.
+      const std::string& why = encoder_->last_error();
+      if (why.empty()) return true;
+      if (error) *error = why;
+      std::lock_guard<std::mutex> lock(mu_);
+      ++stats_.encode_errors;
+      return false;
+    }
+  }
+  const uint64_t t2 = capture::MonotonicMicros();
+
+  // Deflate only after the video encode succeeded: the stream's history must
+  // match what the viewer actually receives.
+  std::vector<uint8_t> lossless_data;
+  if (!lossless_tiles.empty()) lossless_data = lossless_.Encode(lossless_tiles, key);
+  const uint64_t t3 = capture::MonotonicMicros();
+
+  const uint64_t id = next_frame_id_++;
   std::vector<uint8_t> bytes;
   proto::EncodeTo(proto::FrameBegin{id, frame.capture_time_us}, bytes);
-  proto::EncodeTo(vd, bytes);
+  // The viewer applies these in this order: stores, moves, loads, video,
+  // lossless.
+  for (auto& st : stores) {
+    st.frame_id = id;
+    proto::EncodeTo(st, bytes);
+  }
+  for (const auto& m : moves) proto::EncodeTo(proto::CopyRect{id, m.src(), m.dx, m.dy}, bytes);
+  for (auto& ld : loads) {
+    ld.frame_id = id;
+    proto::EncodeTo(ld, bytes);
+  }
+  size_t video_bytes = 0;
+  if (au) {
+    proto::VideoData vd;
+    vd.frame_id = id;
+    vd.keyframe = au->keyframe;
+    vd.parameter_sets = std::move(au->parameter_sets);
+    vd.nal_data = std::move(au->nal_data);
+    // Only a requested keyframe covers the whole screen: the viewer must not
+    // take flattened lossless tiles from any other picture.
+    if (!key) vd.regions = TilesToRegions(region_tiles);
+    video_bytes = vd.nal_data.size();
+    proto::EncodeTo(vd, bytes);
+  }
+  if (!lossless_data.empty()) {
+    proto::EncodeTo(proto::LosslessData{id, key, lossless_data}, bytes);
+  }
   proto::EncodeTo(proto::FrameEnd{id}, bytes);
   transport_->Send(transport::Channel::kVideo, bytes);
 
   std::lock_guard<std::mutex> lock(mu_);
   ++stats_.frames_encoded;
-  if (vd.keyframe) ++stats_.keyframes;
+  if (au) {
+    ++stats_.video_frames;
+    if (au->keyframe) ++stats_.keyframes;
+    stats_.encode_us_total += t2 - t1;
+  }
   stats_.bytes_sent += bytes.size();
-  stats_.encode_us_total += t1 - t0;
+  stats_.video_bytes += video_bytes;
+  stats_.lossless_bytes += lossless_data.size();
+  stats_.lossless_tiles += lossless_tiles.size();
+  stats_.moved_tiles += moved_tiles;
+  stats_.cached_tiles += loads.size();
+  stats_.refreshed_tiles += refresh.size();
+  stats_.lossless_us_total += (t1 - t0) + (t3 - t2);
   return true;
 }
 

@@ -19,6 +19,10 @@ namespace rdaccel {
 struct HostConfig {
   int32_t fps = 60;
   int64_t bitrate_bps = 8'000'000;
+  // Quality ceiling for the video encoder as a minimum QP (0..51, lower =
+  // finer). The default saves about half the video bitrate on desktop content
+  // for under 1 dB; 0 lets the encoder decide.
+  int32_t min_qp = 24;
   // HEVC encoder backend to try first. Empty picks automatically. macOS always
   // uses VideoToolbox; Linux accepts "hevc_nvenc" or "libx265".
   std::string encoder;
@@ -27,16 +31,44 @@ struct HostConfig {
   int32_t capture_width = 0;
   int32_t capture_height = 0;
   bool capture_cursor = false;  // the viewer is expected to draw the cursor
+  // Send tiles with few colours (text, UI) through the lossless layer instead
+  // of the video encoder. A tile that also changed in the previous frame
+  // (animation, video, dragging) is "hot" and must have at most
+  // `lossless_max_colors_hot` colours; other tiles, and small slivers such as
+  // the rows a scroll uncovers, may have up to `lossless_max_colors`.
+  bool lossless = true;
+  int32_t lossless_max_colors = 256;
+  int32_t lossless_max_colors_hot = 4;
+  // Detect scrolling and moved windows and send them as copy commands.
+  bool detect_moves = true;
+  // Video frames during which a static tile keeps receiving the encoder's
+  // quality refinements after it changed. 0 = only send changed tiles.
+  int32_t refine_frames = 8;
+  // Let the viewer keep tiles that are likely to come back (a window that
+  // gets uncovered, a cycling animation) and repaint them from memory.
+  bool tile_cache = true;
+  // Re-send areas left at first-pass video quality (e.g. content that
+  // scrolled in) once they stop changing. Off by default: on the benchmark
+  // scenes it cost more than it gained (see README).
+  bool refresh = false;
 };
 
 struct HostStats {
   uint64_t frames_captured = 0;
   uint64_t frames_skipped = 0;  // no tile changed
-  uint64_t frames_encoded = 0;
+  uint64_t frames_encoded = 0;  // frames sent: video, lossless or both
+  uint64_t video_frames = 0;    // frames that went through the video encoder
   uint64_t keyframes = 0;
   uint64_t encode_errors = 0;
   uint64_t bytes_sent = 0;
-  uint64_t encode_us_total = 0;
+  uint64_t video_bytes = 0;     // HEVC payload only
+  uint64_t lossless_bytes = 0;  // lossless payload only
+  uint64_t lossless_tiles = 0;
+  uint64_t moved_tiles = 0;     // sent as copies of what the viewer shows
+  uint64_t cached_tiles = 0;    // painted from the viewer's tile cache
+  uint64_t refreshed_tiles = 0; // re-sent at better quality once static
+  uint64_t encode_us_total = 0;    // video encoder
+  uint64_t lossless_us_total = 0;  // palette extraction + deflate
 };
 
 class Host {

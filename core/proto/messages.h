@@ -18,7 +18,7 @@
 
 namespace rdaccel::proto {
 
-inline constexpr uint32_t kProtocolVersion = 1;
+inline constexpr uint32_t kProtocolVersion = 2;  // 2: lossless, moves, tile cache
 
 enum class MsgType : uint8_t {
   kHello = 1,
@@ -30,6 +30,9 @@ enum class MsgType : uint8_t {
   kCursorShape = 7,
   kInputEvent = 8,
   kFeedback = 9,
+  kLosslessData = 10,
+  kCacheStore = 11,
+  kCacheLoad = 12,
 };
 
 // HEVC only: the project deliberately has no H.264 fallback.
@@ -67,6 +70,37 @@ struct VideoData {
 struct FrameEnd {
   uint64_t frame_id = 0;
   friend bool operator==(const FrameEnd&, const FrameEnd&) = default;
+};
+
+// Few-colour tiles (text, UI) coded losslessly; see codec/lossless.h. The
+// viewer paints them after the video picture of the same frame, so they win
+// where both cover a tile. `reset` restarts the deflate stream (keyframes).
+struct LosslessData {
+  uint64_t frame_id = 0;
+  bool reset = false;
+  std::vector<uint8_t> data;
+  friend bool operator==(const LosslessData&, const LosslessData&) = default;
+};
+
+// Tile cache commands (see tile/tile_cache.h). The viewer has
+// kTileCacheSlots slots of at most kTileSize x kTileSize pixels.
+inline constexpr uint32_t kTileCacheSlots = 1024;
+
+// Store what the viewer shows at `rect` (before this frame's updates) in
+// `slot`.
+struct CacheStore {
+  uint64_t frame_id = 0;
+  uint32_t slot = 0;
+  Rect rect;
+  friend bool operator==(const CacheStore&, const CacheStore&) = default;
+};
+
+// Paint `slot` at `rect` (same size as when stored).
+struct CacheLoad {
+  uint64_t frame_id = 0;
+  uint32_t slot = 0;
+  Rect rect;
+  friend bool operator==(const CacheLoad&, const CacheLoad&) = default;
 };
 
 // Copy an already-displayed rectangle by (dx, dy). Used for scrolling and
@@ -108,7 +142,8 @@ struct Feedback {
 };
 
 using Message = std::variant<Hello, FrameBegin, VideoData, FrameEnd, CopyRect, CursorPos,
-                             CursorShape, InputEvent, Feedback>;
+                             CursorShape, InputEvent, Feedback, LosslessData, CacheStore,
+                             CacheLoad>;
 
 // Serializes one message including its type and length header.
 std::vector<uint8_t> Encode(const Message& msg);

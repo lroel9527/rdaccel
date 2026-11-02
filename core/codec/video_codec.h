@@ -22,6 +22,10 @@ struct EncoderConfig {
   int32_t height = 0;
   int32_t fps = 60;
   int64_t bitrate_bps = 8'000'000;
+  // Lowest QP (finest quantizer) the encoder may use; 0 = encoder default.
+  // Without a floor, low-latency rate control keeps spending its budget
+  // sharpening static content far beyond what anyone can see.
+  int32_t min_qp = 0;
 };
 
 class IHevcEncoder {

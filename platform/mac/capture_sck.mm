@@ -136,6 +136,8 @@ bool SckCapturer::Start(const capture::CaptureConfig& cfg, capture::FrameFn on_f
   conf.minimumFrameInterval = CMTimeMake(1, cfg.fps > 0 ? cfg.fps : 60);
   conf.showsCursor = cfg.show_cursor ? YES : NO;
   conf.queueDepth = 5;
+  // Video only: rdaccel never captures or plays audio.
+  conf.capturesAudio = NO;
 
   impl_->queue = dispatch_queue_create("rdaccel.capture", DISPATCH_QUEUE_SERIAL);
   impl_->output = [[RDStreamOutput alloc] initWithCallback:std::move(on_frame)];

@@ -44,23 +44,47 @@ cmake --install build --prefix /opt/rdaccel
 # 2) 作为子目录：add_subdirectory(rdaccel)，此时默认不编译测试和示例
 ```
 
-API 在 1.0 之前还会变，M1（文字无损层、滚动检测）会在 `Host` / `Viewer` 后面加功能，尽量不改现有接口。
+API 在 1.0 之前还会变。M1 的功能都加在 `Host` / `Viewer` 后面，现有接口没有改，`HostConfig` / `HostStats` 只增加了字段。
 
-## 当前进度：M0 基线
+## 当前进度：M1 按区域分类传输
 
+M0 是整屏硬编基线；M1 在它上面加了按区域分类，每一项都可以在 `HostConfig` 里单独关掉做对比。
 
-M0 是一个能跑通的整屏硬编基线，后续每项优化都和它对比。
-
-| 已有 | 说明 |
-| --- | --- |
-| 分块比对 | 64×64 块哈希，没有块变化的帧整帧跳过 |
-| HEVC 编解码 | macOS：VideoToolbox 硬件（优先低延迟模式）；Linux：FFmpeg，NVENC 优先，否则 x265 |
-| 屏幕采集 | macOS：ScreenCaptureKit（带脏区）；Linux：X11 MIT-SHM |
-| 协议 | 自定义二进制消息，HEVC 码流统一为 4 字节长度前缀格式，两端互通 |
-| 传输 | 进程内管道（回环）、TCP（跨机器）；QUIC 在后续里程碑 |
-| 示例 | `rdaccel_record` 录制码流文件、`rdaccel_play` 回放并校验、`rdaccel_loopback`（macOS 窗口程序）、`minimal`（最小集成） |
+| 模块 | 说明 | 开关 |
+| --- | --- | --- |
+| 分块比对 | 64×64 块哈希，没有块变化的帧整帧跳过 | — |
+| 调色板无损层 | 颜色少的块（文字、界面）编成调色板 + 索引，所有块共用一条跨帧 deflate 流；送进硬件编码器的画面里这些块被抹成底色，打字时往往一帧视频都不用编 | `lossless`、`lossless_max_colors`（静止块，默认 256）、`lossless_max_colors_hot`（每帧都在变的块，默认 4） |
+| 滚动 / 拖窗检测 | 变化块多时，用每块最有细节的一行做滚动哈希，在上一帧里找位置投票出位移，逐块精确比对后发拷贝指令；滚动区边缘的块按 16 像素宽的条和像素行再拆，只把新露出的几行送去编码 | `detect_moves` |
+| 块缓存 | 接收端 1024 个槽。即将被盖住的、停留过一阵的块，以及反复出现的块（转圈动画）先存起来，内容再出现时直接从槽里贴回 | `tile_cache` |
+| 静止区精修 | 视频块变化后，接收端在之后 N 个视频帧里继续采用编码器对它的精修 | `refine_frames`（默认 8） |
+| 码控 | 给视频编码器设 QP 下限，避免低延迟码控在静止内容上无限精修 | `min_qp`（默认 24，0 = 编码器自定） |
+| HEVC 编解码 | macOS：VideoToolbox 硬件（优先低延迟模式）；Linux：FFmpeg，NVENC 优先，否则 x265 | `encoder` |
+| 屏幕采集 | macOS：ScreenCaptureKit（带脏区，不采集声音）；Linux：X11 MIT-SHM | — |
+| 传输 | 进程内管道（回环）、TCP（跨机器）；QUIC 在后续里程碑 | — |
+| 示例 | `rdaccel_record`、`rdaccel_play`、`rdaccel_bench`（场景评测）、`rdaccel_loopback`（macOS 窗口程序）、`minimal` | — |
 
 只支持 HEVC，没有 H.264 回退。
+
+### 评测结果（Apple M6，VideoToolbox HEVC 低延迟硬编）
+
+`rdaccel_bench` 用一张真实桌面截图（1408×880）驱动 5 个场景，各 600 帧（60 fps，10 秒），编码后再解码，与原图逐帧比较。码率为稳态码率（去掉第一帧全屏刷新），PSNR 为逐帧平均，"精确" 为与原图逐像素完全相同的比例。
+
+| 场景 | M0 码率 | M0 PSNR | M1 码率 | M1 PSNR | M1 精确 |
+| --- | --- | --- | --- | --- | --- |
+| idle（只有转圈动画） | 338 kbps | 38.8 dB | 17 kbps | 42.3 dB | 67% |
+| 打字 | 70 kbps | 39.0 dB | 49 kbps | 43.9 dB | 76% |
+| 滚动（滚 2 秒停 1 秒） | 1592 kbps | 39.2 dB | 796 kbps | 46.2 dB | 84% |
+| 拖动窗口 | 969 kbps | 39.3 dB | 1552 kbps | 41.7 dB | 63% |
+| 视频窗口 + 转圈 | 2557 kbps | 38.9 dB | 1252 kbps | 41.6 dB | 61% |
+
+拖动窗口是目前唯一码率上升的场景：窗口边缘每帧都有新像素，无损层在这里代价偏高，下一步考虑把持续移动的区域整体交给视频编码器。复现：
+
+```bash
+./build/bin/rdaccel_play some.rdstream --dump=dump --dump-every=300   # 从真实录屏导出一帧当背景
+./build/bin/rdaccel_bench --background=dump/frame_000300.ppm --frames=600
+./build/bin/rdaccel_bench --background=dump/frame_000300.ppm --frames=600 \
+    --lossless=0 --moves=0 --refine=0 --cache=0 --min-qp=0              # M0 对照
+```
 
 ## 在 Mac 上编译运行
 
@@ -99,7 +123,7 @@ CI 每次会在 Linux 上用 x265 录一段合成码流、在 macOS 上用 Video
 ## 在 Linux 上编译
 
 ```bash
-sudo apt-get install cmake g++ libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxext-dev
+sudo apt-get install cmake g++ libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxext-dev zlib1g-dev
 cmake -S . -B build && cmake --build build -j
 ctest --test-dir build
 ```
@@ -113,7 +137,7 @@ include/rdaccel/   公开 API（唯一会被安装的头文件）
 src/               公开 API 的实现
 core/              内部：协议、分块比对、HEVC 码流格式、会话、传输、合成画面
 platform/          内部：mac/（ScreenCaptureKit、VideoToolbox）、linux/（X11、FFmpeg）
-examples/          只用公开 API 的示例：record、play、loopback_mac、minimal（独立 CMake 工程）
+examples/          只用公开 API 的示例：record、play、bench、loopback_mac、minimal（独立 CMake 工程）
 tests/             GoogleTest（test_api.cpp 只用公开 API）
 cmake/             find_package 配置模板
 ```

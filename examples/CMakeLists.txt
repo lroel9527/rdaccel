@@ -7,6 +7,9 @@ target_link_libraries(rdaccel_record PRIVATE rdaccel::rdaccel)
 add_executable(rdaccel_play play.cpp)
 target_link_libraries(rdaccel_play PRIVATE rdaccel::rdaccel)
 
+add_executable(rdaccel_bench bench.cpp)
+target_link_libraries(rdaccel_bench PRIVATE rdaccel::rdaccel)
+
 # macOS: host and viewer in one process, showing the decoded screen in a window.
 if(APPLE)
   add_executable(rdaccel_loopback MACOSX_BUNDLE loopback_mac/main.mm)
