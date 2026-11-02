@@ -3,11 +3,14 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/pixdesc.h>
 #include <libavutil/opt.h>
 #include <libswscale/swscale.h>
 }
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 
 namespace rdaccel::platform {
 namespace {
@@ -239,13 +242,32 @@ class FfmpegHevcDecoder final : public codec::IHevcDecoder {
   void Emit(const codec::DecodedFrameFn& on_frame) {
     const int w = frame_->width, h = frame_->height;
     const auto fmt = static_cast<AVPixelFormat>(frame_->format);
-    if (!sws_ || w != sws_w_ || h != sws_h_ || fmt != sws_fmt_) {
+    // Convert with the matrix and range the stream says it uses (its VUI).
+    // Streams from other encoders (e.g. VideoToolbox's software encoder) do
+    // not always use BT.709 limited, which is what our own encoder writes and
+    // what we assume when the stream says nothing.
+    const AVColorSpace spc = frame_->colorspace;
+    const bool full_range = frame_->color_range == AVCOL_RANGE_JPEG;
+    if (!sws_ || w != sws_w_ || h != sws_h_ || fmt != sws_fmt_ || spc != sws_spc_ ||
+        full_range != sws_full_) {
       sws_.reset(sws_getContext(w, h, fmt, w, h, AV_PIX_FMT_BGRA, SWS_BILINEAR, nullptr, nullptr,
                                 nullptr));
-      SetBt709(sws_.get(), false);
+      int cs = SWS_CS_ITU709;
+      if (spc == AVCOL_SPC_BT470BG || spc == AVCOL_SPC_SMPTE170M) cs = SWS_CS_ITU601;
+      if (spc == AVCOL_SPC_BT2020_NCL || spc == AVCOL_SPC_BT2020_CL) cs = SWS_CS_BT2020;
+      const int* coeffs = sws_getCoefficients(cs);
+      sws_setColorspaceDetails(sws_.get(), coeffs, full_range ? 1 : 0, coeffs, 1, 0, 1 << 16,
+                               1 << 16);
+      if (std::getenv("RDACCEL_DEBUG")) {
+        std::fprintf(stderr, "rdaccel: decoding %dx%d %s, colorspace %s, %s range\n", w, h,
+                     av_get_pix_fmt_name(fmt), av_color_space_name(spc),
+                     full_range ? "full" : "limited");
+      }
       sws_w_ = w;
       sws_h_ = h;
       sws_fmt_ = fmt;
+      sws_spc_ = spc;
+      sws_full_ = full_range;
       bgra_.assign(static_cast<size_t>(w) * h * 4, 0);
     }
     uint8_t* dst[1] = {bgra_.data()};
@@ -260,6 +282,8 @@ class FfmpegHevcDecoder final : public codec::IHevcDecoder {
   SwsPtr sws_;
   int sws_w_ = 0, sws_h_ = 0;
   AVPixelFormat sws_fmt_ = AV_PIX_FMT_NONE;
+  AVColorSpace sws_spc_ = AVCOL_SPC_UNSPECIFIED;
+  bool sws_full_ = false;
   std::vector<uint8_t> annexb_;
   std::vector<uint8_t> bgra_;
   std::string error_;
