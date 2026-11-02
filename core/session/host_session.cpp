@@ -51,7 +51,7 @@ void HostSession::Send(transport::Channel ch, const proto::Message& m) {
   stats_.bytes_sent += bytes.size();
 }
 
-void HostSession::OnFrame(const capture::CapturedFrame& frame) {
+bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* error) {
   {
     std::lock_guard<std::mutex> lock(mu_);
     ++stats_.frames_captured;
@@ -61,7 +61,7 @@ void HostSession::OnFrame(const capture::CapturedFrame& frame) {
   if (changes.empty() && !key) {
     std::lock_guard<std::mutex> lock(mu_);
     ++stats_.frames_skipped;
-    return;
+    return true;
   }
 
   const uint64_t t0 = capture::MonotonicMicros();
@@ -72,7 +72,14 @@ void HostSession::OnFrame(const capture::CapturedFrame& frame) {
     // refreshes the viewer.
     force_keyframe_ = true;
     differ_.Reset();
-    return;
+    // An empty error means the encoder chose to drop the frame, which is
+    // not a failure.
+    const std::string& why = encoder_->last_error();
+    if (why.empty()) return true;
+    if (error) *error = why;
+    std::lock_guard<std::mutex> lock(mu_);
+    ++stats_.encode_errors;
+    return false;
   }
 
   const uint64_t id = next_frame_id_++;
@@ -94,6 +101,7 @@ void HostSession::OnFrame(const capture::CapturedFrame& frame) {
   if (vd.keyframe) ++stats_.keyframes;
   stats_.bytes_sent += bytes.size();
   stats_.encode_us_total += t1 - t0;
+  return true;
 }
 
 void HostSession::OnReceive(transport::Channel ch, std::span<const uint8_t> bytes) {

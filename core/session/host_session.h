@@ -31,8 +31,9 @@ class HostSession {
   // Called with input events from the viewer (on the transport thread).
   void SetInputHandler(InputFn fn);
 
-  // Feed captured frames here (typically the capturer's callback).
-  void OnFrame(const capture::CapturedFrame& frame);
+  // Feed captured frames here (typically the capturer's callback). Returns
+  // false if the encoder failed on this frame; `error` explains.
+  bool OnFrame(const capture::CapturedFrame& frame, std::string* error = nullptr);
 
   // Makes the next encoded frame a keyframe.
   void RequestKeyframe() { force_keyframe_ = true; }

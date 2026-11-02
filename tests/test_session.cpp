@@ -21,11 +21,21 @@ namespace {
 // a fake slice NAL; the decoder expands it back.
 class FakeEncoder final : public codec::IHevcEncoder {
  public:
+  bool fail_next = false;
+  std::vector<bool> keyframe_requests;
+
   std::string name() const override { return "fake"; }
   const std::string& last_error() const override { return err_; }
   void SetBitrate(int64_t) override {}
   std::optional<codec::HevcAccessUnit> Encode(const tile::ImageView& img, uint64_t,
                                               bool force_keyframe) override {
+    err_.clear();
+    keyframe_requests.push_back(force_keyframe);
+    if (fail_next) {
+      fail_next = false;
+      err_ = "simulated encoder failure";
+      return std::nullopt;
+    }
     codec::HevcAccessUnit au;
     au.keyframe = force_keyframe;
     if (force_keyframe) au.parameter_sets = {{codec::kNalVps << 1, 1}};
@@ -105,6 +115,28 @@ TEST(Session, FramesFlowAndStaticFramesAreSkipped) {
   EXPECT_EQ(hs.frames_skipped, 1u);
   EXPECT_EQ(hs.frames_encoded, 2u);
   EXPECT_EQ(hs.keyframes, 1u);
+}
+
+TEST(Session, EncoderFailureIsReportedAndForcesKeyframe) {
+  auto [host_end, viewer_end] = transport::MakeLocalPipe();
+  auto enc = std::make_unique<FakeEncoder>();
+  FakeEncoder* raw = enc.get();
+  constexpr int W = 128, H = 64;
+  session::HostSession host(host_end.get(), std::move(enc), W, H);
+  std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 50);
+  capture::CapturedFrame f{{px.data(), W, H, W * 4}, {}, 0};
+  std::string err;
+  ASSERT_TRUE(host.OnFrame(f, &err));  // keyframe
+  px[0] = 1;
+  raw->fail_next = true;
+  EXPECT_FALSE(host.OnFrame(f, &err));
+  EXPECT_EQ(err, "simulated encoder failure");
+  EXPECT_EQ(host.stats().encode_errors, 1u);
+  // The failed frame never reached the viewer, so the next one (even with
+  // unchanged pixels) must be a full refresh.
+  ASSERT_TRUE(host.OnFrame(f, &err));
+  EXPECT_EQ(raw->keyframe_requests, (std::vector<bool>{true, false, true}));
+  EXPECT_EQ(host.stats().frames_encoded, 2u);
 }
 
 TEST(Session, InputReachesHost) {

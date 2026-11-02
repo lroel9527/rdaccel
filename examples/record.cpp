@@ -119,5 +119,9 @@ int main(int argc, char** argv) {
   std::printf("source          : %s @ %d fps\n", source.c_str(), fps);
   PrintStats(host.stats(), secs, fps);
   std::printf("wrote           : %s\n", out.c_str());
+  if (host.stats().frames_encoded == 0) {
+    std::fprintf(stderr, "error: no frame was encoded\n");
+    return 1;
+  }
   return 0;
 }

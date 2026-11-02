@@ -6,6 +6,8 @@
 #import <VideoToolbox/VideoToolbox.h>
 
 #include <cstring>
+#include <string>
+#include <vector>
 #include <mutex>
 #include <optional>
 
@@ -41,7 +43,11 @@ class VtHevcEncoder final : public codec::IHevcEncoder {
     }
   }
 
-  bool Init(const codec::EncoderConfig& cfg, std::string* error) {
+  // Session flavours, best first. kAny lets VideoToolbox pick any encoder,
+  // including a software one where the OS has it.
+  enum class Mode { kLowLatencyHardware, kHardware, kAny };
+
+  bool Init(const codec::EncoderConfig& cfg, Mode mode, std::string* error) {
     cfg_ = cfg;
     NSDictionary* source_attrs = @{
       (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
@@ -49,24 +55,32 @@ class VtHevcEncoder final : public codec::IHevcEncoder {
       (id)kCVPixelBufferHeightKey : @(cfg.height),
       (id)kCVPixelBufferIOSurfacePropertiesKey : @{},
     };
-    // Try low-latency rate control first; fall back to the normal hardware
-    // path if this macOS/chip combination does not offer it for HEVC.
-    for (bool low_latency : {true, false}) {
-      NSMutableDictionary* spec = [NSMutableDictionary dictionary];
+    NSMutableDictionary* spec = [NSMutableDictionary dictionary];
+    if (mode != Mode::kAny) {
       spec[(id)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder] = @YES;
-      if (low_latency) spec[(id)kVTVideoEncoderSpecification_EnableLowLatencyRateControl] = @YES;
-      const OSStatus st = VTCompressionSessionCreate(
-          kCFAllocatorDefault, cfg.width, cfg.height, kCMVideoCodecType_HEVC,
-          (__bridge CFDictionaryRef)spec, (__bridge CFDictionaryRef)source_attrs, kCFAllocatorDefault,
-          &VtHevcEncoder::OnOutput, this, &session_);
-      if (st == noErr) {
-        low_latency_ = low_latency;
-        break;
-      }
-      session_ = nullptr;
-      if (!low_latency && error) *error = OsStatusText("VTCompressionSessionCreate(HEVC)", st);
     }
-    if (!session_) return false;
+    if (mode == Mode::kLowLatencyHardware) {
+      spec[(id)kVTVideoEncoderSpecification_EnableLowLatencyRateControl] = @YES;
+    }
+    const OSStatus st = VTCompressionSessionCreate(
+        kCFAllocatorDefault, cfg.width, cfg.height, kCMVideoCodecType_HEVC,
+        (__bridge CFDictionaryRef)spec, (__bridge CFDictionaryRef)source_attrs, kCFAllocatorDefault,
+        &VtHevcEncoder::OnOutput, this, &session_);
+    if (st != noErr) {
+      session_ = nullptr;
+      if (error) *error = OsStatusText("VTCompressionSessionCreate(HEVC)", st);
+      return false;
+    }
+    low_latency_ = mode == Mode::kLowLatencyHardware;
+    CFBooleanRef hw = nullptr;
+    if (VTSessionCopyProperty(session_, kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
+                              kCFAllocatorDefault, &hw) == noErr &&
+        hw) {
+      hardware_ = CFBooleanGetValue(hw);
+      CFRelease(hw);
+    } else {
+      hardware_ = mode != Mode::kAny;
+    }
 
     SetProp(session_, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue);
     SetProp(session_, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
@@ -84,7 +98,18 @@ class VtHevcEncoder final : public codec::IHevcEncoder {
   }
 
   std::string name() const override {
+    if (!hardware_) return "VideoToolbox HEVC (software)";
     return low_latency_ ? "VideoToolbox HEVC (low-latency)" : "VideoToolbox HEVC";
+  }
+
+  // Encodes one gray keyframe. Some machines (e.g. virtual Macs) create a
+  // session but then fail every frame with kVTVideoEncoderNotAvailableNowErr,
+  // so a session is only trusted after this succeeds.
+  bool Probe(std::string* error) {
+    std::vector<uint8_t> gray(static_cast<size_t>(cfg_.width) * cfg_.height * 4, 0x80);
+    if (Encode({gray.data(), cfg_.width, cfg_.height, cfg_.width * 4}, 0, true)) return true;
+    if (error) *error = error_.empty() ? "encoder produced no output" : error_;
+    return false;
   }
   const std::string& last_error() const override { return error_; }
 
@@ -94,6 +119,7 @@ class VtHevcEncoder final : public codec::IHevcEncoder {
 
   std::optional<codec::HevcAccessUnit> Encode(const tile::ImageView& img, uint64_t pts_us,
                                               bool force_keyframe) override {
+    error_.clear();
     if (img.width != cfg_.width || img.height != cfg_.height) {
       error_ = "frame size changed; recreate the encoder";
       return std::nullopt;
@@ -209,6 +235,7 @@ class VtHevcEncoder final : public codec::IHevcEncoder {
 
   codec::EncoderConfig cfg_;
   VTCompressionSessionRef session_ = nullptr;
+  bool hardware_ = true;
   bool low_latency_ = false;
   std::mutex mu_;
   std::optional<codec::HevcAccessUnit> pending_;
@@ -353,9 +380,23 @@ class VtHevcDecoder final : public codec::IHevcDecoder {
 
 std::unique_ptr<codec::IHevcEncoder> CreateVtHevcEncoder(const codec::EncoderConfig& cfg,
                                                          std::string* error) {
-  auto enc = std::make_unique<VtHevcEncoder>();
-  if (!enc->Init(cfg, error)) return nullptr;
-  return enc;
+  using Mode = VtHevcEncoder::Mode;
+  std::string errors;
+  for (Mode mode : {Mode::kLowLatencyHardware, Mode::kHardware, Mode::kAny}) {
+    std::string err;
+    auto probe = std::make_unique<VtHevcEncoder>();
+    if (probe->Init(cfg, mode, &err) && probe->Probe(&err)) {
+      // Fresh session for the real stream, so it starts at frame 0.
+      probe.reset();
+      auto enc = std::make_unique<VtHevcEncoder>();
+      if (enc->Init(cfg, mode, &err)) return enc;
+    }
+    static const char* kNames[] = {"low-latency hardware", "hardware", "any"};
+    if (!errors.empty()) errors += "; ";
+    errors += std::string(kNames[static_cast<int>(mode)]) + ": " + err;
+  }
+  if (error) *error = "no usable VideoToolbox HEVC encoder (" + errors + ")";
+  return nullptr;
 }
 
 std::unique_ptr<codec::IHevcDecoder> CreateVtHevcDecoder(std::string*) {

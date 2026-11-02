@@ -34,6 +34,8 @@ class IHevcEncoder {
   // Encodes one BGRA frame. Low-latency encoders return the picture right
   // away; nullopt means the encoder produced nothing for this input (e.g. it
   // dropped the frame) or failed, in which case last_error() is set.
+  // last_error() describes the most recent Encode() call only: empty after a
+  // successful call or a deliberate drop.
   virtual std::optional<HevcAccessUnit> Encode(const tile::ImageView& bgra, uint64_t pts_us,
                                                bool force_keyframe) = 0;
 

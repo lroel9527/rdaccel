@@ -34,6 +34,7 @@ struct HostStats {
   uint64_t frames_skipped = 0;  // no tile changed
   uint64_t frames_encoded = 0;
   uint64_t keyframes = 0;
+  uint64_t encode_errors = 0;
   uint64_t bytes_sent = 0;
   uint64_t encode_us_total = 0;
 };
@@ -66,7 +67,8 @@ class Host {
   // the library still compares tiles, so a coarse hint is fine.
   // `capture_time_us` is any monotonic microsecond clock, e.g. NowMicros().
   // The first frame fixes the resolution; frames of another size are rejected.
-  // Calls must not overlap.
+  // Returns false (with `error`) if the frame could not be encoded; the next
+  // frame then becomes a full refresh. Calls must not overlap.
   bool SubmitFrame(const ImageView& bgra, uint64_t capture_time_us,
                    std::span<const Rect> dirty = {}, std::string* error = nullptr);
 

@@ -1,5 +1,6 @@
 #include "rdaccel/host.h"
 
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 
@@ -24,6 +25,7 @@ struct Host::Impl {
   std::mutex submit_mu;  // serializes frames (screen capture vs SubmitFrame)
   std::atomic<bool> failed{false};  // encoder creation failed; drop further frames
   bool size_error_reported = false;
+  uint64_t encode_errors_reported = 0;
   int32_t width = 0, height = 0;
 
   mutable std::mutex mu;  // guards the fields below
@@ -84,7 +86,16 @@ struct Host::Impl {
       }
       return false;
     }
-    session->OnFrame(f);
+    std::string err;
+    if (!session->OnFrame(f, &err)) {
+      if (error) *error = err;
+      // Report the first failure and then one per second's worth of frames,
+      // so a broken encoder is visible without flooding the handler.
+      if (encode_errors_reported++ % static_cast<uint64_t>(std::max(1, config.fps)) == 0) {
+        ReportError("encode failed: " + err);
+      }
+      return false;
+    }
     return true;
   }
 };

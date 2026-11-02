@@ -123,6 +123,7 @@ class FfmpegHevcEncoder final : public codec::IHevcEncoder {
 
   std::optional<codec::HevcAccessUnit> Encode(const tile::ImageView& bgra, uint64_t pts_us,
                                               bool force_keyframe) override {
+    error_.clear();
     if (bgra.width != ctx_->width || bgra.height != ctx_->height) {
       error_ = "frame size changed; recreate the encoder";
       return std::nullopt;
