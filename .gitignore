@@ -1,0 +1,6 @@
+/build*/
+*.rdstream
+*.ppm
+.DS_Store
+.vscode/
+.idea/
