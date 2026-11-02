@@ -1,13 +1,13 @@
 #pragma once
 
-// Tiny --key=value command line parser shared by the tools.
+// Tiny --key=value command line parser shared by the examples.
 
 #include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <string>
 
-namespace rdaccel::tools {
+namespace rdaccel::examples {
 
 class Args {
  public:
@@ -51,4 +51,4 @@ class Args {
   std::string positional_;
 };
 
-}  // namespace rdaccel::tools
+}  // namespace rdaccel::examples

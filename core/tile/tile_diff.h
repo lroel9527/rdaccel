@@ -12,16 +12,11 @@
 #include <vector>
 
 #include "rdaccel/geometry.h"
+#include "rdaccel/image.h"
 
 namespace rdaccel::tile {
 
-// A read-only view of a 32-bit-per-pixel image (BGRA on all platforms).
-struct ImageView {
-  const uint8_t* data = nullptr;
-  int32_t width = 0;
-  int32_t height = 0;
-  int32_t stride = 0;  // bytes per row
-};
+using ImageView = rdaccel::ImageView;
 
 struct TileChange {
   int32_t col = 0;

@@ -5,7 +5,17 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-option(RDACCEL_BUILD_TESTS "Build unit tests" ON)
+# Tests and examples default to on only when rdaccel is the top-level project,
+# so add_subdirectory(rdaccel) in another project builds just the library.
+option(RDACCEL_BUILD_TESTS "Build unit tests" ${PROJECT_IS_TOP_LEVEL})
+option(RDACCEL_BUILD_EXAMPLES "Build example programs" ${PROJECT_IS_TOP_LEVEL})
+option(RDACCEL_INSTALL "Generate install rules" ${PROJECT_IS_TOP_LEVEL})
+
+include(GNUInstallDirs)
+
+if(PROJECT_IS_TOP_LEVEL)
+  set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)
+endif()
 
 if(APPLE)
   enable_language(OBJCXX)
@@ -20,9 +30,18 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
-# core: platform-independent code. Must build and test on Linux and macOS.
+# The library: one target, rdaccel::rdaccel.
+#
+#   include/   public API (the only headers installed)
+#   src/       public API implementation
+#   core/      platform-independent internals
+#   platform/  capture + HEVC codecs, one implementation per OS
 # ---------------------------------------------------------------------------
-add_library(rdaccel_core STATIC
+set(RDACCEL_SOURCES
+  src/host.cpp
+  src/viewer.cpp
+  src/transport.cpp
+  src/misc.cpp
   core/proto/wire.cpp
   core/proto/messages.cpp
   core/tile/tile_diff.cpp
@@ -34,23 +53,43 @@ add_library(rdaccel_core STATIC
   core/session/viewer_session.cpp
   core/io/stream_file.cpp
 )
-target_include_directories(rdaccel_core PUBLIC include core)
-find_package(Threads REQUIRED)
-target_link_libraries(rdaccel_core PUBLIC Threads::Threads)
-
-# ---------------------------------------------------------------------------
-# platform: capture + HEVC codecs. One implementation per OS behind
-# platform/platform.h.
-# ---------------------------------------------------------------------------
 if(APPLE)
-  add_library(rdaccel_platform STATIC
+  list(APPEND RDACCEL_SOURCES
     platform/mac/platform_mac.mm
     platform/mac/capture_sck.mm
     platform/mac/video_vt.mm
   )
-  target_compile_options(rdaccel_platform PRIVATE -fobjc-arc)
-  target_link_libraries(rdaccel_platform PUBLIC
-    rdaccel_core
+elseif(UNIX)
+  list(APPEND RDACCEL_SOURCES
+    platform/linux/platform_linux.cpp
+    platform/linux/capture_x11.cpp
+    platform/linux/video_ffmpeg.cpp
+  )
+else()
+  message(FATAL_ERROR "rdaccel supports macOS and Linux only")
+endif()
+
+add_library(rdaccel ${RDACCEL_SOURCES})
+add_library(rdaccel::rdaccel ALIAS rdaccel)
+set_target_properties(rdaccel PROPERTIES
+  EXPORT_NAME rdaccel
+  VERSION ${PROJECT_VERSION}
+  SOVERSION ${PROJECT_VERSION_MAJOR})
+target_compile_features(rdaccel PUBLIC cxx_std_20)
+target_include_directories(rdaccel
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/platform)
+target_compile_definitions(rdaccel PRIVATE RDACCEL_VERSION_STRING="${PROJECT_VERSION}")
+find_package(Threads REQUIRED)
+target_link_libraries(rdaccel PRIVATE Threads::Threads)
+
+if(APPLE)
+  target_compile_options(rdaccel PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+  target_link_libraries(rdaccel PRIVATE
     "-framework Foundation"
     "-framework CoreMedia"
     "-framework CoreVideo"
@@ -58,38 +97,49 @@ if(APPLE)
     "-framework ScreenCaptureKit"
     "-framework IOSurface"
   )
-elseif(UNIX)
+else()
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale)
   pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11 xext)
-  add_library(rdaccel_platform STATIC
-    platform/linux/platform_linux.cpp
-    platform/linux/capture_x11.cpp
-    platform/linux/video_ffmpeg.cpp
-  )
-  target_link_libraries(rdaccel_platform PUBLIC rdaccel_core PkgConfig::FFMPEG PkgConfig::X11)
+  target_link_libraries(rdaccel PRIVATE PkgConfig::FFMPEG PkgConfig::X11)
 endif()
-target_include_directories(rdaccel_platform PUBLIC platform)
+
+# Internal headers, for the library's own unit tests only. Not installed;
+# applications use include/rdaccel/ alone.
+add_library(rdaccel_internal INTERFACE)
+target_link_libraries(rdaccel_internal INTERFACE rdaccel Threads::Threads)
+target_include_directories(rdaccel_internal INTERFACE
+  ${CMAKE_CURRENT_SOURCE_DIR}/core ${CMAKE_CURRENT_SOURCE_DIR}/platform)
 
 # ---------------------------------------------------------------------------
-# tools (both platforms)
+# install + find_package(rdaccel)
 # ---------------------------------------------------------------------------
-add_executable(rdaccel_record tools/record.cpp)
-target_link_libraries(rdaccel_record PRIVATE rdaccel_platform)
-add_executable(rdaccel_play tools/play.cpp)
-target_link_libraries(rdaccel_play PRIVATE rdaccel_platform)
+if(RDACCEL_INSTALL)
+  include(CMakePackageConfigHelpers)
+  install(TARGETS rdaccel EXPORT rdaccelTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+  install(DIRECTORY include/rdaccel DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+  install(EXPORT rdaccelTargets
+    NAMESPACE rdaccel::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/rdaccel)
+  configure_package_config_file(cmake/rdaccelConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/rdaccelConfig.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/rdaccel)
+  write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/rdaccelConfigVersion.cmake
+    COMPATIBILITY SameMinorVersion)
+  install(FILES
+    ${CMAKE_CURRENT_BINARY_DIR}/rdaccelConfig.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/rdaccelConfigVersion.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/rdaccel)
+endif()
 
-# macOS: single-machine loopback viewer with a window.
-if(APPLE)
-  add_executable(rdaccel_loopback MACOSX_BUNDLE apps/loopback/main.mm)
-  target_compile_options(rdaccel_loopback PRIVATE -fobjc-arc)
-  target_link_libraries(rdaccel_loopback PRIVATE
-    rdaccel_platform
-    "-framework AppKit"
-    "-framework QuartzCore"
-  )
-  set_target_properties(rdaccel_loopback PROPERTIES
-    MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_SOURCE_DIR}/apps/loopback/Info.plist.in)
+# ---------------------------------------------------------------------------
+# examples: programs built on the public API only
+# ---------------------------------------------------------------------------
+if(RDACCEL_BUILD_EXAMPLES)
+  add_subdirectory(examples)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -120,14 +170,15 @@ if(RDACCEL_BUILD_TESTS)
     tests/test_tcp_transport.cpp
     tests/test_session.cpp
   )
-  target_link_libraries(rdaccel_tests PRIVATE rdaccel_core GTest::gtest_main)
+  target_link_libraries(rdaccel_tests PRIVATE rdaccel_internal GTest::gtest_main)
   include(GoogleTest)
   gtest_discover_tests(rdaccel_tests)
 
   # Platform codec round trip: encode synthetic frames with the platform
   # encoder and decode them with the platform decoder.
-  add_executable(rdaccel_platform_tests tests/test_platform_codec.cpp)
-  target_link_libraries(rdaccel_platform_tests PRIVATE rdaccel_platform GTest::gtest_main)
+  # The public API test (test_api.cpp) uses only include/rdaccel/.
+  add_executable(rdaccel_platform_tests tests/test_platform_codec.cpp tests/test_api.cpp)
+  target_link_libraries(rdaccel_platform_tests PRIVATE rdaccel_internal GTest::gtest_main)
   gtest_discover_tests(rdaccel_platform_tests DISCOVERY_TIMEOUT 30
     PROPERTIES ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan.supp")
 endif()

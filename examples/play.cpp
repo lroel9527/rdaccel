@@ -1,11 +1,14 @@
-// rdaccel_play: decode an .rdstream file and report what came out.
+// rdaccel_play: decode an .rdstream recording and report what came out, using
+// only the public API (rdaccel/rdaccel.h).
 //
 //   rdaccel_play IN.rdstream [--check-synthetic] [--dump=DIR] [--dump-every=60]
 //
-// --check-synthetic regenerates the synthetic source frame for every decoded
-// frame and prints the PSNR, which proves a stream recorded on one platform
-// decodes correctly on the other. --dump writes decoded frames as .ppm files.
+// --check-synthetic regenerates the test pattern for every decoded frame and
+// prints the PSNR, which proves a stream recorded on one platform decodes
+// correctly on the other. --dump writes decoded frames as .ppm files.
 // Exit code is non-zero if any frame failed to decode or PSNR is too low.
+
+#include <rdaccel/rdaccel.h>
 
 #include <algorithm>
 #include <cmath>
@@ -14,17 +17,11 @@
 #include <vector>
 
 #include "args.h"
-#include "capture/synthetic_capturer.h"
-#include "io/stream_file.h"
-#include "platform.h"
-#include "session/viewer_session.h"
-
-using namespace rdaccel;
 
 namespace {
 
 // PSNR over the RGB channels (alpha ignored).
-double Psnr(const tile::ImageView& a, const std::vector<uint8_t>& b) {
+double Psnr(const rdaccel::ImageView& a, const std::vector<uint8_t>& b) {
   double se = 0;
   for (int32_t y = 0; y < a.height; ++y) {
     const uint8_t* pa = a.data + static_cast<size_t>(y) * a.stride;
@@ -39,7 +36,7 @@ double Psnr(const tile::ImageView& a, const std::vector<uint8_t>& b) {
   return mse == 0 ? 99.0 : 10.0 * std::log10(255.0 * 255.0 / mse);
 }
 
-void WritePpm(const std::string& path, const tile::ImageView& img) {
+void WritePpm(const std::string& path, const rdaccel::ImageView& img) {
   std::FILE* f = std::fopen(path.c_str(), "wb");
   if (!f) return;
   std::fprintf(f, "P6\n%d %d\n255\n", img.width, img.height);
@@ -59,7 +56,7 @@ void WritePpm(const std::string& path, const tile::ImageView& img) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  tools::Args args(argc, argv);
+  rdaccel::examples::Args args(argc, argv);
   std::string in = args.str("in", args.positional());
   if (in.empty()) {
     std::fprintf(stderr, "usage: rdaccel_play FILE [--check-synthetic] [--dump=DIR]\n");
@@ -72,35 +69,30 @@ int main(int argc, char** argv) {
 
   std::vector<uint8_t> bytes;
   std::string err;
-  if (!io::ReadStreamFile(in, bytes, &err)) {
+  if (!rdaccel::ReadRecording(in, bytes, &err)) {
     std::fprintf(stderr, "%s\n", err.c_str());
     return 1;
   }
-  auto dec = platform::CreateHevcDecoder(&err);
-  if (!dec) {
-    std::fprintf(stderr, "%s\n", err.c_str());
-    return 1;
-  }
-  const std::string dec_name = dec->name();
 
-  session::ViewerSession viewer(nullptr, std::move(dec));
-  proto::Hello hello;
-  viewer.SetHelloHandler([&](const proto::Hello& h) { hello = h; });
-
+  int32_t stream_w = 0, stream_h = 0;
   std::vector<uint8_t> ref;
   double psnr_sum = 0, psnr_min = 1e9;
-  uint64_t frames = 0, keyframes_seen = 0;
-  std::vector<uint64_t> region_counts;
-  viewer.SetFrameHandler([&](const tile::ImageView& img, const std::vector<Rect>& regions,
-                             uint64_t frame_id, uint64_t) {
+  uint64_t frames = 0, full_frames = 0;
+
+  rdaccel::ViewerHandlers handlers;
+  handlers.on_stream_info = [&](int32_t w, int32_t h) {
+    stream_w = w;
+    stream_h = h;
+  };
+  handlers.on_frame = [&](const rdaccel::ImageView& img, std::span<const rdaccel::Rect> changed,
+                          const rdaccel::FrameInfo& info) {
     ++frames;
-    if (regions.empty()) ++keyframes_seen;
-    region_counts.push_back(regions.size());
+    if (changed.empty()) ++full_frames;
     if (check) {
-      // Synthetic recordings never skip frames: frame_id N is source frame N-1.
-      // An empty buffer forces a full, from-scratch render of that frame.
+      // Synthetic recordings never skip frames: frame_id N is pattern frame
+      // N-1. An empty buffer renders that frame from scratch.
       ref.clear();
-      capture::RenderSyntheticFrame(frame_id - 1, img.width, img.height, ref);
+      rdaccel::RenderTestPattern(info.frame_id - 1, img.width, img.height, ref);
       const double p = Psnr(img, ref);
       psnr_sum += p;
       psnr_min = std::min(psnr_min, p);
@@ -108,18 +100,23 @@ int main(int argc, char** argv) {
     if (!dump.empty() && (frames == 1 || frames % dump_every == 0)) {
       char name[64];
       std::snprintf(name, sizeof(name), "/frame_%06llu.ppm",
-                    static_cast<unsigned long long>(frame_id));
+                    static_cast<unsigned long long>(info.frame_id));
       WritePpm(dump + name, img);
     }
-  });
-  viewer.FeedVideoBytes(bytes);
+  };
+  auto viewer = rdaccel::Viewer::Create(nullptr, std::move(handlers), &err);
+  if (!viewer) {
+    std::fprintf(stderr, "%s\n", err.c_str());
+    return 1;
+  }
+  viewer->FeedRecording(bytes);
 
-  const auto st = viewer.stats();
-  std::printf("platform        : %s\n", platform::PlatformName());
-  std::printf("decoder         : %s\n", dec_name.c_str());
-  std::printf("stream          : %ux%u, %zu bytes\n", hello.width, hello.height, bytes.size());
+  const auto st = viewer->stats();
+  std::printf("platform        : %s\n", rdaccel::PlatformName());
+  std::printf("decoder         : %s\n", viewer->decoder_name().c_str());
+  std::printf("stream          : %dx%d, %zu bytes\n", stream_w, stream_h, bytes.size());
   std::printf("frames decoded  : %llu (%llu full-screen)\n", static_cast<unsigned long long>(frames),
-              static_cast<unsigned long long>(keyframes_seen));
+              static_cast<unsigned long long>(full_frames));
   std::printf("decode errors   : %llu\n", static_cast<unsigned long long>(st.decode_errors));
   if (st.frames_decoded > 0) {
     std::printf("decode time     : %.2f ms/frame avg\n",

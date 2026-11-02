@@ -9,17 +9,13 @@
 #include <optional>
 
 #include "codec/video_codec.h"
+#include "rdaccel/viewer.h"
 #include "proto/messages.h"
 #include "transport/transport.h"
 
 namespace rdaccel::session {
 
-struct ViewerStats {
-  uint64_t frames_decoded = 0;
-  uint64_t decode_errors = 0;
-  uint64_t bytes_received = 0;
-  uint64_t decode_us_total = 0;
-};
+using ViewerStats = rdaccel::ViewerStats;
 
 class ViewerSession {
  public:
@@ -29,7 +25,12 @@ class ViewerSession {
                                      uint64_t frame_id, uint64_t capture_time_us)>;
   using HelloFn = std::function<void(const proto::Hello&)>;
 
+  // `transport` may be null (file playback, or attach later with Attach()).
   ViewerSession(transport::ITransport* transport, std::unique_ptr<codec::IHevcDecoder> decoder);
+
+  // Starts receiving from `transport`. Lets callers install handlers first so
+  // the first frames are not lost.
+  void Attach(transport::ITransport* transport);
 
   void SetHelloHandler(HelloFn fn);
   void SetFrameHandler(FrameFn fn);
@@ -44,7 +45,7 @@ class ViewerSession {
   void OnReceive(transport::Channel ch, std::span<const uint8_t> bytes);
   void Handle(proto::Message&& m);
 
-  transport::ITransport* transport_;
+  transport::ITransport* transport_ = nullptr;
   std::unique_ptr<codec::IHevcDecoder> decoder_;
   proto::StreamParser video_parser_;
   proto::StreamParser control_parser_;

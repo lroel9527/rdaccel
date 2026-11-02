@@ -1,4 +1,5 @@
-// rdaccel_loopback: host and viewer in one macOS process.
+// rdaccel_loopback: host and viewer in one macOS process. An example of
+// embedding the library; it uses only the public API (rdaccel/rdaccel.h).
 //
 //   ScreenCaptureKit -> tile diff -> VideoToolbox HEVC encode -> local pipe
 //   -> VideoToolbox HEVC decode -> window
@@ -13,19 +14,12 @@
 #import <AppKit/AppKit.h>
 #import <QuartzCore/QuartzCore.h>
 
+#include <rdaccel/rdaccel.h>
+
 #include <atomic>
 #include <cstdio>
 #include <memory>
-#include <mutex>
 #include <string>
-
-#include "capture/capturer.h"
-#include "platform.h"
-#include "session/host_session.h"
-#include "session/viewer_session.h"
-#include "transport/local_pipe.h"
-
-using namespace rdaccel;
 
 namespace {
 
@@ -47,18 +41,14 @@ long ArgNum(const char* key, long def) {
   CALayer* _layer;
   NSTimer* _timer;
 
-  std::unique_ptr<transport::LocalPipeEndpoint> _hostEnd, _viewerEnd;
-  std::unique_ptr<capture::ICapturer> _capturer;
-  std::unique_ptr<session::HostSession> _host;
-  std::unique_ptr<session::ViewerSession> _viewer;
-  std::mutex _hostMu;
-  std::string _encoderName;
+  std::unique_ptr<rdaccel::Host> _host;
+  std::unique_ptr<rdaccel::Viewer> _viewer;
 
   std::atomic<bool> _presentPending;
-  std::atomic<bool> _failed;
   std::atomic<uint64_t> _latencySumUs, _latencyCount, _presented;
-  session::HostStats _lastHost;
-  session::ViewerStats _lastViewer;
+  rdaccel::HostStats _lastHost;
+  rdaccel::ViewerStats _lastViewer;
+  bool _printedEncoder;
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification*)note {
@@ -77,29 +67,34 @@ long ArgNum(const char* key, long def) {
   [_window makeKeyAndOrderFront:nil];
   [NSApp activateIgnoringOtherApps:YES];
 
-  auto [h, v] = transport::MakeLocalPipe();
-  _hostEnd = std::move(h);
-  _viewerEnd = std::move(v);
+  auto [hostEnd, viewerEnd] = rdaccel::CreateLocalPipe();
 
   std::string err;
-  auto decoder = platform::CreateHevcDecoder(&err);
-  _viewer = std::make_unique<session::ViewerSession>(_viewerEnd.get(), std::move(decoder));
   __weak AppDelegate* weakSelf = self;
-  _viewer->SetFrameHandler([weakSelf](const tile::ImageView& img, const std::vector<Rect>&,
-                                      uint64_t, uint64_t capture_time_us) {
-    [weakSelf presentFrame:img captureTime:capture_time_us];
-  });
+  rdaccel::ViewerHandlers handlers;
+  handlers.on_frame = [weakSelf](const rdaccel::ImageView& img, std::span<const rdaccel::Rect>,
+                                 const rdaccel::FrameInfo& info) {
+    [weakSelf presentFrame:img captureTime:info.capture_time_us];
+  };
+  _viewer = rdaccel::Viewer::Create(std::move(viewerEnd), std::move(handlers), &err);
+  if (!_viewer) {
+    [self fail:[NSString stringWithUTF8String:err.c_str()]];
+    return;
+  }
 
-  const int fps = static_cast<int>(ArgNum("fps", 60));
-  const long bitrate = ArgNum("bitrate", 8'000'000);
-  _capturer = platform::CreateScreenCapturer(&err);
-  capture::CaptureConfig cc;
-  cc.fps = fps;
-  const bool ok = _capturer->Start(cc, [weakSelf, fps, bitrate](const capture::CapturedFrame& f) {
-    [weakSelf onCaptured:f fps:fps bitrate:bitrate];
+  rdaccel::HostConfig cfg;
+  cfg.fps = static_cast<int32_t>(ArgNum("fps", 60));
+  cfg.bitrate_bps = ArgNum("bitrate", 8'000'000);
+  _host = std::make_unique<rdaccel::Host>(std::move(hostEnd), cfg);
+  _host->SetErrorHandler([weakSelf](const std::string& e) {
+    NSString* msg = [NSString stringWithUTF8String:e.c_str()];
+    // Called on the capture queue; never stop capture from there.
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [weakSelf fail:msg];
+    });
   });
-  if (!ok) {
-    [self fail:[NSString stringWithUTF8String:_capturer->last_error().c_str()]];
+  if (!_host->StartScreenCapture(&err)) {
+    [self fail:[NSString stringWithUTF8String:err.c_str()]];
     return;
   }
   _timer = [NSTimer scheduledTimerWithTimeInterval:1.0
@@ -109,35 +104,10 @@ long ArgNum(const char* key, long def) {
                                            repeats:YES];
 }
 
-- (void)onCaptured:(const capture::CapturedFrame&)f fps:(int)fps bitrate:(long)bitrate {
-  if (_failed) return;
-  std::lock_guard<std::mutex> lock(_hostMu);
-  if (!_host) {
-    codec::EncoderConfig cfg{f.bgra.width, f.bgra.height, fps, bitrate};
-    std::string err;
-    auto enc = platform::CreateHevcEncoder(cfg, "", &err);
-    if (!enc) {
-      NSString* msg = [NSString stringWithUTF8String:err.c_str()];
-      // Don't stop the capturer from inside its own callback queue (that
-      // would deadlock); just ignore further frames and quit.
-      _failed = true;
-      dispatch_async(dispatch_get_main_queue(), ^{
-        [self fail:msg];
-      });
-      return;
-    }
-    _encoderName = enc->name();
-    std::printf("capture %dx%d, encoder: %s\n", f.bgra.width, f.bgra.height, _encoderName.c_str());
-    _host = std::make_unique<session::HostSession>(_hostEnd.get(), std::move(enc), f.bgra.width,
-                                                   f.bgra.height);
-  }
-  _host->OnFrame(f);
-}
-
 // Runs on the viewer's transport thread. Copies the picture (the view is only
 // valid during the callback) and hands it to the main thread, dropping frames
 // if the main thread is still busy with the previous one.
-- (void)presentFrame:(const tile::ImageView&)img captureTime:(uint64_t)captureTime {
+- (void)presentFrame:(const rdaccel::ImageView&)img captureTime:(uint64_t)captureTime {
   if (_presentPending.exchange(true)) return;
   const size_t bytes = static_cast<size_t>(img.stride) * img.height;
   CFDataRef data = CFDataCreate(kCFAllocatorDefault, img.data, static_cast<CFIndex>(bytes));
@@ -155,7 +125,7 @@ long ArgNum(const char* key, long def) {
     self->_layer.contents = (__bridge id)image;
     [CATransaction commit];
     CGImageRelease(image);
-    const uint64_t now = capture::MonotonicMicros();
+    const uint64_t now = rdaccel::NowMicros();
     self->_latencySumUs += now - captureTime;
     ++self->_latencyCount;
     ++self->_presented;
@@ -164,13 +134,14 @@ long ArgNum(const char* key, long def) {
 }
 
 - (void)tick {
-  session::HostStats hs;
-  {
-    std::lock_guard<std::mutex> lock(_hostMu);
-    if (!_host) return;
-    hs = _host->stats();
-  }
+  if (!_host || !_viewer) return;
+  const auto hs = _host->stats();
   const auto vs = _viewer->stats();
+  if (!_printedEncoder && hs.frames_encoded > 0) {
+    _printedEncoder = YES;
+    std::printf("encoder: %s, decoder: %s\n", _host->encoder_name().c_str(),
+                _viewer->decoder_name().c_str());
+  }
   const uint64_t enc = hs.frames_encoded - _lastHost.frames_encoded;
   const double kbps = (hs.bytes_sent - _lastHost.bytes_sent) * 8.0 / 1000.0;
   const double enc_ms = enc ? (hs.encode_us_total - _lastHost.encode_us_total) / 1000.0 / enc : 0;
@@ -206,7 +177,9 @@ long ArgNum(const char* key, long def) {
 
 - (void)applicationWillTerminate:(NSNotification*)note {
   [_timer invalidate];
-  if (_capturer) _capturer->Stop();
+  // Host first: it stops capture, and nothing feeds the viewer after that.
+  _host.reset();
+  _viewer.reset();
 }
 
 @end

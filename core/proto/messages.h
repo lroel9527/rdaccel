@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "rdaccel/geometry.h"
+#include "rdaccel/input.h"
 
 namespace rdaccel::proto {
 
@@ -95,25 +96,8 @@ struct CursorShape {
   friend bool operator==(const CursorShape&, const CursorShape&) = default;
 };
 
-enum class InputKind : uint8_t {
-  kMouseMove = 1,
-  kMouseDown = 2,
-  kMouseUp = 3,
-  kScroll = 4,
-  kKeyDown = 5,
-  kKeyUp = 6,
-};
-
-struct InputEvent {
-  InputKind kind = InputKind::kMouseMove;
-  int32_t x = 0;        // host physical pixels (mouse events)
-  int32_t y = 0;
-  int32_t delta_x = 0;  // scroll
-  int32_t delta_y = 0;
-  uint32_t code = 0;    // mouse button or macOS virtual key code
-  uint32_t modifiers = 0;
-  friend bool operator==(const InputEvent&, const InputEvent&) = default;
-};
+using InputKind = rdaccel::InputKind;
+using InputEvent = rdaccel::InputEvent;
 
 // Viewer -> host: one entry per presented frame.
 struct Feedback {

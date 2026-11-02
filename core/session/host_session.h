@@ -11,6 +11,7 @@
 #include <mutex>
 
 #include "capture/capturer.h"
+#include "rdaccel/host.h"
 #include "codec/video_codec.h"
 #include "proto/messages.h"
 #include "tile/tile_diff.h"
@@ -18,14 +19,7 @@
 
 namespace rdaccel::session {
 
-struct HostStats {
-  uint64_t frames_captured = 0;
-  uint64_t frames_skipped = 0;  // no tile changed
-  uint64_t frames_encoded = 0;
-  uint64_t keyframes = 0;
-  uint64_t bytes_sent = 0;
-  uint64_t encode_us_total = 0;
-};
+using HostStats = rdaccel::HostStats;
 
 class HostSession {
  public:

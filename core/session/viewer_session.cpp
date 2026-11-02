@@ -6,11 +6,14 @@ namespace rdaccel::session {
 
 ViewerSession::ViewerSession(transport::ITransport* transport,
                              std::unique_ptr<codec::IHevcDecoder> decoder)
-    : transport_(transport), decoder_(std::move(decoder)) {
-  if (transport_) {
-    transport_->SetReceiver(
-        [this](transport::Channel ch, std::span<const uint8_t> bytes) { OnReceive(ch, bytes); });
-  }
+    : decoder_(std::move(decoder)) {
+  if (transport) Attach(transport);
+}
+
+void ViewerSession::Attach(transport::ITransport* transport) {
+  transport_ = transport;
+  transport_->SetReceiver(
+      [this](transport::Channel ch, std::span<const uint8_t> bytes) { OnReceive(ch, bytes); });
 }
 
 void ViewerSession::SetHelloHandler(HelloFn fn) {
