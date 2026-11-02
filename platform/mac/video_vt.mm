@@ -183,30 +183,13 @@ class VtHevcEncoder final : public codec::IHevcEncoder {
     if ((flags & kVTEncodeInfo_FrameDropped) || !sample) return;
 
     codec::HevcAccessUnit au;
-    CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(sample, false);
-    au.keyframe = true;
-    if (attachments && CFArrayGetCount(attachments) > 0) {
-      auto dict = static_cast<CFDictionaryRef>(CFArrayGetValueAtIndex(attachments, 0));
-      au.keyframe = !CFDictionaryContainsKey(dict, kCMSampleAttachmentKey_NotSync);
-    }
-
+    CMFormatDescriptionRef fmt = CMSampleBufferGetFormatDescription(sample);
     int nal_len_size = 4;
-    if (au.keyframe) {
-      CMFormatDescriptionRef fmt = CMSampleBufferGetFormatDescription(sample);
-      size_t count = 0;
-      if (CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(fmt, 0, nullptr, nullptr, &count,
-                                                             &nal_len_size) != noErr) {
-        callback_error_ = "could not read HEVC parameter sets";
-        return;
-      }
-      for (size_t i = 0; i < count; ++i) {
-        const uint8_t* ps = nullptr;
-        size_t ps_size = 0;
-        if (CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(fmt, i, &ps, &ps_size, nullptr,
-                                                               nullptr) == noErr) {
-          au.parameter_sets.emplace_back(ps, ps + ps_size);
-        }
-      }
+    size_t ps_count = 0;
+    if (CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(fmt, 0, nullptr, nullptr, &ps_count,
+                                                           &nal_len_size) != noErr) {
+      callback_error_ = "could not read the HEVC format description";
+      return;
     }
 
     CMBlockBufferRef block = CMSampleBufferGetDataBuffer(sample);
@@ -216,18 +199,43 @@ class VtHevcEncoder final : public codec::IHevcEncoder {
       callback_error_ = "could not copy encoded data";
       return;
     }
-    if (nal_len_size == 4) {
-      au.nal_data = std::move(raw);
-    } else {
-      // Re-frame with 4-byte lengths, which is what the wire format uses.
-      size_t i = 0;
-      while (i + static_cast<size_t>(nal_len_size) <= raw.size()) {
-        size_t len = 0;
-        for (int b = 0; b < nal_len_size; ++b) len = (len << 8) | raw[i + b];
-        i += static_cast<size_t>(nal_len_size);
-        if (len > raw.size() - i) break;
-        codec::AppendLengthPrefixed({raw.data() + i, len}, au.nal_data);
-        i += len;
+
+    // Re-frame with 4-byte lengths (the wire format) and look at the NAL
+    // types directly. The NotSync attachment is not reliable across encoders
+    // (the software HEVC encoder does not mark its first frame), but an IRAP
+    // NAL unit always means a keyframe. Parameter sets that an encoder puts
+    // in-band are moved out, as the wire format carries them separately.
+    size_t i = 0;
+    while (i + static_cast<size_t>(nal_len_size) <= raw.size()) {
+      size_t len = 0;
+      for (int b = 0; b < nal_len_size; ++b) len = (len << 8) | raw[i + b];
+      i += static_cast<size_t>(nal_len_size);
+      if (len == 0 || len > raw.size() - i) break;
+      const std::span<const uint8_t> nal(raw.data() + i, len);
+      i += len;
+      const uint8_t type = codec::HevcNalTypeOf(nal);
+      if (codec::IsHevcParameterSet(type)) {
+        au.parameter_sets.emplace_back(nal.begin(), nal.end());
+        continue;
+      }
+      if (type == codec::kNalAud) continue;
+      if (codec::IsHevcIrap(type)) au.keyframe = true;
+      codec::AppendLengthPrefixed(nal, au.nal_data);
+    }
+    if (au.nal_data.empty()) {
+      callback_error_ = "encoder output had no picture data";
+      return;
+    }
+    if (!au.keyframe) {
+      au.parameter_sets.clear();
+    } else if (au.parameter_sets.empty()) {
+      for (size_t k = 0; k < ps_count; ++k) {
+        const uint8_t* ps = nullptr;
+        size_t ps_size = 0;
+        if (CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(fmt, k, &ps, &ps_size, nullptr,
+                                                               nullptr) == noErr) {
+          au.parameter_sets.emplace_back(ps, ps + ps_size);
+        }
       }
     }
     pending_ = std::move(au);
