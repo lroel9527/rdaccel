@@ -9,7 +9,6 @@
 
 #include <cmath>
 
-using rdaccel::Rect;
 using rdaccel::capture::CapturedFrame;
 using rdaccel::capture::FrameFn;
 
@@ -67,7 +66,8 @@ using rdaccel::capture::FrameFn;
       const auto y0 = static_cast<int32_t>(std::floor((r.origin.y - content.origin.y) * scale));
       const auto x1 = static_cast<int32_t>(std::ceil((CGRectGetMaxX(r) - content.origin.x) * scale));
       const auto y1 = static_cast<int32_t>(std::ceil((CGRectGetMaxY(r) - content.origin.y) * scale));
-      f.dirty.push_back(Rect{x0, y0, x1 - x0, y1 - y0});
+      // Qualified: MacTypes.h also declares a global Rect.
+      f.dirty.push_back(rdaccel::Rect{x0, y0, x1 - x0, y1 - y0});
     }
   }
 
