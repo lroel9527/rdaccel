@@ -120,4 +120,4 @@ cmake/             find_package 配置模板
 
 ## 许可
 
-尚未选定开源许可证。Linux 版链接 x265（GPL），带 x265 的二进制需按 GPL 分发。
+[Apache License 2.0](LICENSE)。Linux 版链接 FFmpeg，可能用到 x265（GPL）；带 x265 的二进制需按 GPL 分发，见 [NOTICE](NOTICE)。

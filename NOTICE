@@ -1,0 +1,8 @@
+rdaccel
+Copyright 2026 lroel9527 and rdaccel contributors
+
+This product is licensed under the Apache License, Version 2.0.
+
+On Linux, rdaccel links FFmpeg and may use libx265, which is licensed under
+the GNU GPL. Binaries that include libx265 must be distributed under the
+terms of the GPL.
