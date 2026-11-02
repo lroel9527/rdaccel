@@ -114,7 +114,8 @@ long ArgNum(const char* key, long def) {
   CGDataProviderRef provider = CGDataProviderCreateWithCFData(data);
   CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
   CGImageRef image = CGImageCreate(img.width, img.height, 8, 32, img.stride, cs,
-                                   static_cast<CGBitmapInfo>(kCGBitmapByteOrder32Little | kCGImageAlphaNoneSkipFirst), provider,
+                                   static_cast<CGBitmapInfo>(kCGBitmapByteOrder32Little) |
+                                       static_cast<CGBitmapInfo>(kCGImageAlphaNoneSkipFirst), provider,
                                    nullptr, false, kCGRenderingIntentDefault);
   CGColorSpaceRelease(cs);
   CGDataProviderRelease(provider);
@@ -184,7 +185,7 @@ long ArgNum(const char* key, long def) {
 
 @end
 
-int main(int argc, const char* argv[]) {
+int main() {
   @autoreleasepool {
     NSApplication* app = NSApplication.sharedApplication;
     app.activationPolicy = NSApplicationActivationPolicyRegular;

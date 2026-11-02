@@ -91,6 +91,7 @@ if(APPLE)
   target_compile_options(rdaccel PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
   target_link_libraries(rdaccel PRIVATE
     "-framework Foundation"
+    "-framework CoreGraphics"
     "-framework CoreMedia"
     "-framework CoreVideo"
     "-framework VideoToolbox"
