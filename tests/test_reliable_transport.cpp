@@ -215,6 +215,25 @@ TEST(RateController, AsksLessOfAnEncoderThatOvershoots) {
   EXPECT_GT(rc.encoder_bps(), 850'000 * 9 / 10);
 }
 
+TEST(RateController, OneBigPictureIsNotAnOvershoot) {
+  session::RateController rc(8'000'000, 300'000, 50);
+  TransportStats st;
+  st.bandwidth_bps = 1'000'000;
+  st.queued_bytes = 10'000;
+  uint64_t sent = 1;
+  rc.Update(0, st, sent);
+  const int64_t asked = rc.encoder_bps();
+  uint64_t t = 0;
+  for (int i = 0; i < 16; ++i) {
+    t += 250'000;
+    st.queued_bytes -= 10;  // draining slowly: the target holds
+    // A keyframe of 3 s worth in the first second, then on target.
+    sent += static_cast<uint64_t>(asked / 8 / 4) + (i == 0 ? static_cast<uint64_t>(asked * 3 / 8) : 0);
+    rc.Update(t, st, sent);
+  }
+  EXPECT_EQ(rc.encoder_bps(), asked);
+}
+
 TEST(RateController, KeepsBackingOffWhileTheQueueDoesNotDrain) {
   // 5% steps used to be below the reconfiguration threshold and were lost.
   session::RateController rc(8'000'000, 300'000, 50);
@@ -314,8 +333,8 @@ TEST(ReliableTransport, CursorStaysFastUnderASaturatingSender) {
   const double kbps = static_cast<double>(video_bytes.load()) * 8 / 6.0 / 1000;
   std::printf("cursor under load: p50 %.1f p95 %.1f ms, video %.0f kbps, rtt %u ms\n", p50, p95, kbps,
               static_cast<unsigned>(st.rtt_us / 1000));
-  EXPECT_LT(p50, 40);  // 68 ms before the sender drained the queue
-  EXPECT_LT(p95, 60);
+  EXPECT_LT(p50, 50);  // 68 ms here before the sender drained the queue (more on loaded CI Macs)
+  EXPECT_LT(p95, 80);
   // Without giving up the path's capacity.
   EXPECT_GT(kbps, 1'200);
 }

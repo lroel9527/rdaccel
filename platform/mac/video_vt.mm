@@ -1,7 +1,5 @@
 #include "mac/video_vt.h"
 
-#include "log/log.h"
-
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
@@ -31,29 +29,11 @@ void SetIntProp(VTSessionRef s, CFStringRef key, int64_t v) {
   CFRelease(n);
 }
 
-// The target rate: AverageBitRate alone is a long-run average that the
-// low-latency rate control overshoots for seconds after a cut (seen at
-// 1 Mbps: ~1.5 Mbps out). DataRateLimits adds a hard cap per second, with
-// some headroom so a keyframe still fits.
-void SetRate(VTSessionRef s, int64_t bps) {
-  SetIntProp(s, kVTCompressionPropertyKey_AverageBitRate, bps);
-  const double bytes = static_cast<double>(bps) / 8.0 * 1.25;
-  const double seconds = 1.0;
-  CFNumberRef b = CFNumberCreate(kCFAllocatorDefault, kCFNumberDoubleType, &bytes);
-  CFNumberRef t = CFNumberCreate(kCFAllocatorDefault, kCFNumberDoubleType, &seconds);
-  const void* pair[2] = {b, t};
-  CFArrayRef limits = CFArrayCreate(kCFAllocatorDefault, pair, 2, &kCFTypeArrayCallBacks);
-  const OSStatus st = VTSessionSetProperty(s, kVTCompressionPropertyKey_DataRateLimits, limits);
-  static std::once_flag once;
-  if (st != noErr) {
-    std::call_once(once, [st] {
-      log::Info("VideoToolbox: DataRateLimits not supported here (" + std::to_string(st) + "), AverageBitRate only");
-    });
-  }
-  CFRelease(limits);
-  CFRelease(t);
-  CFRelease(b);
-}
+// The target rate. Only AverageBitRate: a DataRateLimits cap made the
+// encoder drop pictures that did not fit (a keyframe at 1.5 Mbps never did,
+// so no first picture for seconds). Overshoot is corrected by the host's
+// rate controller from what the encoder really produces.
+void SetRate(VTSessionRef s, int64_t bps) { SetIntProp(s, kVTCompressionPropertyKey_AverageBitRate, bps); }
 
 // ---------------------------------------------------------------------------
 // Encoder

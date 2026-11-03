@@ -85,6 +85,8 @@ class ReliableTransport final : public transport::ITransport {
   void OnRateSample(const SentPacket& p, uint64_t now);
   uint64_t QueuedBytes() const;
   uint64_t Cwnd() const;
+  // The round trip shows a standing queue at the bottleneck.
+  bool PathQueued() const;
   double PacingRate() const;  // bytes per microsecond
   void UpdatePacingRate();
   uint64_t Pto() const;

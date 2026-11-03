@@ -11,7 +11,7 @@
 //     bound while the sender is application limited), between `min_bps` and
 //     the configured bitrate;
 //   * encoders do not always keep to the rate they are given (VideoToolbox
-//     overshoots at low rates): when what was really sent over a second
+//     overshoots at low rates): when what they produced over a second
 //     exceeds the target, the encoder is asked for proportionally less;
 //   * a round trip well above the lowest one seen means a queue is building
 //     inside the network (the path slowed down before the bandwidth estimate
@@ -34,8 +34,9 @@ class RateController {
     int64_t new_target_bps = 0;  // 0 = unchanged
   };
 
-  // `sent_bytes`: everything the host has handed the transport so far
-  // (0 = not known). It shows what the encoder really produces.
+  // `sent_bytes`: the encoders' output so far (HEVC payload; lossless tiles
+  // are not theirs to correct), 0 = not known. It shows what they really
+  // produce.
   Decision Update(uint64_t now_us, const TransportStats& st, uint64_t sent_bytes = 0);
 
   int64_t target_bps() const { return target_; }
@@ -56,6 +57,7 @@ class RateController {
   uint32_t min_rtt_us_ = 0;  // lowest smoothed RTT seen
   int64_t encoder_ = 0;      // last rate given to the encoder (0 = the configured one)
   double scale_ = 1;         // encoder rate = target * scale
+  bool over_before_ = false;  // the last window overshot too
   uint64_t window_start_us_ = 0, window_bytes_ = 0;  // output measured since the last change
 };
 

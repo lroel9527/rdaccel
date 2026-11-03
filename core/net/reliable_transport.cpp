@@ -137,13 +137,22 @@ uint64_t ReliableTransport::QueuedBytes() const {
 uint64_t ReliableTransport::Cwnd() const {
   if (!opt_.congestion_control) return UINT64_MAX;
   if (bw_ <= 0 || min_rtt_ == 0) return kInitialCwnd;
-  const double gain = mode_ == Mode::kStartup ? kStartupGain : 2.0;
+  // While a queue stands in the network the window shrinks to about one
+  // path's worth: with coarse timers (macOS wakes threads several ms late)
+  // pacing alone does not hold the rate down, and a 2x window would keep a
+  // full round trip of video queued ahead of every cursor update.
+  const bool queued = mode_ == Mode::kProbeBw && PathQueued();
+  const double gain = mode_ == Mode::kStartup ? kStartupGain : queued ? 1.25 : 2.0;
   // A few packets on top absorb delayed and stretched acknowledgements.
   const auto bdp = static_cast<uint64_t>(gain * bw_ * static_cast<double>(min_rtt_));
-  const uint64_t cwnd = std::max(bdp + 4 * kMaxDatagram, kMinCwnd);
+  const uint64_t cwnd = std::max(bdp + (queued ? 3 : 4) * kMaxDatagram, kMinCwnd);
   // Like the pacing rate, the window does not shrink below its initial
   // size before the path has been measured under load.
   return mode_ == Mode::kStartup ? std::max(cwnd, kInitialCwnd) : cwnd;
+}
+
+bool ReliableTransport::PathQueued() const {
+  return min_rtt_ > 0 && latest_rtt_ > min_rtt_ + std::max<uint64_t>(min_rtt_ / 4, 5'000) + kMaxAckDelay;
 }
 
 double ReliableTransport::PacingRate() const {
@@ -166,9 +175,7 @@ void ReliableTransport::UpdatePacingRate() {
       // arrive in bunches), which would keep the queue as long as the
       // window allows. While the round trip shows a queue, send a little
       // slower than the estimate (and skip probing up) until it drains.
-      if (gain >= 1 && min_rtt_ > 0 && latest_rtt_ > min_rtt_ + std::max<uint64_t>(min_rtt_ / 4, 5'000) + kMaxAckDelay) {
-        gain = kQueueDrainGain;
-      }
+      if (gain >= 1 && PathQueued()) gain = kQueueDrainGain;
       break;
   }
   const double rate = gain * bw_;

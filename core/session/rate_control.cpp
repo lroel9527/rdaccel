@@ -52,13 +52,17 @@ RateController::Decision RateController::Update(uint64_t now_us, const Transport
       const double out = static_cast<double>(sent_bytes - window_bytes_) * 8e6 /
                          static_cast<double>(now_us - window_start_us_);
       const auto asked = static_cast<double>(encoder_);
-      if (out > asked * 1.1) {
-        scale_ = std::max(0.25, scale_ * asked / out);
-      } else if (scale_ < 1) {
+      const bool over = out > asked * 1.1;
+      if (over && over_before_) {
+        // Two seconds in a row, so not one big picture (a keyframe): a
+        // step at a time, at most 30%.
+        scale_ = std::max(0.25, scale_ * std::max(0.7, asked / out));
+      } else if (!over && scale_ < 1) {
         // Keeping to it (or under it: a quiet screen, skipped frames): ease
         // back, 20% per second, in case the overshoot was passing.
         scale_ = std::min(1.0, scale_ * 1.2);
       }
+      over_before_ = over;
       window_start_us_ = now_us;
       window_bytes_ = sent_bytes;
     }

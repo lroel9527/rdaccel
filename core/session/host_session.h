@@ -147,6 +147,8 @@ class HostSession {
   std::vector<uint8_t> scratch_;
   // Per tile: video frames left in which the viewer still takes this tile.
   std::vector<uint8_t> refine_;
+  // Video tiles of a picture the encoder dropped, listed with the next one.
+  std::vector<tile::TileChange> carry_video_tiles_;
   size_t refining_ = 0;  // tiles with refine_ > 0
 
   // Tile cache bookkeeping (see OnFrame).
