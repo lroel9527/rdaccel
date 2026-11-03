@@ -51,6 +51,9 @@ enum class MsgType : uint8_t {
   kWelcome = 16,
 };
 
+// Largest screen side the protocol carries (the public API's frame limit).
+inline constexpr uint32_t kMaxScreenSide = 16384;
+
 // HEVC only: the project deliberately has no H.264 fallback.
 enum class VideoCodec : uint8_t { kHevc = 2 };
 

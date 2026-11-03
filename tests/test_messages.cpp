@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <tuple>
 #include <vector>
 
 #include "proto/messages.h"
@@ -183,4 +184,16 @@ TEST(Messages, FullScreenVideoDataKeepsTheVersion2Layout) {
   p.Append(bytes);
   EXPECT_FALSE(p.Next().has_value());
   EXPECT_FALSE(p.error().empty());
+}
+
+TEST(Messages, HelloScreenSizeIsBounded) {
+  // A hostile host must not make the viewer allocate a gigantic frame
+  // (found by fuzz_viewer). 0 and anything above kMaxScreenSide is rejected.
+  for (auto [w, h, ok] : {std::tuple{1u, 1u, true}, std::tuple{kMaxScreenSide, kMaxScreenSide, true},
+                          std::tuple{0u, 360u, false}, std::tuple{640u, 0u, false},
+                          std::tuple{kMaxScreenSide + 1, 360u, false}, std::tuple{640u, 1u << 30, false}}) {
+    StreamParser p;
+    p.Append(Encode(Hello{kProtocolVersion, w, h, VideoCodec::kHevc}));
+    EXPECT_EQ(p.Next().has_value(), ok) << w << "x" << h;
+  }
 }

@@ -46,6 +46,36 @@ jobs:
           name: linux-stream
           path: linux.rdstream
 
+  fuzz:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-rt-18-dev libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxext-dev libxfixes-dev zlib1g-dev
+      - name: Build fuzzers (libFuzzer + ASan + UBSan)
+        run: |
+          F="-fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=undefined"
+          CC=clang CXX=clang++ cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DRDACCEL_BUILD_FUZZERS=ON -DRDACCEL_BUILD_TESTS=OFF -DRDACCEL_BUILD_EXAMPLES=OFF \
+            -DCMAKE_C_FLAGS="$F" -DCMAKE_CXX_FLAGS="$F"
+          cmake --build build-fuzz -j4
+      - name: Fuzz each target for 60 s
+        run: |
+          mkdir -p crashes
+          for t in messages lossless viewer link secure reliable hevc; do
+            echo "::group::fuzz_$t"
+            mkdir -p corpus/$t
+            ./build-fuzz/fuzz/fuzz_$t corpus/$t -max_total_time=60 -rss_limit_mb=2048 -artifact_prefix=crashes/$t- -print_final_stats=1
+            echo "::endgroup::"
+          done
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-crashes
+          path: crashes/
+
   macos:
     needs: linux
     runs-on: macos-14
