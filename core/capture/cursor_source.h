@@ -18,6 +18,9 @@ struct CursorSample {
   // captured frame.
   double x = 0, y = 0;
   double screen_width = 0, screen_height = 0;
+  // Image pixels per unit of the above (2 for a Retina cursor measured in
+  // points). The host resizes the image to the captured frame's scale.
+  double image_scale = 1;
   bool visible = true;
   bool image_changed = false;  // `image` holds a new image
   CursorImage image;

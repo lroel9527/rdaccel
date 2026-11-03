@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <vector>
 
 #include "proto/messages.h"
@@ -187,4 +188,37 @@ TEST(Cursor, DrawBlendsAndClips) {
   DrawCursor(c, 0, 0, px.data(), W, H, W * 4);
   DrawCursor(c, W, H, px.data(), W, H, W * 4);
   EXPECT_EQ(px[(H - 1) * W * 4 + (W - 1) * 4], 255);
+}
+
+TEST(Cursor, ScalingFollowsTheCapturedSize) {
+  // 32 x 32, left half opaque white, right half transparent.
+  CursorImage img;
+  img.width = img.height = 32;
+  img.hotspot_x = 10;
+  img.hotspot_y = 6;
+  img.bgra.assign(32 * 32 * 4, 0);
+  for (int y = 0; y < 32; ++y) {
+    for (int x = 0; x < 16; ++x) std::fill_n(&img.bgra[(y * 32 + x) * 4], 4, uint8_t{255});
+  }
+  img.bgra[(5 * 32 + 15) * 4 + 3] = 0;  // one hole at the edge of a 2 x 2 block
+
+  const CursorImage half = session::ScaleCursorImage(img, 0.5);  // e.g. 4K captured at 1080p
+  EXPECT_EQ(half.width, 16);
+  EXPECT_EQ(half.height, 16);
+  EXPECT_EQ(half.hotspot_x, 5);
+  EXPECT_EQ(half.hotspot_y, 3);
+  ASSERT_EQ(half.bgra.size(), 16u * 16 * 4);
+  EXPECT_EQ(half.bgra[(0 * 16 + 0) * 4 + 3], 255);
+  EXPECT_EQ(half.bgra[(0 * 16 + 15) * 4 + 3], 0);
+  EXPECT_EQ(half.bgra[(2 * 16 + 7) * 4 + 3], 191);  // the 2 x 2 block with the hole: averaged
+
+  const CursorImage twice = session::ScaleCursorImage(img, 2.0);
+  EXPECT_EQ(twice.width, 64);
+  EXPECT_EQ(twice.hotspot_x, 20);
+  EXPECT_EQ(twice.bgra[(10 * 64 + 31) * 4 + 3], 0);  // the hole, repeated
+  EXPECT_EQ(twice.bgra[(10 * 64 + 29) * 4 + 3], 255);
+
+  EXPECT_EQ(session::ScaleCursorImage(img, 1.0), img);
+  EXPECT_EQ(session::ScaleCursorImage(img, 100.0).width, 256);  // capped
+  EXPECT_EQ(session::ScaleCursorImage(img, 0.001).width, 1);
 }
