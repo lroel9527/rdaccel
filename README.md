@@ -57,6 +57,7 @@ M0 是整屏硬编基线；M1 在它上面加了按区域分类，每一项都�
 | 滚动 / 拖窗检测 | 变化块多时，用每块最有细节的一行做滚动哈希，在上一帧里找位置投票出位移，逐块精确比对后发拷贝指令；滚动区和窗口边缘的块按 4 像素宽的条和像素行再拆，只把新露出的像素送去编码 | `detect_moves` |
 | 块缓存 | 接收端 1024 个槽。即将被盖住的、停留过一阵的块，以及反复出现的块（转圈动画）先存起来，内容再出现时直接从槽里贴回；拖动窗口露出的背景即使只占块的一部分，也按条从槽里局部贴回。缓存、拷贝指令和无损块走同一条 deflate 流，几乎不占码率 | `tile_cache` |
 | 静止区精修 | 视频块变化后，接收端在之后 N 个视频帧里继续采用编码器对它的精修 | `refine_frames`（默认 8） |
+| 视频区域（M2） | 相邻多块在大部分帧里都要走视频编码（播放视频、游戏）时，把这块区域识别出来，单独开一路 HEVC 码流，只编这块区域的裁剪画面，有自己的码率和 QP 下限；全屏编码器在这里不再花码率。视频暂停约 0.5 秒后区域关闭，区域内的块再走一次普通路径，暂停画面变清晰 | `video_regions`、`video_region_min_qp`（默认 27）、`video_region_bitrate_bps`（0 = 按面积分总码率，至少 1/4） |
 | 码控 | 给视频编码器设 QP 下限，避免低延迟码控在静止内容上无限精修 | `min_qp`（默认 24，0 = 编码器自定） |
 | HEVC 编解码 | macOS：VideoToolbox 硬件（优先低延迟模式）；Linux：FFmpeg，NVENC 优先，否则 x265 | `encoder` |
 | 屏幕采集 | macOS：ScreenCaptureKit（带脏区，不采集声音）；Linux：X11 MIT-SHM | — |
@@ -84,6 +85,23 @@ M0 是整屏硬编基线；M1 在它上面加了按区域分类，每一项都�
 ./build/bin/rdaccel_bench --background=dump/frame_000300.ppm --frames=600
 ./build/bin/rdaccel_bench --background=dump/frame_000300.ppm --frames=600 \
     --lossless=0 --moves=0 --refine=0 --cache=0 --min-qp=0              # M0 对照
+```
+
+### 视频区域（M2，Linux x265 评测）
+
+云端 Linux 上用 x265（ultrafast + zerolatency）跑 `rdaccel_bench`，背景是 `tools/make_desktop.py` 生成的 1920×1080 仿真桌面（代码编辑器、带图片的网页、图表、照片墙纸），600 帧 60 fps。`video` 场景是右下角 640×360 的视频窗口，`pause` 场景播放 3 秒、暂停 2 秒循环。其余 4 个场景没有触发视频区域，结果与关闭时逐位相同。
+
+| 场景 | 关闭：码率 | 关闭：区域内/外 PSNR | 开启：码率 | 开启：区域内/外 PSNR | 编码耗时 | 主机 CPU |
+| --- | --- | --- | --- | --- | --- | --- |
+| video | 4652 kbps | 38.8 / 41.3 dB | 1764 kbps | 36.4 / 40.8 dB | 16.5 → 6.0 ms | 252% → 90% |
+| pause | 2795 kbps | 38.0 / 41.4 dB | 1398 kbps | 36.4 / 40.8 dB | 16.9 → 9.7 ms | 165% → 78% |
+
+暂停后的最终画面在视频窗口内：关闭时 36.0 dB（停在运动时的画质），开启时 46.9 dB。区域码率和画质可以换：`--region-min-qp=20 --region-bitrate=8000000` 时 4697 kbps、区域内 39.1 dB / 区域外 41.5 dB，码率与关闭时相近，两边画质都更好，编码耗时仍只有 8.5 ms。区域按 64 像素块对齐，会带进视频窗口周围一圈静止像素，这部分在区域关闭前是区域画质，所以区域外 PSNR 略降。
+
+```bash
+python3 tools/make_desktop.py desktop.ppm
+./build/bin/rdaccel_bench --background=desktop.ppm --frames=600              # 开启
+./build/bin/rdaccel_bench --background=desktop.ppm --frames=600 --regions=0  # 关闭对照
 ```
 
 ## 在 Mac 上编译运行
@@ -138,6 +156,7 @@ src/               公开 API 的实现
 core/              内部：协议、分块比对、HEVC 码流格式、会话、传输、合成画面
 platform/          内部：mac/（ScreenCaptureKit、VideoToolbox）、linux/（X11、FFmpeg）
 examples/          只用公开 API 的示例：record、play、bench、loopback_mac、minimal（独立 CMake 工程）
+tools/             开发辅助脚本（make_desktop.py：生成评测用的仿真桌面）
 tests/             GoogleTest（test_api.cpp 只用公开 API）
 cmake/             find_package 配置模板
 ```

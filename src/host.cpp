@@ -73,6 +73,16 @@ struct Host::Impl {
       opts.refine_frames = config.refine_frames;
       opts.tile_cache = config.tile_cache;
       opts.refresh = config.refresh;
+      if (config.video_regions) {
+        const std::string prefer = config.encoder;
+        opts.region_encoder_factory = [prefer](const codec::EncoderConfig& c, std::string* e) {
+          return platform::CreateHevcEncoder(c, prefer, e);
+        };
+      }
+      opts.fps = config.fps;
+      opts.bitrate_bps = config.bitrate_bps;
+      opts.region_min_qp = config.video_region_min_qp;
+      opts.region_bitrate_bps = config.video_region_bitrate_bps;
       session = std::make_unique<session::HostSession>(transport.get(), std::move(enc), width,
                                                        height, opts);
       session->SetInputHandler([this](const InputEvent& ev) {

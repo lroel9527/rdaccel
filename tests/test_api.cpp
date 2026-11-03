@@ -197,3 +197,64 @@ TEST(PublicApi, CustomTransportInterface) {
   EXPECT_EQ(raw->bytes, host.stats().bytes_sent);
   EXPECT_GT(raw->bytes, 0u);
 }
+
+// A "video" playing in part of the screen gets its own stream (on macOS a
+// second VideoToolbox session), and the viewer composes both.
+TEST(PublicApi, VideoAreaGetsItsOwnStream) {
+  constexpr int32_t W = 640, H = 384;
+  const rdaccel::Rect area{128, 64, 256, 192};
+  std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 200);
+  auto render = [&](int i) {
+    // Smooth, moving gradients: too many colours for the lossless layer, and
+    // something an encoder can actually code well.
+    for (int y = area.y; y < area.bottom(); ++y) {
+      for (int x = area.x; x < area.right(); ++x) {
+        uint8_t* p = &px[(static_cast<size_t>(y) * W + x) * 4];
+        p[0] = static_cast<uint8_t>(x * 2 + i * 3);
+        p[1] = static_cast<uint8_t>(y * 3 - i * 2);
+        p[2] = static_cast<uint8_t>((x + y) + i * 5);
+        p[3] = 255;
+      }
+    }
+  };
+
+  auto [host_end, viewer_end] = rdaccel::CreateLocalPipe();
+  std::mutex mu;
+  std::condition_variable cv;
+  int frames = 0;
+  double last_psnr = 0;
+  std::vector<uint8_t> expected;
+  rdaccel::ViewerHandlers h;
+  h.on_frame = [&](const rdaccel::ImageView& img, std::span<const rdaccel::Rect>,
+                   const rdaccel::FrameInfo&) {
+    std::lock_guard<std::mutex> lock(mu);
+    last_psnr = Psnr(img, expected);
+    ++frames;
+    cv.notify_all();
+  };
+  std::string err;
+  auto viewer = rdaccel::Viewer::Create(std::move(viewer_end), std::move(h), &err);
+  ASSERT_TRUE(viewer) << err;
+  rdaccel::HostConfig cfg;
+  cfg.fps = 30;
+  cfg.bitrate_bps = 4'000'000;
+  rdaccel::Host host(std::move(host_end), cfg);
+  for (int i = 0; i < 60; ++i) {
+    render(i);
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      expected = px;
+    }
+    ASSERT_TRUE(host.SubmitFrame({px.data(), W, H, W * 4}, i * 33'333ull, {}, &err)) << err;
+    std::unique_lock<std::mutex> lock(mu);
+    // One frame at a time, so `expected` matches what is being shown.
+    ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(30), [&] { return frames == i + 1; }));
+    if (i > 40) {
+      EXPECT_GT(last_psnr, 30.0) << "frame " << i;
+    }
+  }
+  const auto st = host.stats();
+  EXPECT_EQ(st.regions_opened, 1u);
+  EXPECT_GT(st.region_pictures, 20u);
+  EXPECT_EQ(viewer->stats().decode_errors, 0u);
+}

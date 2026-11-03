@@ -33,7 +33,8 @@ HostSession::HostSession(transport::ITransport* transport,
       height_(height),
       options_(options),
       enc_input_(static_cast<size_t>(width) * height * 4, 0),
-      prev_(enc_input_.size(), 0) {
+      prev_(enc_input_.size(), 0),
+      regions_(options.region_params) {
   transport_->SetReceiver(
       [this](transport::Channel ch, std::span<const uint8_t> bytes) { OnReceive(ch, bytes); });
   Send(transport::Channel::kControl,
@@ -97,6 +98,51 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     tile_slot_hash_.assign(n_tiles, 0);
   }
   ++frame_no_;
+
+  // Video areas: their tiles leave the normal path and go to the area's own
+  // stream (see EncodeRegions).
+  const bool use_regions = options_.region_encoder_factory && !regions_disabled_;
+  if (regions_.cols() != differ_.cols() || regions_.rows() != differ_.rows()) {
+    regions_.Reset(width_, height_);
+  }
+  if (key) {
+    regions_.Clear();
+    region_enc_.clear();
+    pending_sharpen_.clear();
+  }
+  const size_t n_regions = regions_.regions().size();
+  std::vector<bool> region_dirty(n_regions, false);
+  std::vector<uint8_t> busy(use_regions ? n_tiles : 0, 0);
+  std::vector<uint8_t> region_changed(use_regions ? n_tiles : 0, 0);
+  bool region_needs_key = false;
+  for (size_t k = 0; k < n_regions; ++k) {
+    const auto it = region_enc_.find(regions_.regions()[k].stream);
+    if (it == region_enc_.end() || it->second.need_key) region_needs_key = true;
+    // The viewer must never take these tiles from the full-screen picture,
+    // which no longer follows them.
+    for (size_t idx : TilesOf(regions_.regions()[k].rect)) {
+      if (refine_[idx] > 0) {
+        refine_[idx] = 0;
+        --refining_;
+      }
+    }
+  }
+  if (n_regions > 0) {
+    std::erase_if(changes, [&](const tile::TileChange& c) {
+      const int k = regions_.RegionOf(c.col, c.row);
+      if (k < 0) return false;
+      const size_t idx = static_cast<size_t>(c.row) * differ_.cols() + c.col;
+      region_dirty[static_cast<size_t>(k)] = true;
+      busy[idx] = region_changed[idx] = 1;
+      CopyRectInto(frame.bgra, c.rect, prev_.data(), width_ * 4);
+      quality_[idx] = kRough;
+      born_[idx] = frame_no_;
+      return true;
+    });
+  }
+  const bool regions_to_send =
+      region_needs_key || std::find(region_dirty.begin(), region_dirty.end(), true) != region_dirty.end();
+
   // Tiles the viewer shows at first-pass video quality (or copies of such)
   // that have been static for a while get sent again properly.
   std::vector<size_t> refresh;
@@ -107,7 +153,23 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       }
     }
   }
-  if (changes.empty() && !key && refining_ == 0 && refresh.empty()) {
+  // Tiles of areas that just closed get one more, sharp, picture.
+  if (!pending_sharpen_.empty()) {
+    std::vector<uint8_t> listed(n_tiles, 0);
+    for (const auto& c : changes) listed[static_cast<size_t>(c.row) * differ_.cols() + c.col] = 1;
+    for (size_t idx : refresh) listed[idx] = 1;
+    for (size_t idx : pending_sharpen_) {
+      const auto col = static_cast<int32_t>(idx % differ_.cols());
+      const auto row = static_cast<int32_t>(idx / differ_.cols());
+      if (idx < n_tiles && !listed[idx] && regions_.RegionOf(col, row) < 0) {
+        listed[idx] = 1;
+        refresh.push_back(idx);
+      }
+    }
+    pending_sharpen_.clear();
+  }
+  if (changes.empty() && !key && refining_ == 0 && refresh.empty() && !regions_to_send) {
+    if (use_regions) FinishRegions(busy, region_changed);
     std::lock_guard<std::mutex> lock(mu_);
     ++stats_.frames_skipped;
     return true;
@@ -425,6 +487,29 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   }
   const uint64_t t2 = capture::MonotonicMicros();
 
+  const uint64_t id = next_frame_id_++;
+  std::vector<uint8_t> region_bytes;
+  size_t region_payload = 0, region_pictures = 0;
+  uint64_t region_us = 0;
+  if (n_regions > 0 &&
+      !EncodeRegions(frame, region_dirty, id, region_bytes, region_payload, region_pictures,
+                     region_us)) {
+    // Give the areas back to the normal path: their tiles get re-sent from
+    // the current frame in the next one.
+    for (const auto& reg : regions_.regions()) {
+      for (size_t idx : TilesOf(reg.rect)) pending_sharpen_.push_back(idx);
+    }
+    regions_.Clear();
+    region_enc_.clear();
+    regions_disabled_ = true;
+    region_bytes.clear();
+    region_payload = region_pictures = 0;
+  }
+  if (use_regions) {
+    for (const auto& t : video_tiles) busy[static_cast<size_t>(t.row) * differ_.cols() + t.col] = 1;
+    FinishRegions(busy, region_changed);
+  }
+
   // Deflate only after the video encode succeeded: the stream's history must
   // match what the viewer actually receives.
   const size_t n_lossless = lossless_tiles.size();
@@ -438,7 +523,6 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   if (!ops.empty()) lossless_data = lossless_.Encode(ops, key);
   const uint64_t t3 = capture::MonotonicMicros();
 
-  const uint64_t id = next_frame_id_++;
   std::vector<uint8_t> bytes;
   proto::EncodeTo(proto::FrameBegin{id, frame.capture_time_us}, bytes);
   size_t video_bytes = 0;
@@ -454,6 +538,8 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     video_bytes = vd.nal_data.size();
     proto::EncodeTo(vd, bytes);
   }
+  // Area pictures go on top of the full-screen one.
+  bytes.insert(bytes.end(), region_bytes.begin(), region_bytes.end());
   if (!lossless_data.empty()) {
     proto::EncodeTo(proto::LosslessData{id, key, lossless_data}, bytes);
   }
@@ -468,7 +554,10 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     stats_.encode_us_total += t2 - t1;
   }
   stats_.bytes_sent += bytes.size();
-  stats_.video_bytes += video_bytes;
+  stats_.video_bytes += video_bytes + region_payload;
+  stats_.region_bytes += region_payload;
+  stats_.region_pictures += region_pictures;
+  stats_.region_encode_us_total += region_us;
   stats_.lossless_bytes += lossless_data.size();
   stats_.lossless_tiles += n_lossless;
   stats_.moved_tiles += moved_tiles;
@@ -476,6 +565,89 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   stats_.refreshed_tiles += refresh.size();
   stats_.lossless_us_total += (t1 - t0) + (t3 - t2);
   return true;
+}
+
+std::vector<size_t> HostSession::TilesOf(const Rect& r) const {
+  std::vector<size_t> out;
+  for (int32_t row = r.y / kTileSize; row * kTileSize < r.bottom() && row < differ_.rows(); ++row) {
+    for (int32_t col = r.x / kTileSize; col * kTileSize < r.right() && col < differ_.cols(); ++col) {
+      out.push_back(static_cast<size_t>(row) * differ_.cols() + col);
+    }
+  }
+  return out;
+}
+
+bool HostSession::EncodeRegions(const capture::CapturedFrame& frame, const std::vector<bool>& dirty,
+                                uint64_t frame_id, std::vector<uint8_t>& out, size_t& bytes,
+                                size_t& pictures, uint64_t& us) {
+  const auto& regs = regions_.regions();
+  for (size_t k = 0; k < regs.size(); ++k) {
+    const tile::VideoRegion& reg = regs[k];
+    RegionEncoder& re = region_enc_[reg.stream];
+    if (!re.enc) {
+      codec::EncoderConfig cfg;
+      cfg.width = reg.rect.w;
+      cfg.height = reg.rect.h;
+      cfg.fps = options_.fps;
+      cfg.min_qp = options_.region_min_qp;
+      cfg.bitrate_bps = options_.region_bitrate_bps;
+      if (cfg.bitrate_bps <= 0) {
+        const double share = 2.0 * reg.rect.w * reg.rect.h / (static_cast<double>(width_) * height_);
+        cfg.bitrate_bps =
+            static_cast<int64_t>(static_cast<double>(options_.bitrate_bps) * std::clamp(share, 0.25, 1.0));
+      }
+      std::string err;
+      re.enc = options_.region_encoder_factory(cfg, &err);
+      if (!re.enc) return false;
+      re.need_key = true;
+      std::lock_guard<std::mutex> lock(mu_);
+      ++stats_.regions_opened;
+    }
+    if (!dirty[k] && !re.need_key) continue;
+    const tile::ImageView crop{frame.bgra.data + static_cast<size_t>(reg.rect.y) * frame.bgra.stride +
+                                   static_cast<size_t>(reg.rect.x) * 4,
+                               reg.rect.w, reg.rect.h, frame.bgra.stride};
+    const uint64_t t0 = capture::MonotonicMicros();
+    auto au = re.enc->Encode(crop, frame.capture_time_us, re.need_key);
+    us += capture::MonotonicMicros() - t0;
+    if (!au) {
+      if (!re.enc->last_error().empty()) return false;
+      re.need_key = true;  // dropped: the area restarts with the next frame
+      continue;
+    }
+    re.need_key = false;
+    proto::VideoData vd;
+    vd.frame_id = frame_id;
+    vd.keyframe = au->keyframe;
+    vd.parameter_sets = std::move(au->parameter_sets);
+    vd.nal_data = std::move(au->nal_data);
+    vd.stream = reg.stream;
+    vd.x = reg.rect.x;
+    vd.y = reg.rect.y;
+    bytes += vd.nal_data.size();
+    ++pictures;
+    proto::EncodeTo(vd, out);
+  }
+  return true;
+}
+
+void HostSession::FinishRegions(const std::vector<uint8_t>& busy,
+                                const std::vector<uint8_t>& changed) {
+  const auto closed = regions_.Update(busy, changed);
+  for (const auto& reg : closed) {
+    for (size_t idx : TilesOf(reg.rect)) pending_sharpen_.push_back(idx);
+  }
+  // Encoders of areas that closed or were replaced by a larger one.
+  std::erase_if(region_enc_, [&](const auto& kv) {
+    for (const auto& reg : regions_.regions()) {
+      if (reg.stream == kv.first) return false;
+    }
+    return true;
+  });
+  if (!closed.empty()) {
+    std::lock_guard<std::mutex> lock(mu_);
+    stats_.regions_closed += closed.size();
+  }
 }
 
 void HostSession::OnReceive(transport::Channel ch, std::span<const uint8_t> bytes) {

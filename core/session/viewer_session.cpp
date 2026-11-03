@@ -105,12 +105,19 @@ void ViewerSession::Handle(proto::Message&& m) {
   }
   if (auto* b = std::get_if<proto::FrameBegin>(&m)) {
     begin_ = *b;
-    video_.reset();
+    videos_.clear();
     lossless_.reset();
     return;
   }
   if (auto* v = std::get_if<proto::VideoData>(&m)) {
-    if (begin_ && v->frame_id == begin_->frame_id) video_ = std::move(*v);
+    if (begin_ && v->frame_id == begin_->frame_id) {
+      // The full-screen picture is applied before any area picture.
+      if (v->stream == 0) {
+        videos_.insert(videos_.begin(), std::move(*v));
+      } else {
+        videos_.push_back(std::move(*v));
+      }
+    }
     return;
   }
   if (auto* l = std::get_if<proto::LosslessData>(&m)) {
@@ -118,7 +125,7 @@ void ViewerSession::Handle(proto::Message&& m) {
     return;
   }
   auto* end = std::get_if<proto::FrameEnd>(&m);
-  if (!end || !begin_ || end->frame_id != begin_->frame_id || (!video_ && !lossless_)) {
+  if (!end || !begin_ || end->frame_id != begin_->frame_id || (videos_.empty() && !lossless_)) {
     return;
   }
 
@@ -183,25 +190,32 @@ void ViewerSession::Handle(proto::Message&& m) {
       changed.push_back(ld.rect);
     }
   }
-  if (ok && video_) {
+  const proto::VideoData* video =
+      !videos_.empty() && videos_.front().stream == 0 ? &videos_.front() : nullptr;
+  if (ok && video) {
     // Parameter sets come with keyframes only; decoders keep them as state.
-    ok = decoder_->Decode(video_->parameter_sets, video_->nal_data, capture_time,
+    ok = decoder_->Decode(video->parameter_sets, video->nal_data, capture_time,
                           [&](const tile::ImageView& img, uint64_t) {
                             if (screen_.empty()) EnsureScreen(img.width, img.height);
                             const int32_t stride = width_ * 4;
-                            if (video_->regions.empty()) {
+                            if (video->regions.empty()) {
                               full = true;
                               CopyRegion(img, {0, 0, width_, height_}, screen_.data(), stride,
                                          width_, height_);
                             } else {
-                              for (const Rect& r : video_->regions) {
+                              for (const Rect& r : video->regions) {
                                 CopyRegion(img, r, screen_.data(), stride, width_, height_);
                               }
-                              changed.insert(changed.end(), video_->regions.begin(),
-                                             video_->regions.end());
+                              changed.insert(changed.end(), video->regions.begin(),
+                                             video->regions.end());
                             }
                             if (full) have_keyframe_ = true;
                           });
+  }
+  for (const auto& v : videos_) {
+    if (!ok) break;
+    if (v.stream == 0) continue;
+    ok = have_keyframe_ && DecodeRegion(v, frame_id, capture_time, changed);
   }
   if (ok && !ops_.tiles.empty()) {
     if (!have_keyframe_) {
@@ -228,8 +242,47 @@ void ViewerSession::Handle(proto::Message&& m) {
     }
   }
   begin_.reset();
-  video_.reset();
+  videos_.clear();
   lossless_.reset();
+}
+
+bool ViewerSession::DecodeRegion(const proto::VideoData& v, uint64_t frame_id,
+                                 uint64_t capture_time, std::vector<Rect>& changed) {
+  auto it = region_dec_.find(v.stream);
+  if (v.keyframe) {
+    // A keyframe starts the stream over: the area may have a new size.
+    if (!decoder_factory_) return false;
+    auto dec = decoder_factory_();
+    if (!dec) return false;
+    if (region_dec_.size() >= kMaxRegionDecoders && it == region_dec_.end()) {
+      auto oldest = std::min_element(region_dec_.begin(), region_dec_.end(),
+                                     [](const auto& a, const auto& b) {
+                                       return a.second.last_used < b.second.last_used;
+                                     });
+      region_dec_.erase(oldest);
+    }
+    RegionDecoder& rd = region_dec_[v.stream];
+    rd.dec = std::move(dec);
+    it = region_dec_.find(v.stream);
+  }
+  if (it == region_dec_.end()) return false;  // joined the stream mid-way
+  it->second.last_used = frame_id;
+  const size_t stride = static_cast<size_t>(width_) * 4;
+  return it->second.dec->Decode(
+      v.parameter_sets, v.nal_data, capture_time, [&](const tile::ImageView& img, uint64_t) {
+        Rect r{v.x, v.y, img.width, img.height};
+        // Clip to the screen.
+        const int32_t x0 = std::max(r.x, 0), y0 = std::max(r.y, 0);
+        const int32_t x1 = std::min(r.right(), width_), y1 = std::min(r.bottom(), height_);
+        if (x1 <= x0 || y1 <= y0) return;
+        for (int32_t y = y0; y < y1; ++y) {
+          std::memcpy(screen_.data() + static_cast<size_t>(y) * stride + static_cast<size_t>(x0) * 4,
+                      img.data + static_cast<size_t>(y - r.y) * img.stride +
+                          static_cast<size_t>(x0 - r.x) * 4,
+                      static_cast<size_t>(x1 - x0) * 4);
+        }
+        changed.push_back({x0, y0, x1 - x0, y1 - y0});
+      });
 }
 
 }  // namespace rdaccel::session
