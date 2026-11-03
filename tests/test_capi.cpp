@@ -517,6 +517,7 @@ TEST(CApi, AuthHookRejects) {
   ASSERT_EQ(p.Create(0), RDA_OK) << rda_last_error();
   ASSERT_TRUE(WaitUntil([&] { return p.viewer_ev.Has(RDA_STATE_DISCONNECTED); }));
   EXPECT_EQ(p.viewer_ev.LastReason(), RDA_ERR_AUTH);
+  ASSERT_TRUE(WaitUntil([&] { return p.host_ev.Has(RDA_STATE_DISCONNECTED); }));
   EXPECT_EQ(p.host_ev.LastReason(), RDA_ERR_AUTH);
   EXPECT_FALSE(p.viewer_ev.Has(RDA_STATE_CONNECTED));
 }
