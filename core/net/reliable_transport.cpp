@@ -17,6 +17,7 @@ constexpr uint64_t kInitialCwnd = 32 * kMaxDatagram;
 constexpr uint64_t kMinCwnd = 4 * kMaxDatagram;
 constexpr uint64_t kInitialRtt = 100'000;  // us, until measured
 constexpr uint64_t kMaxAckDelay = 5'000;
+constexpr uint64_t kPacingCredit = 15'000;  // us
 constexpr uint64_t kMinRttWindow = 10'000'000;
 constexpr uint64_t kBwWindowRounds = 10;
 constexpr double kStartupGain = 2.885;
@@ -274,8 +275,12 @@ bool ReliableTransport::SendOne(uint64_t now) {
   in_flight_[pn] = p;
   bytes_in_flight_ += p.size;
   if (opt_.congestion_control) {
-    // Allow a little burst after idle, not an unbounded one.
-    const uint64_t base = std::max(next_send_time_, now > 2000 ? now - 2000 : 0);
+    // Credit for time the sender thread overslept: timers on a loaded
+    // machine (macOS CI runners especially) wake several ms late, and
+    // without credit each wake would send a single packet and the measured
+    // bandwidth would spiral down. Bounded, so an idle sender cannot burst
+    // more than kPacingCredit worth of packets.
+    const uint64_t base = std::max(next_send_time_, now > kPacingCredit ? now - kPacingCredit : 0);
     next_send_time_ = base + static_cast<uint64_t>(static_cast<double>(p.size) / PacingRate());
   }
   return true;
