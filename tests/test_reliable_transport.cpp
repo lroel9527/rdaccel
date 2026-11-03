@@ -291,6 +291,48 @@ TEST(ReliableTransport, EstimateFollowsABandwidthDrop) {
   EXPECT_GT(st.bandwidth_bps, 700'000);
 }
 
+TEST(ReliableTransport, EstimateFollowsADropBelowWhatAnAppLimitedSenderSends) {
+  // The sender keeps to ~640 kbps (an encoder at its own rate, not filling
+  // the 4 Mbps path); the path drops to 400 kbps at 1.5 s. Its samples are
+  // application limited, but the queue that builds shows the path's rate:
+  // the estimate must come down within a couple of seconds (on the Mac it
+  // stayed at 4 Mbps for 3-4 s while the round trip passed 240 ms).
+  net::LinkConditions c;
+  c.bandwidth_bps = 4'000'000;
+  c.delay_ms = 20;
+  c.queue_ms = 2000;
+  c.bandwidth_schedule = {{1500, 400'000}};
+  Sink sink;
+  auto [a, b] = net::MakeSimulatedLink(c, net::LinkConditions{.delay_ms = 20});
+  net::ReliableTransport host(std::move(a));
+  net::ReliableTransport viewer(std::move(b), {.client = true});
+  viewer.SetReceiver(sink.Fn());
+  const auto chunk = Pattern(2'400, 5);  // every 30 ms: 640 kbps
+  const uint64_t t0 = capture::MonotonicMicros();
+  TransportStats st;
+  uint64_t caught_up = 0;
+  std::string trace;
+  uint64_t next_trace = 0;
+  for (uint64_t next = t0; capture::MonotonicMicros() - t0 < 5'000'000; next += 30'000) {
+    host.GetStats(&st);
+    const uint64_t t = capture::MonotonicMicros() - t0;
+    if (t >= next_trace) {
+      next_trace += 250'000;
+      trace += std::to_string(st.bandwidth_bps / 1000) + "k/" + std::to_string(st.rtt_us / 1000) + "ms ";
+    }
+    if (!caught_up && t > 1'500'000 && st.bandwidth_bps > 0 && st.bandwidth_bps < 600'000) caught_up = t;
+    host.Send(Channel::kVideo, chunk);
+    const uint64_t now = capture::MonotonicMicros();
+    if (next + 30'000 > now) std::this_thread::sleep_for(std::chrono::microseconds(next + 30'000 - now));
+  }
+  std::printf("app-limited: estimate below 600 kbps %.2f s after the drop\nestimate/rtt every 250 ms: %s\n",
+              caught_up ? (caught_up - 1'500'000) / 1e6 : -1.0, trace.c_str());
+  // ~0.25 s here. Before: 1.9 s with the application-limited samples left
+  // out, and never while a probe timeout declared everything lost.
+  ASSERT_NE(caught_up, 0u);
+  EXPECT_LT(caught_up, 1'500'000u + 1'500'000u);
+}
+
 TEST(ReliableTransport, CursorStaysFastUnderASaturatingSender) {
   // Video keeps the 1.5 Mbps path busy (as VideoToolbox does on the Mac);
   // small cursor messages every 16 ms must not wait behind a standing queue

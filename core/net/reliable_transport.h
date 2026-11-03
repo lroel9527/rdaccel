@@ -72,6 +72,7 @@ class ReliableTransport final : public transport::ITransport {
     uint64_t time = 0;
     uint64_t delivered = 0, delivered_time = 0, first_sent_time = 0;
     bool app_limited = false;
+    bool cwnd_limited = false;  // the window was full when it was sent
   };
 
   void Run();  // sender / timer thread

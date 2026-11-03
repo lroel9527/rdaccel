@@ -202,14 +202,19 @@ void ReliableTransport::Run() {
     }
     if (ack_pending_ > 0 && now >= ack_deadline_) SendAck(now);
 
-    // Probe timeout: nothing acknowledged for too long, so resend everything
-    // in flight (the tail of a burst, or every packet, was lost).
+    // Probe timeout: nothing acknowledged for too long. Resend the oldest
+    // packet as a probe; its acknowledgement declares the rest lost (by the
+    // rules in HandleAck) if they were. Declaring everything lost here made
+    // a growing queue (the path slowing down) look like total loss: the
+    // late acknowledgements of the originals were then ignored, so neither
+    // the round trip nor the estimate moved, and the duplicates took most of
+    // the slower path (12 kB/s of 50 after 4 -> 0.4 Mbps).
     if (!in_flight_.empty()) {
       const uint64_t since = std::max(last_ack_time_, in_flight_.begin()->second.time);
       if (now >= since + (Pto() << std::min(pto_count_, 6))) {
-        auto lost = std::move(in_flight_);
-        in_flight_.clear();
-        for (const auto& [pn, p] : lost) MarkLost(pn, p);
+        auto oldest = in_flight_.begin();
+        MarkLost(oldest->first, oldest->second);
+        in_flight_.erase(oldest);
         ++pto_count_;
         last_ack_time_ = now;
       }
@@ -318,6 +323,11 @@ bool ReliableTransport::SendOne(uint64_t now) {
   // samples span the idle gap.
   p.app_limited = !opt_.congestion_control || bytes_in_flight_ + p.size + QueuedBytes() < Cwnd() ||
                   now - backlog_since_ < std::max<uint64_t>(min_rtt_, 1000);
+  // Window limited: no room for another packet. The window is two minimum
+  // round trips of the estimate, so where the round trip grows for other
+  // reasons than a queue (late threads on a loaded machine), its delivery
+  // rate measures the window, not the path.
+  p.cwnd_limited = opt_.congestion_control && bytes_in_flight_ + p.size + kMaxDatagram > Cwnd();
   in_flight_[pn] = p;
   bytes_in_flight_ += p.size;
   if (opt_.congestion_control) {
@@ -372,15 +382,26 @@ void ReliableTransport::OnRateSample(const SentPacket& p, uint64_t now) {
     // they came back as fast, the sample measured our own sending: below
     // the estimate while draining a queue, or while threads woke late
     // (macOS CI), and taking it would spiral the estimate down.
+    // Nor when the window, not the path, limited it: below the estimate it
+    // would shrink the window and so the next sample (a spiral to almost
+    // nothing on macOS CI, where the round trip ran at three times its
+    // minimum with no queue).
+    // While a queue stands at the bottleneck (the round trip far above its
+    // minimum), though, the path sets the pace whatever we sent, so then an
+    // application-limited sample counts too: a sender below the old rate
+    // would otherwise keep a stale estimate for seconds after a drop.
     const bool path_paced = ack_elapsed > send_elapsed + send_elapsed / 8;
-    if ((!p.app_limited && path_paced) || rate >= bw_) bw_samples_.push_back({round_, now, rate});
+    const bool queued = min_rtt_ > 0 && latest_rtt_ > 2 * min_rtt_ + 20'000;
+    if (((!p.app_limited || queued) && !p.cwnd_limited && path_paced) || rate >= bw_) {
+      bw_samples_.push_back({round_, now, rate});
+    }
   }
   // A standing queue at the bottleneck (the round trip well above its
   // minimum while we are backlogged) means we send faster than the path
   // delivers: the path has slowed down. Samples from before the last round
   // trip then describe the old path, so only the recent ones count.
   uint64_t oldest = now > kBwWindowUs ? now - kBwWindowUs : 0;
-  if (mode_ == Mode::kProbeBw && !p.app_limited && min_rtt_ > 0 && latest_rtt_ > 2 * min_rtt_ + 20'000) {
+  if (mode_ == Mode::kProbeBw && min_rtt_ > 0 && latest_rtt_ > 2 * min_rtt_ + 20'000) {
     oldest = std::max(oldest, now > srtt_ ? now - srtt_ : 0);
   }
   while (bw_samples_.size() > 1 && (bw_samples_.front().round + kBwWindowRounds < round_ ||
