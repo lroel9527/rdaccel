@@ -69,7 +69,7 @@ typedef enum rda_status {
   RDA_ERR_CLOSED = -8,       /* the connection or object is closed */
   RDA_ERR_AUTH = -9,
   RDA_ERR_PROTOCOL = -10,    /* incompatible peer or malformed data */
-  RDA_ERR_BUSY = -11,        /* already running, or called from a callback */
+  RDA_ERR_BUSY = -11,        /* already running, or not connected yet */
   RDA_ERR_IO = -12           /* file could not be read or written */
 } rda_status;
 
@@ -427,9 +427,10 @@ RDA_API rda_status rda_host_set_cursor_image(rda_host* h, const rda_cursor_image
 RDA_API void rda_host_request_keyframe(rda_host* h);
 
 RDA_API rda_state rda_host_get_state(const rda_host* h);
-/* Sends an application message to the viewer. Thread-safe. RDA_ERR_CLOSED
+/* Sends an application message to the viewer. Thread-safe. RDA_ERR_BUSY
+ * before the connection is up (wait for RDA_STATE_CONNECTED), RDA_ERR_CLOSED
  * once disconnected, RDA_ERR_INVALID_ARG for a reserved type or n above
- * RDA_MSG_MAX_SIZE. Messages sent before the viewer connects may be lost. */
+ * RDA_MSG_MAX_SIZE. */
 RDA_API rda_status rda_host_send_message(rda_host* h, uint32_t type, const uint8_t* payload,
                                          size_t n);
 
@@ -496,7 +497,7 @@ RDA_API rda_status rda_viewer_create(rda_transport* transport, const rda_viewer_
 /* No callback runs after it returns. Not from a viewer callback. */
 RDA_API void rda_viewer_destroy(rda_viewer* v);
 
-/* Input to the host; dropped once disconnected. */
+/* Input to the host; dropped unless connected. */
 RDA_API rda_status rda_viewer_send_input(rda_viewer* v, const rda_input_event* ev);
 /* RDA_STATE_CONNECTING for a viewer without transport. */
 RDA_API rda_state rda_viewer_get_state(const rda_viewer* v);

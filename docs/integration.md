@@ -84,7 +84,7 @@ host.SetStateHandler([](rdaccel::ConnectionState s, rda_status reason) {
 // Viewer 侧同样有 ViewerHandlers::on_state，也可以随时查 host.state() / viewer->state()。
 ```
 
-断开后 `SubmitFrame` 和 `SendMessage` 返回失败（C：`RDA_ERR_CLOSED`），`SendInput` 被丢弃，库自己的屏幕采集不再编码。
+连接建立之前 `SendMessage` 返回失败（C：`RDA_ERR_BUSY`），`SendInput` 被丢弃，Host 也不接受对方的输入和消息（认证钩子不能被绕过）；所以要发东西请等 `kConnected`。断开后 `SubmitFrame` 和 `SendMessage` 返回失败（C：`RDA_ERR_CLOSED`），`SendInput` 被丢弃，库自己的屏幕采集不再编码。
 
 **认证钩子。** 接收端在 `ViewerOptions::auth_token`（C：`rda_viewer_config.auth_token`，最多 4096 字节）里放一段令牌，发送端在 `HostConfig::auth`（C：`on_auth`）里决定是否接受，拒绝时两边都以 `RDA_ERR_AUTH` 断开。令牌目前是明文传输的，真正的身份验证要等加密上线（0.3）后再依赖它；现在跨公网仍请放在 VPN 或自己的加密传输里。
 

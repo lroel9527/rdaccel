@@ -79,7 +79,7 @@ class Viewer {
   Viewer(const Viewer&) = delete;
   Viewer& operator=(const Viewer&) = delete;
 
-  // Ignored once disconnected.
+  // Dropped unless connected (the host ignores a viewer it has not accepted).
   void SendInput(const InputEvent& ev);
 
   // Reliable, ordered application message to the host (see Host::SendMessage).

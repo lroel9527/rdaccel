@@ -148,6 +148,7 @@ TEST(Link, MessagesBothWaysIncludingLargeOnes) {
 
 TEST(Link, ReservedTypesAndOversizedMessagesAreRefused) {
   Pair p;
+  ASSERT_TRUE(WaitUntil([&] { return p.host->state() == LinkState::kConnected; }));
   std::string err;
   EXPECT_FALSE(p.host->SendMessage(0, {}, &err));
   EXPECT_FALSE(p.host->SendMessage(2, {}, &err));
@@ -326,4 +327,34 @@ TEST(Link, HandlersMayCallBackIntoTheLink) {
   host.Shutdown();
   a.reset();
   b.reset();
+}
+
+TEST(Link, HostIgnoresAViewerItHasNotAccepted) {
+  // Input and messages before (or without) an accepted handshake are dropped.
+  auto [a, b] = CreateLocalPipe();
+  RawPeer viewer(std::move(b));
+  Events ev;
+  std::atomic<int> others{0};
+  auto h = ev.Handlers();
+  h.on_other = [&](const proto::Message&) { ++others; };
+  h.on_auth = [](std::span<const uint8_t> t) { return !t.empty(); };
+  Link host(Link::Role::kHost, a.get(), {}, std::move(h));
+  a->SetReceiver([&](Channel ch, std::span<const uint8_t> bytes) { host.OnReceive(ch, bytes); });
+  host.Start();
+  std::string err;
+  EXPECT_FALSE(host.SendMessage(kFirstUserMessage, {}, &err));
+  EXPECT_EQ(err, "not connected yet");
+  viewer.t->Send(Channel::kInput, proto::Encode(proto::InputEvent{}));
+  viewer.t->Send(Channel::kMessage, proto::Encode(proto::AppMessage{kFirstUserMessage, {1}}));
+  viewer.Send(proto::KeyframeRequest{});
+  proto::ViewerHello vh;  // no token: rejected
+  viewer.Send(vh);
+  ASSERT_TRUE(WaitUntil([&] { return host.disconnected(); }));
+  viewer.t->Send(Channel::kInput, proto::Encode(proto::InputEvent{}));
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  EXPECT_EQ(others.load(), 0);
+  EXPECT_EQ(ev.message_count(), 0u);
+  EXPECT_EQ(host.error(), LinkError::kRejected);
+  host.Shutdown();
+  a.reset();
 }

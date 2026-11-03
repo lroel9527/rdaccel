@@ -117,7 +117,9 @@ void Link::OnReceive(transport::Channel ch, std::span<const uint8_t> bytes) {
       if (role_ == Role::kViewer && h_.on_raw) h_.on_raw(ch, bytes);
       return;
     case transport::Channel::kInput:
-      if (role_ != Role::kHost) return;
+      // The host takes nothing but the handshake from a viewer it has not
+      // accepted (the auth hook must not be bypassed).
+      if (role_ != Role::kHost || state_.load() != LinkState::kConnected) return;
       input_parser_.Append(bytes);
       while (auto m = input_parser_.Next()) {
         if (h_.on_other) h_.on_other(*m);
@@ -128,6 +130,7 @@ void Link::OnReceive(transport::Channel ch, std::span<const uint8_t> bytes) {
       }
       return;
     case transport::Channel::kMessage:
+      if (role_ == Role::kHost && state_.load() != LinkState::kConnected) return;
       message_parser_.Append(bytes);
       while (auto m = message_parser_.Next()) {
         if (auto* am = std::get_if<proto::AppMessage>(&*m); am && h_.on_message) {
@@ -175,8 +178,10 @@ void Link::HandleControl(proto::Message&& m) {
       Fail(LinkError::kRejected, proto::GoodbyeReason::kRejected);
       return;
     }
-    SendControl(proto::Welcome{});
+    // Connected before the Welcome goes out, so whatever the viewer sends
+    // once it has the Welcome is accepted.
     SetState(LinkState::kConnected, LinkError::kNone);
+    SendControl(proto::Welcome{});
     return;
   }
   if (std::holds_alternative<proto::Ping>(m)) return;
@@ -187,12 +192,16 @@ void Link::HandleControl(proto::Message&& m) {
     SetState(LinkState::kDisconnected, e);
     return;
   }
-  if (role_ == Role::kHost && h_.on_other) h_.on_other(m);
+  if (role_ == Role::kHost && state_.load() == LinkState::kConnected && h_.on_other) h_.on_other(m);
 }
 
 bool Link::SendMessage(uint32_t type, std::span<const uint8_t> payload, std::string* error) {
   if (disconnected()) {
     if (error) *error = std::string("disconnected: ") + LinkErrorText(this->error());
+    return false;
+  }
+  if (state_.load() != LinkState::kConnected) {
+    if (error) *error = "not connected yet";
     return false;
   }
   if (type == 0 || (type < kFirstUserMessage && type != kClipboardTextMessage)) {

@@ -77,7 +77,8 @@ std::unique_ptr<Viewer> Viewer::Create(std::unique_ptr<Transport> transport,
 }
 
 void Viewer::SendInput(const InputEvent& ev) {
-  if (impl_->link && impl_->link->disconnected()) return;
+  // The host ignores input from a viewer it has not accepted yet.
+  if (impl_->link && impl_->link->state() != ConnectionState::kConnected) return;
   impl_->session->SendInput(ev);
 }
 

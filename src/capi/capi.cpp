@@ -40,6 +40,7 @@ rda_status Classify(const std::string& msg, rda_status fallback) {
   if (Contains(msg, "frame size changed")) return RDA_ERR_INVALID_ARG;
   if (msg.rfind("disconnected", 0) == 0 || Contains(msg, "connection closed")) return RDA_ERR_CLOSED;
   if (Contains(msg, "reserved") || Contains(msg, "larger than")) return RDA_ERR_INVALID_ARG;
+  if (Contains(msg, "not connected yet")) return RDA_ERR_BUSY;
   return fallback;
 }
 
