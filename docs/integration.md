@@ -73,6 +73,8 @@ viewer->SendInput({rdaccel::InputKind::kMouseMove, 100, 200});
 
 ## 1.1 连接状态、应用消息、输入
 
+**连不上怎么办。** `ConnectUdp` 不阻塞，`Viewer` 创建后在 `peer_timeout_ms` 内等不到 Host 的回应就以 `RDA_ERR_TIMEOUT` 断开，这就是连接超时。`ListenTcp` / `ListenUdp` 会阻塞到对端出现；不想阻塞就用 `BindUdp`，马上创建 `Host`，用状态回调等对方连上。
+
 **连接状态。** `Viewer` 创建后先发握手（协议版本、能力位、可选的认证令牌），`Host` 检查后回应，两边进入 `kConnected`。之后双方大约每秒互发心跳，`peer_timeout_ms`（默认 10 秒，0 = 不超时）内收不到对方任何数据就判定断开。主动关闭（析构 `Viewer` / `Host`）会给对方发 Goodbye，对方立刻收到断开而不是等超时。断开是终态，要重连就重建 `Host` / `Viewer` 和传输。
 
 ```cpp
@@ -120,13 +122,15 @@ host.SetMessageHandler([](uint32_t type, std::span<const uint8_t> p) { ... });
 
 - `Host` 和 `Viewer` 拥有传给它们的 `Transport`，析构时先停接收线程，再释放会话。析构返回后不会再有任何回调。C 接口里 `rda_host_create` / `rda_viewer_create` 无论成功失败都接管传入的 `rda_transport*`，调用方不要再释放它；没交出去的传输用 `rda_transport_destroy` 释放。
 - 回调里捕获的对象必须活得比 `Host` / `Viewer` 长，或者在它们析构之前不再被用到。最简单的做法是先声明回调用到的状态，再声明 `Host` / `Viewer`，让它们先析构。
-- 第一帧决定分辨率。之后分辨率变化的帧会被拒绝（`SubmitFrame` 返回 false），要换分辨率就重建 `Host`。
+- 分辨率可以随时变：送进一帧新尺寸的画面（或采集到的屏幕分辨率变了），Host 就以新尺寸重开编码器、发关键帧，新的尺寸信息跟画面走同一个有序通道，接收端在新旧画面之间准确切换，再收到一次 `on_stream_info`。`HostStats::resolution_changes` 记录次数，帧号连续。
 
 ## 4. 传输怎么选
 
 | 传输 | 适合 | 带宽自适应 |
 | --- | --- | --- |
 | `ListenUdp` / `ConnectUdp` | 真实网络，尤其是带宽不稳定或会丢包的链路 | 有：带宽估计、按估计调码率、队列满时跳帧；光标和输入先于视频发送 |
+| `BindUdp` | 同上，发送端不想阻塞：立刻返回，第一个发来数据的接收端成为对端；之前送进的帧只保留最新一张，连上后从关键帧开始 | 同上 |
+| `UdpFromFd` | 你自己建好的 UDP socket（NAT 打洞之后、由启动器传进来）；成功后归库所有 | 同上 |
 | `ListenTcp` / `ConnectTcp` | 局域网、只能走 TCP 的环境 | 没有：按 `bitrate_bps` 固定码率，网络慢时延迟会越积越大 |
 | `CreateLocalPipe` | 同一进程（测试、回环演示） | 不需要 |
 | `CreateRecordingTransport` | 录制成 `.rdstream` 文件，之后用 `Viewer::FeedRecording` 回放 | 不需要 |

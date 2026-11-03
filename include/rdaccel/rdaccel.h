@@ -266,6 +266,15 @@ RDA_API rda_status rda_tcp_connect(const char* host, uint16_t port, rda_transpor
  * arrives. Use on real networks. */
 RDA_API rda_status rda_udp_listen(uint16_t port, rda_transport** out);
 RDA_API rda_status rda_udp_connect(const char* host, uint16_t port, rda_transport** out);
+/* Host side without blocking: binds `port` (IPv4 and IPv6) and returns at
+ * once; the first viewer that sends becomes the peer. Create the host right
+ * away and watch on_state for RDA_STATE_CONNECTED. */
+RDA_API rda_status rda_udp_bind(uint16_t port, rda_transport** out);
+/* Uses your UDP socket (after NAT traversal, from a launcher, ...); taken
+ * over (closed with the transport) only on success. A connected socket talks
+ * to its peer; an unconnected one to the first sender, host side only.
+ * viewer_side != 0 for the end that creates the viewer (must be connected). */
+RDA_API rda_status rda_udp_from_fd(int fd, int viewer_side, rda_transport** out);
 
 /* A simulated network path (tests, benchmarks), running the UDP protocol. */
 typedef struct rda_bandwidth_step {
@@ -395,6 +404,7 @@ typedef struct rda_host_stats {
   uint64_t cursor_bytes;
   uint64_t encode_us_total;
   uint64_t lossless_us_total;
+  uint64_t resolution_changes; /* frames of a new size started a new stream */
 } rda_host_stats;
 
 RDA_API void rda_host_config_default(rda_host_config* c);
@@ -413,7 +423,9 @@ RDA_API rda_status rda_host_start_capture(rda_host* h);
 RDA_API void rda_host_stop_capture(rda_host* h);
 
 /* Mode 2: feed frames yourself. `dirty` (may be NULL) hints what changed.
- * The first frame fixes the resolution. Calls must not overlap. */
+ * A frame of another size than the last starts a new stream at that size
+ * (new encoder, keyframe; the viewer gets on_stream_info again). Calls must
+ * not overlap. */
 RDA_API rda_status rda_host_submit_frame(rda_host* h, const rda_image* bgra,
                                          uint64_t capture_time_us, const rda_rect* dirty,
                                          size_t dirty_count);

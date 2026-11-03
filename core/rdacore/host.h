@@ -129,6 +129,7 @@ struct HostStats {
   // 100 ms while a keyframe was requested or a skipped frame's changes were
   // still unsent (a static screen; ScreenCaptureKit only delivers changes).
   uint64_t frames_resubmitted = 0;
+  uint64_t resolution_changes = 0;  // frames of a new size started a new stream
   int64_t target_bitrate_bps = 0;          // current encoder budget
   int64_t bandwidth_estimate_bps = 0;      // from the transport
   uint32_t rtt_us = 0;
@@ -180,7 +181,8 @@ class Host {
   // `dirty` is an optional hint of what may have changed (empty = anything);
   // the library still compares tiles, so a coarse hint is fine.
   // `capture_time_us` is any monotonic microsecond clock, e.g. NowMicros().
-  // The first frame fixes the resolution; frames of another size are rejected.
+  // A frame of another size starts a new stream at that size (new encoder,
+  // keyframe; the viewer gets on_stream_info again).
   // Returns false (with `error`) if the frame could not be encoded; the next
   // frame then becomes a full refresh. Calls must not overlap.
   bool SubmitFrame(const ImageView& bgra, uint64_t capture_time_us,

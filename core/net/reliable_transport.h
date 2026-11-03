@@ -49,6 +49,7 @@ class ReliableTransport final : public transport::ITransport {
   void SetReceiver(ReceiveFn fn) override;
   void Close() override;
   bool GetStats(TransportStats* out) const override;
+  bool PeerKnown() const override;
 
  private:
   static constexpr int kChannels = kChannelCount;

@@ -378,6 +378,17 @@ inline std::unique_ptr<Transport> ConnectUdp(const std::string& host, uint16_t p
   rda_transport* t = nullptr;
   return detail::Native(rda_udp_connect(host.c_str(), port, &t), &t, error);
 }
+// Returns at once; the first viewer that sends becomes the peer (see
+// Host::SetStateHandler).
+inline std::unique_ptr<Transport> BindUdp(uint16_t port, std::string* error = nullptr) {
+  rda_transport* t = nullptr;
+  return detail::Native(rda_udp_bind(port, &t), &t, error);
+}
+// Your UDP socket, taken over on success (see rda_udp_from_fd).
+inline std::unique_ptr<Transport> UdpFromFd(int fd, bool viewer_side, std::string* error = nullptr) {
+  rda_transport* t = nullptr;
+  return detail::Native(rda_udp_from_fd(fd, viewer_side ? 1 : 0, &t), &t, error);
+}
 
 struct NetworkConditions {
   int64_t bandwidth_bps = 0;  // 0 = unlimited
@@ -510,6 +521,7 @@ struct HostStats {
   uint64_t cursor_bytes = 0;
   uint64_t encode_us_total = 0;
   uint64_t lossless_us_total = 0;
+  uint64_t resolution_changes = 0;
 };
 
 class Host {
@@ -713,6 +725,7 @@ class Host {
     o.cursor_bytes = s.cursor_bytes;
     o.encode_us_total = s.encode_us_total;
     o.lossless_us_total = s.lossless_us_total;
+    o.resolution_changes = s.resolution_changes;
     return o;
   }
 

@@ -77,6 +77,11 @@ struct HostOptions {
   // Install the transport's receive callback (input, keyframe requests).
   // Host turns this off: its Link receives and calls in.
   bool own_receiver = true;
+  // Send the Hello on the video channel instead of control: after a
+  // resolution change it must arrive in order with the frames.
+  bool hello_on_video = false;
+  // Frame ids continue across sessions of one host.
+  uint64_t first_frame_id = 1;
 };
 
 class HostSession {
@@ -112,6 +117,9 @@ class HostSession {
   int32_t height() const { return height_; }
 
   HostStats stats() const;
+  // Continues the counters of an earlier session (resolution change).
+  void AdoptStats(const HostStats& s);
+  uint64_t next_frame_id() const { return next_frame_id_; }  // under the frame path
 
  private:
   void OnReceive(transport::Channel ch, std::span<const uint8_t> bytes);

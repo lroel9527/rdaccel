@@ -37,7 +37,6 @@ bool Contains(const std::string& s, const char* needle) { return s.find(needle) 
 rda_status Classify(const std::string& msg, rda_status fallback) {
   if (Contains(msg, "already running")) return RDA_ERR_BUSY;
   if (Contains(msg, "ermission")) return RDA_ERR_PERMISSION;
-  if (Contains(msg, "frame size changed")) return RDA_ERR_INVALID_ARG;
   if (msg.rfind("disconnected", 0) == 0 || Contains(msg, "connection closed")) return RDA_ERR_CLOSED;
   if (Contains(msg, "reserved") || Contains(msg, "larger than")) return RDA_ERR_INVALID_ARG;
   if (Contains(msg, "not connected yet")) return RDA_ERR_BUSY;
@@ -399,6 +398,25 @@ rda_status rda_udp_connect(const char* host, uint16_t port, rda_transport** out)
   RDA_GUARD_END
 }
 
+rda_status rda_udp_bind(uint16_t port, rda_transport** out) {
+  RDA_GUARD_BEGIN
+  if (!out) return Fail(RDA_ERR_INVALID_ARG, "out is required");
+  std::string err;
+  auto t = rdacore::BindUdp(port, &err);
+  return Wrap(std::move(t), out, err, RDA_ERR_TRANSPORT);
+  RDA_GUARD_END
+}
+
+rda_status rda_udp_from_fd(int fd, int viewer_side, rda_transport** out) {
+  RDA_GUARD_BEGIN
+  if (fd < 0 || !out) return Fail(RDA_ERR_INVALID_ARG, "fd and out are required");
+  std::string err;
+  auto t = rdacore::UdpFromFd(fd, viewer_side != 0, &err);
+  if (!t) return Fail(RDA_ERR_INVALID_ARG, err);
+  return Wrap(std::move(t), out, err, RDA_ERR_TRANSPORT);
+  RDA_GUARD_END
+}
+
 void rda_network_conditions_default(rda_network_conditions* c) {
   if (!c) return;
   const rdacore::NetworkConditions d;
@@ -746,6 +764,7 @@ rda_status rda_host_get_stats(const rda_host* h, rda_host_stats* out) {
   c.cursor_bytes = s.cursor_bytes;
   c.encode_us_total = s.encode_us_total;
   c.lossless_us_total = s.lossless_us_total;
+  c.resolution_changes = s.resolution_changes;
   if (!WriteStruct(c, out)) return Fail(RDA_ERR_INVALID_ARG, "out needs struct_size");
   return RDA_OK;
   RDA_GUARD_END
