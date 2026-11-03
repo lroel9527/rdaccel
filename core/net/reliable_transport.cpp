@@ -23,8 +23,9 @@ constexpr uint64_t kBwWindowRounds = 10;
 constexpr double kStartupGain = 2.885;
 constexpr double kProbeGains[8] = {1.25, 0.75, 1, 1, 1, 1, 1, 1};
 constexpr size_t kMaxAckRanges = 32;
-// Sending order: small interactive channels first, video last.
-constexpr int kPriority[5] = {0, 1, 4, 2, 3};
+// Sending order: small interactive channels first, then surface commands,
+// application messages (possibly large: a pasted image), video last.
+constexpr int kPriority[kChannelCount] = {0, 1, 4, 2, 5, 3};
 
 uint64_t Now() { return capture::MonotonicMicros(); }
 
@@ -56,6 +57,19 @@ ReliableTransport::ReliableTransport(std::unique_ptr<DatagramSocket> socket, Rel
 }
 
 ReliableTransport::~ReliableTransport() {
+  // Linger briefly so the last control bytes (a Goodbye) reach the peer:
+  // wait until they are acknowledged, at most kLingerUs.
+  {
+    constexpr uint64_t kLingerUs = 300'000;
+    const uint64_t deadline = Now() + kLingerUs;
+    const auto& control = out_[static_cast<size_t>(transport::Channel::kControl)];
+    std::unique_lock<std::mutex> lock(mu_);
+    while (!closed_ && heard_peer_ && !control.buf.empty() && Now() < deadline) {
+      lock.unlock();
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      lock.lock();
+    }
+  }
   Close();
   if (worker_.joinable()) worker_.join();
 }

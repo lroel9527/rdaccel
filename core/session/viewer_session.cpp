@@ -13,8 +13,9 @@ ViewerSession::ViewerSession(transport::ITransport* transport,
   if (transport) Attach(transport);
 }
 
-void ViewerSession::Attach(transport::ITransport* transport) {
+void ViewerSession::Attach(transport::ITransport* transport, bool own_receiver) {
   transport_ = transport;
+  if (!own_receiver) return;
   transport_->SetReceiver(
       [this](transport::Channel ch, std::span<const uint8_t> bytes) { OnReceive(ch, bytes); });
 }

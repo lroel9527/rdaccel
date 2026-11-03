@@ -76,6 +76,18 @@ int main(int argc, char** argv) {
     // A missing cursor is not fatal; anything else stops the stream.
     if (e.rfind("cursor", 0) != 0) failed = true;
   });
+  std::atomic<bool> viewer_left{false};
+  host.SetStateHandler([&](rdaccel::ConnectionState st, rda_status reason) {
+    if (st == rdaccel::ConnectionState::kConnected) std::printf("viewer said hello\n");
+    if (st == rdaccel::ConnectionState::kDisconnected) {
+      std::printf("viewer left: %s\n", rda_status_str(reason));
+      viewer_left = true;
+    }
+    std::fflush(stdout);
+  });
+  host.SetMessageHandler([](uint32_t type, std::span<const uint8_t> p) {
+    std::printf("message %u from the viewer, %zu bytes\n", type, p.size());
+  });
   host.SetInputHandler([](const rdaccel::InputEvent& ev) {
     // A real application would inject the event into the OS here.
     (void)ev;
@@ -95,7 +107,7 @@ int main(int argc, char** argv) {
   auto next_print = t0 + std::chrono::seconds(1);
   rdaccel::HostStats last;
   std::vector<uint8_t> px;
-  for (uint64_t i = 0; !g_stop && !failed; ++i) {
+  for (uint64_t i = 0; !g_stop && !failed && !viewer_left; ++i) {
     const auto now = std::chrono::steady_clock::now();
     const double elapsed = std::chrono::duration<double>(now - t0).count();
     if (seconds > 0 && elapsed >= seconds) break;

@@ -9,6 +9,7 @@
 #include <span>
 #include <string>
 
+#include "rdacore/connection.h"
 #include "rdacore/cursor.h"
 #include "rdacore/geometry.h"
 #include "rdacore/image.h"
@@ -88,6 +89,17 @@ struct HostConfig {
   bool adaptive_bitrate = true;
   int64_t min_bitrate_bps = 300'000;
   int32_t max_queue_ms = 50;
+
+  // Connection: once a viewer has connected, no bytes from it for this long
+  // means it is gone (disconnected, kTimeout). 0 = never time out.
+  int32_t peer_timeout_ms = 10'000;
+  // Decides whether a viewer may connect, from the token it sent (on the
+  // transport thread). Empty = everyone may.
+  std::function<bool(std::span<const uint8_t> token)> auth;
+  // Initial state and message handlers (see Host::SetStateHandler), set
+  // before the connection can change.
+  std::function<void(ConnectionState, ConnectionError)> on_state;
+  std::function<void(uint32_t type, std::span<const uint8_t> payload)> on_message;
 };
 
 struct HostStats {
@@ -132,6 +144,8 @@ class Host {
  public:
   using InputHandler = std::function<void(const InputEvent&)>;
   using ErrorHandler = std::function<void(const std::string&)>;
+  using StateHandler = std::function<void(ConnectionState, ConnectionError)>;
+  using MessageHandler = std::function<void(uint32_t type, std::span<const uint8_t> payload)>;
 
   // Takes ownership of the transport.
   explicit Host(std::unique_ptr<Transport> transport, HostConfig config = {});
@@ -145,6 +159,17 @@ class Host {
   // Errors that happen on a background thread (e.g. the encoder cannot be
   // created for the captured resolution).
   void SetErrorHandler(ErrorHandler fn);
+
+  // Connection state changes: kConnected when a compatible viewer said hello,
+  // kDisconnected (final) with the reason. Transport or timer thread.
+  void SetStateHandler(StateHandler fn);
+  ConnectionState state() const;
+
+  // Application messages from the viewer (transport thread), and sending
+  // them: reliable, ordered, at most 16 MiB, apart from the picture. Types
+  // below kFirstUserMessage are the library's (kClipboardTextMessage).
+  void SetMessageHandler(MessageHandler fn);
+  bool SendMessage(uint32_t type, std::span<const uint8_t> payload, std::string* error = nullptr);
 
   // Mode 1: let the library capture the main display (ScreenCaptureKit on
   // macOS, X11 on Linux). Fails without the Screen Recording permission.

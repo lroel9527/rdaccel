@@ -76,6 +76,11 @@ int main(int argc, char** argv) {
     }
     cursor.image = nullptr;  // only valid during the call
   };
+  handlers.on_state = [](rdaccel::ConnectionState st, rda_status reason) {
+    if (st == rdaccel::ConnectionState::kConnected) std::printf("connected\n");
+    if (st == rdaccel::ConnectionState::kDisconnected) std::printf("disconnected: %s\n", rda_status_str(reason));
+    std::fflush(stdout);
+  };
   auto viewer = rdaccel::Viewer::Create(std::move(transport), std::move(handlers), &err);
   if (!viewer) {
     std::fprintf(stderr, "%s\n", err.c_str());

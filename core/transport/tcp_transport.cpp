@@ -156,7 +156,7 @@ void TcpTransport::ReadLoop() {
     if (!ReadAll(fd_, header, sizeof(header))) break;
     uint32_t n = 0;
     for (int i = 0; i < 4; ++i) n |= static_cast<uint32_t>(header[1 + i]) << (8 * i);
-    if (n > kMaxChunk || header[0] > static_cast<uint8_t>(Channel::kCursor)) break;
+    if (n > kMaxChunk || header[0] >= kChannelCount) break;
     buf.resize(n);
     if (!ReadAll(fd_, buf.data(), n)) break;
     ReceiveFn fn;

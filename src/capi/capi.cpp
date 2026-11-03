@@ -38,6 +38,9 @@ rda_status Classify(const std::string& msg, rda_status fallback) {
   if (Contains(msg, "already running")) return RDA_ERR_BUSY;
   if (Contains(msg, "ermission")) return RDA_ERR_PERMISSION;
   if (Contains(msg, "frame size changed")) return RDA_ERR_INVALID_ARG;
+  if (msg.rfind("disconnected", 0) == 0 || Contains(msg, "connection closed")) return RDA_ERR_CLOSED;
+  if (Contains(msg, "reserved") || Contains(msg, "larger than")) return RDA_ERR_INVALID_ARG;
+  if (Contains(msg, "not connected yet")) return RDA_ERR_BUSY;
   return fallback;
 }
 
@@ -154,7 +157,32 @@ rdacore::NetworkConditions FromC(const rda_network_conditions& c) {
   return o;
 }
 
-bool ValidChannel(rda_channel ch) { return ch >= RDA_CHANNEL_CONTROL && ch <= RDA_CHANNEL_CURSOR; }
+bool ValidChannel(rda_channel ch) { return ch >= RDA_CHANNEL_CONTROL && ch < RDA_CHANNEL_COUNT; }
+
+static_assert(RDA_STATE_CONNECTING == static_cast<int>(rdacore::ConnectionState::kConnecting) &&
+              RDA_STATE_CONNECTED == static_cast<int>(rdacore::ConnectionState::kConnected) &&
+              RDA_STATE_DISCONNECTED == static_cast<int>(rdacore::ConnectionState::kDisconnected));
+static_assert(RDA_CHANNEL_COUNT == rdacore::kChannelCount);
+static_assert(RDA_MSG_CLIPBOARD_TEXT == rdacore::kClipboardTextMessage &&
+              RDA_MSG_USER_FIRST == rdacore::kFirstUserMessage);
+static_assert(RDA_KEYCODE_NONE == rdacore::kNoKeyCode);
+
+rda_state ToC(rdacore::ConnectionState s) { return static_cast<rda_state>(s); }
+
+rda_status ToC(rdacore::ConnectionError e) {
+  switch (e) {
+    case rdacore::ConnectionError::kNone: return RDA_OK;
+    case rdacore::ConnectionError::kClosed: return RDA_ERR_CLOSED;
+    case rdacore::ConnectionError::kTimeout: return RDA_ERR_TIMEOUT;
+    case rdacore::ConnectionError::kProtocol: return RDA_ERR_PROTOCOL;
+    case rdacore::ConnectionError::kRejected: return RDA_ERR_AUTH;
+  }
+  return RDA_ERR_CLOSED;
+}
+
+rda_status SendMessageStatus(bool ok, const std::string& err) {
+  return ok ? RDA_OK : Fail(Classify(err, RDA_ERR_CLOSED), err);
+}
 
 // ---- custom transports ----------------------------------------------------
 
@@ -491,6 +519,7 @@ rdacore::HostConfig ToHostConfig(const rda_host_config& c) {
   o.adaptive_bitrate = c.adaptive_bitrate != 0;
   o.min_bitrate_bps = c.min_bitrate_bps;
   o.max_queue_ms = c.max_queue_ms;
+  o.peer_timeout_ms = c.peer_timeout_ms;
   return o;
 }
 
@@ -513,6 +542,7 @@ std::string CheckHostConfig(const rda_host_config& c) {
   if (c.refine_frames < 0 || c.max_queue_ms < 1 || c.video_region_bitrate_bps < 0) {
     return "refine_frames, max_queue_ms or video_region_bitrate_bps out of range";
   }
+  if (c.peer_timeout_ms < 0) return "peer_timeout_ms must not be negative";
   return {};
 }
 
@@ -548,6 +578,7 @@ void rda_host_config_default(rda_host_config* c) {
   c->adaptive_bitrate = d.adaptive_bitrate;
   c->min_bitrate_bps = d.min_bitrate_bps;
   c->max_queue_ms = d.max_queue_ms;
+  c->peer_timeout_ms = d.peer_timeout_ms;
 }
 
 rda_status rda_host_create(rda_transport* transport, const rda_host_config* config, rda_host** out) {
@@ -561,9 +592,25 @@ rda_status rda_host_create(rda_transport* transport, const rda_host_config* conf
   if (h->config.encoder) h->encoder = h->config.encoder;
   h->config.encoder = h->encoder.empty() ? nullptr : h->encoder.c_str();
 
-  h->host = std::make_unique<rdacore::Host>(std::move(owned->t), ToHostConfig(h->config));
-  owned.reset();
   rda_host* raw = h.get();
+  rdacore::HostConfig hc = ToHostConfig(h->config);
+  if (raw->config.on_auth) {
+    hc.auth = [raw](std::span<const uint8_t> token) {
+      return raw->config.on_auth(raw->config.user, token.data(), token.size()) != 0;
+    };
+  }
+  if (raw->config.on_state) {
+    hc.on_state = [raw](rdacore::ConnectionState st, rdacore::ConnectionError e) {
+      raw->config.on_state(raw->config.user, ToC(st), ToC(e));
+    };
+  }
+  if (raw->config.on_message) {
+    hc.on_message = [raw](uint32_t type, std::span<const uint8_t> p) {
+      raw->config.on_message(raw->config.user, type, p.data(), p.size());
+    };
+  }
+  h->host = std::make_unique<rdacore::Host>(std::move(owned->t), std::move(hc));
+  owned.reset();
   if (raw->config.on_input) {
     raw->host->SetInputHandler([raw](const rdacore::InputEvent& ev) {
       const rda_input_event c = ToC(ev);
@@ -646,6 +693,23 @@ void rda_host_request_keyframe(rda_host* h) {
   RDA_GUARD_END_VOID
 }
 
+rda_state rda_host_get_state(const rda_host* h) {
+  try {
+    return h ? ToC(h->host->state()) : RDA_STATE_DISCONNECTED;
+  } catch (...) {
+    return RDA_STATE_DISCONNECTED;
+  }
+}
+
+rda_status rda_host_send_message(rda_host* h, uint32_t type, const uint8_t* payload, size_t n) {
+  RDA_GUARD_BEGIN
+  if (!h || (!payload && n)) return Fail(RDA_ERR_INVALID_ARG, "host and payload are required");
+  std::string err;
+  const bool ok = h->host->SendMessage(type, std::span<const uint8_t>(payload, n), &err);
+  return SendMessageStatus(ok, err);
+  RDA_GUARD_END
+}
+
 rda_status rda_host_get_stats(const rda_host* h, rda_host_stats* out) {
   RDA_GUARD_BEGIN
   if (!h || !out) return Fail(RDA_ERR_INVALID_ARG, "host and out are required");
@@ -712,6 +776,7 @@ void rda_viewer_config_default(rda_viewer_config* c) {
   if (!c) return;
   *c = rda_viewer_config{};
   c->struct_size = sizeof(*c);
+  c->peer_timeout_ms = rdacore::ViewerOptions{}.peer_timeout_ms;
 }
 
 rda_status rda_viewer_create(rda_transport* transport, const rda_viewer_config* config, rda_viewer** out) {
@@ -723,6 +788,15 @@ rda_status rda_viewer_create(rda_transport* transport, const rda_viewer_config* 
   if (config && !ReadStruct(config, v->config)) return Fail(RDA_ERR_INVALID_ARG, "config needs struct_size");
   rda_viewer* raw = v.get();
   const rda_viewer_config& c = raw->config;
+  if (c.peer_timeout_ms < 0) return Fail(RDA_ERR_INVALID_ARG, "peer_timeout_ms must not be negative");
+  if ((!c.auth_token && c.auth_token_len) || c.auth_token_len > 4096) {
+    return Fail(RDA_ERR_INVALID_ARG, "auth_token must be at most 4096 bytes");
+  }
+  rdacore::ViewerOptions opts;
+  opts.peer_timeout_ms = c.peer_timeout_ms;
+  if (c.auth_token_len) opts.auth_token.assign(c.auth_token, c.auth_token + c.auth_token_len);
+  raw->config.auth_token = nullptr;  // not kept: the caller's memory
+  raw->config.auth_token_len = 0;
 
   rdacore::ViewerHandlers h;
   if (c.on_stream_info) {
@@ -761,10 +835,20 @@ rda_status rda_viewer_create(rda_transport* transport, const rda_viewer_config* 
       raw->config.on_cursor(raw->config.user, &cs);
     };
   }
+  if (c.on_state) {
+    h.on_state = [raw](rdacore::ConnectionState st, rdacore::ConnectionError e) {
+      raw->config.on_state(raw->config.user, ToC(st), ToC(e));
+    };
+  }
+  if (c.on_message) {
+    h.on_message = [raw](uint32_t type, std::span<const uint8_t> p) {
+      raw->config.on_message(raw->config.user, type, p.data(), p.size());
+    };
+  }
   std::string err;
   std::unique_ptr<rdacore::Transport> t = owned ? std::move(owned->t) : nullptr;
   owned.reset();
-  v->viewer = rdacore::Viewer::Create(std::move(t), std::move(h), &err);
+  v->viewer = rdacore::Viewer::Create(std::move(t), std::move(h), std::move(opts), &err);
   if (!v->viewer) return Fail(RDA_ERR_UNSUPPORTED, err);
   *out = v.release();
   return RDA_OK;
@@ -782,6 +866,23 @@ rda_status rda_viewer_send_input(rda_viewer* v, const rda_input_event* ev) {
   if (!ReadStruct(ev, e) || !FromC(e, ie)) return Fail(RDA_ERR_INVALID_ARG, "bad input event");
   v->viewer->SendInput(ie);
   return RDA_OK;
+  RDA_GUARD_END
+}
+
+rda_state rda_viewer_get_state(const rda_viewer* v) {
+  try {
+    return v ? ToC(v->viewer->state()) : RDA_STATE_DISCONNECTED;
+  } catch (...) {
+    return RDA_STATE_DISCONNECTED;
+  }
+}
+
+rda_status rda_viewer_send_message(rda_viewer* v, uint32_t type, const uint8_t* payload, size_t n) {
+  RDA_GUARD_BEGIN
+  if (!v || (!payload && n)) return Fail(RDA_ERR_INVALID_ARG, "viewer and payload are required");
+  std::string err;
+  const bool ok = v->viewer->SendMessage(type, std::span<const uint8_t>(payload, n), &err);
+  return SendMessageStatus(ok, err);
   RDA_GUARD_END
 }
 
@@ -843,6 +944,11 @@ rda_status rda_recording_read(const char* path, uint8_t** bytes, size_t* n) {
 }
 
 void rda_free(void* p) { std::free(p); }
+
+uint32_t rda_keycode_from_mac(uint32_t mac_keycode) { return rdacore::HidFromMacKeyCode(mac_keycode); }
+uint32_t rda_keycode_to_mac(uint32_t hid_usage) { return rdacore::HidToMacKeyCode(hid_usage); }
+uint32_t rda_keycode_from_evdev(uint32_t evdev_code) { return rdacore::HidFromEvdevKeyCode(evdev_code); }
+uint32_t rda_keycode_to_evdev(uint32_t hid_usage) { return rdacore::HidToEvdevKeyCode(hid_usage); }
 
 rda_status rda_test_pattern_render(uint64_t index, int32_t width, int32_t height, uint8_t* bgra,
                                    int incremental, rda_rect* rects, size_t max_rects, size_t* rect_count) {

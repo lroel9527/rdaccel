@@ -44,6 +44,7 @@ set(RDACCEL_SOURCES
   src/viewer.cpp
   src/transport.cpp
   src/misc.cpp
+  src/keycodes.cpp
   core/proto/wire.cpp
   core/proto/messages.cpp
   core/tile/tile_diff.cpp
@@ -59,6 +60,7 @@ set(RDACCEL_SOURCES
   core/net/udp_socket.cpp
   core/net/reliable_transport.cpp
   core/session/host_session.cpp
+  core/session/link.cpp
   core/session/viewer_session.cpp
   core/session/rate_control.cpp
   core/session/cursor_channel.cpp
@@ -205,6 +207,8 @@ if(RDACCEL_BUILD_TESTS)
     tests/test_reliable_transport.cpp
     tests/test_session.cpp
     tests/test_cursor.cpp
+    tests/test_link.cpp
+    tests/test_keycodes.cpp
   )
   target_link_libraries(rdaccel_tests PRIVATE rdaccel_internal GTest::gtest_main)
   include(GoogleTest)

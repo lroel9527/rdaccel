@@ -51,7 +51,7 @@ class ReliableTransport final : public transport::ITransport {
   bool GetStats(TransportStats* out) const override;
 
  private:
-  static constexpr int kChannels = 5;
+  static constexpr int kChannels = kChannelCount;
 
   struct SendStream {
     std::deque<uint8_t> buf;  // bytes from `base` on, kept until acknowledged

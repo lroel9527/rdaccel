@@ -71,17 +71,50 @@ viewer->SendInput({rdaccel::InputKind::kMouseMove, 100, 200});
 
 完整可运行的例子：`examples/serve.cpp`（发送端）和 `examples/view.cpp`（接收端）；同一进程里的最小例子是 `examples/minimal/main.cpp`，纯 C 版是 `examples/minimal_c/main.c`；带窗口的 macOS 例子是 `examples/loopback_mac/main.mm`。
 
+## 1.1 连接状态、应用消息、输入
+
+**连接状态。** `Viewer` 创建后先发握手（协议版本、能力位、可选的认证令牌），`Host` 检查后回应，两边进入 `kConnected`。之后双方大约每秒互发心跳，`peer_timeout_ms`（默认 10 秒，0 = 不超时）内收不到对方任何数据就判定断开。主动关闭（析构 `Viewer` / `Host`）会给对方发 Goodbye，对方立刻收到断开而不是等超时。断开是终态，要重连就重建 `Host` / `Viewer` 和传输。
+
+```cpp
+host.SetStateHandler([](rdaccel::ConnectionState s, rda_status reason) {
+  // kConnected：对方握手成功；kDisconnected：reason 是
+  // RDA_ERR_CLOSED（对方关闭或传输断了）、RDA_ERR_TIMEOUT、
+  // RDA_ERR_PROTOCOL（版本不兼容）、RDA_ERR_AUTH（认证被拒）
+});
+// Viewer 侧同样有 ViewerHandlers::on_state，也可以随时查 host.state() / viewer->state()。
+```
+
+连接建立之前 `SendMessage` 返回失败（C：`RDA_ERR_BUSY`），`SendInput` 被丢弃，Host 也不接受对方的输入和消息（认证钩子不能被绕过）；所以要发东西请等 `kConnected`。断开后 `SubmitFrame` 和 `SendMessage` 返回失败（C：`RDA_ERR_CLOSED`），`SendInput` 被丢弃，库自己的屏幕采集不再编码。
+
+**认证钩子。** 接收端在 `ViewerOptions::auth_token`（C：`rda_viewer_config.auth_token`，最多 4096 字节）里放一段令牌，发送端在 `HostConfig::auth`（C：`on_auth`）里决定是否接受，拒绝时两边都以 `RDA_ERR_AUTH` 断开。令牌目前是明文传输的，真正的身份验证要等加密上线（0.3）后再依赖它；现在跨公网仍请放在 VPN 或自己的加密传输里。
+
+**版本协商。** 握手里双方各报“我说的版本”和“我最低能服务的对方版本”，新版本只要还支持旧版本就能互通；不兼容时以 `RDA_ERR_PROTOCOL` 断开，日志里写明双方版本。解析器会跳过不认识的消息类型、忽略消息末尾新增的字段，所以以后加功能不必升最低版本。
+
+**应用消息。** 双向、可靠、有序，每条最多 16 MiB，走单独的通道，不会卡住画面：
+
+```cpp
+viewer->SendMessage(rdaccel::kClipboardTextMessage, std::string_view("要粘贴的文字"));  // 1 = UTF-8 剪贴板文本
+host.SendMessage(rdaccel::kFirstUserMessage + 3, payload);   // 0x10000 起给应用自己用
+host.SetMessageHandler([](uint32_t type, std::span<const uint8_t> p) { ... });
+```
+
+0x10000 以下的类型是库保留的（现在只定义了 1 = 剪贴板文本），发送保留类型会失败。库只负责传，剪贴板怎么读写由应用决定。
+
+**输入事件。** 键盘事件的 `code` 是 USB HID 用法码（键盘页 0x07：0x04 = A，0x28 = 回车，0xE0 = 左 Ctrl……），跟操作系统无关，所以 Mac 控制端和 Linux 被控端对得上。和本机键码互转：`KeyCodeFromMac` / `KeyCodeToMac`（macOS `kVK_*`、`NSEvent.keyCode`）、`KeyCodeFromEvdev` / `KeyCodeToEvdev`（Linux `KEY_*`，X11 键码减 8）；C 里是 `rda_keycode_from_mac()` 等。鼠标按键是 `kButtonLeft = 1`、`kButtonRight = 2`、`kButtonMiddle = 3`、`kButtonBack = 4`、`kButtonForward = 5`；`modifiers` 是 `kModShift | kModCtrl | kModAlt | kModMeta | kModCaps` 的组合（Mac 的 Command 是 `kModMeta`，Option 是 `kModAlt`）。把事件注入系统仍由应用自己做。
+
 ## 2. 线程
 
 | 回调 / 调用 | 在哪个线程 | 注意 |
 | --- | --- | --- |
 | `on_stream_info`、`on_frame`、`on_cursor` | 传输的接收线程，同一个线程依次调用 | `ImageView` 和 `CursorState::image` 只在回调期间有效，要在别的线程用就先拷贝。回调里不要做耗时的事，否则后面的数据会积压 |
-| `Host` 的 `SetInputHandler` 回调 | 传输的接收线程 | 同上 |
+| `Host` 的 `SetInputHandler`、`SetMessageHandler`、认证钩子，`Viewer` 的 `on_message` | 传输的接收线程 | 同上 |
+| 连接状态回调（`SetStateHandler` / `on_state`） | 传输的接收线程，或库的心跳线程（超时） | 可能和画面回调同时执行。回调里可以调用 `SendMessage`，但不要析构 `Host` / `Viewer` |
 | `Host` 的 `SetErrorHandler` 回调（C：`on_error`） | 出错的那个后台线程（采集线程、光标线程） | 不要在回调里析构 `Host` 或调用 `StopScreenCapture` |
 | 日志回调（`rda_set_log` / `SetLogHandler`） | 任意库线程，可能并发 | 自己加锁；消息里没有画面、按键或消息内容 |
 | `Host::SubmitFrame` | 调用者的线程，同步编码 | 不能并发调用；返回时这一帧已经发给传输 |
 | `Host::SetCursor`、`SetCursorImage`、`RequestKeyframe`、`stats` | 任意线程 | 线程安全 |
 | `Viewer::SendInput`、`RequestKeyframe`、`stats` | 任意线程 | 线程安全 |
+| `SendMessage`、`state()`（两端） | 任意线程 | 线程安全；大消息会分块，多线程同时发也不会交错 |
 
 ## 3. 生命周期
 
@@ -100,7 +133,7 @@ viewer->SendInput({rdaccel::InputKind::kMouseMove, 100, 200});
 | `CreateSimulatedNetwork` | 测试：进程内模拟限速、时延、丢包 | 有（跑的就是 UDP 协议） |
 | 自己实现 `Transport` | QUIC、WebRTC 数据通道、中继服务器 | 实现 `GetStats` 就有 |
 
-自己实现 `Transport` 的要求（C 接口见 `rdaccel.h` 里的 `rda_transport_vtable`，C++ 里继承 `rdaccel::Transport`）：`Send` 线程安全；同一通道内字节有序，可以拆分或合并；接收回调设置之前到达的数据要先存着；析构时停掉自己的线程并等正在执行的回调返回。通道之间最好互相独立（光标、输入不排在视频后面）。如果能测出带宽和排队量，实现 `GetStats`，`Host` 会自动做自适应码率。
+自己实现 `Transport` 的要求（C 接口见 `rdaccel.h` 里的 `rda_transport_vtable`，C++ 里继承 `rdaccel::Transport`）：`Send` 线程安全；同一通道内字节有序，可以拆分或合并；接收回调设置之前到达的数据要先存着；析构时停掉自己的线程并等正在执行的回调返回。通道之间最好互相独立（光标、输入不排在视频后面）。通道号要原样传递：现在有 6 个（`RDA_CHANNEL_COUNT`，第 6 个是应用消息），以后可能增加，256 以下的通道号都应该能传。如果能测出带宽和排队量，实现 `GetStats`，`Host` 会自动做自适应码率。
 
 两端必须用同一种传输。UDP 和 TCP 目前都没有加密和认证，跨公网使用时请放在 VPN、SSH 隧道或自己的加密传输里面。
 
@@ -144,4 +177,4 @@ viewer->SendInput({rdaccel::InputKind::kMouseMove, 100, 200});
 
 - `rda_version()` 返回 `RDA_MAKE_VERSION(major, minor, patch)`，头文件里的 `RDA_VERSION` 是编译时的版本；`rda_version_string()` 返回文字版。
 - 1.0 之前每个次版本可能有不兼容的改动（CMake 包按 `SameMinorVersion` 匹配）。1.0 之后同一主版本内只在结构体末尾加字段、只加函数：库按 `struct_size` 识别旧程序传来的较短结构体，没传的字段用默认值，所以用旧头文件编译的程序可以直接换新库。
-- 线上协议有版本号（`Hello`），旧录制文件仍然能回放。
+- 线上协议有版本号，连接时协商（见 1.1）；当前是 4，旧（版本 3）录制文件仍然能回放。

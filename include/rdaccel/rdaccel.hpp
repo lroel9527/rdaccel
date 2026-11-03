@@ -17,6 +17,7 @@
 #include <mutex>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -131,6 +132,44 @@ struct InputEvent {
   friend bool operator==(const InputEvent&, const InputEvent&) = default;
 };
 
+// Mouse buttons (InputEvent::code of mouse events) and modifier bits.
+inline constexpr uint32_t kButtonLeft = RDA_BUTTON_LEFT;
+inline constexpr uint32_t kButtonRight = RDA_BUTTON_RIGHT;
+inline constexpr uint32_t kButtonMiddle = RDA_BUTTON_MIDDLE;
+inline constexpr uint32_t kButtonBack = RDA_BUTTON_BACK;
+inline constexpr uint32_t kButtonForward = RDA_BUTTON_FORWARD;
+inline constexpr uint32_t kModShift = RDA_MOD_SHIFT;
+inline constexpr uint32_t kModCtrl = RDA_MOD_CTRL;
+inline constexpr uint32_t kModAlt = RDA_MOD_ALT;
+inline constexpr uint32_t kModMeta = RDA_MOD_META;
+inline constexpr uint32_t kModCaps = RDA_MOD_CAPS;
+
+// Key events carry USB HID usages (keyboard page 0x07). From native codes:
+// 0 = unknown key. To native codes: kNoKeyCode = the OS has no such key.
+inline constexpr uint32_t kNoKeyCode = RDA_KEYCODE_NONE;
+inline uint32_t KeyCodeFromMac(uint32_t mac_keycode) { return rda_keycode_from_mac(mac_keycode); }
+inline uint32_t KeyCodeToMac(uint32_t hid_usage) { return rda_keycode_to_mac(hid_usage); }
+inline uint32_t KeyCodeFromEvdev(uint32_t evdev_code) { return rda_keycode_from_evdev(evdev_code); }
+inline uint32_t KeyCodeToEvdev(uint32_t hid_usage) { return rda_keycode_to_evdev(hid_usage); }
+
+// ---- connection -------------------------------------------------------------
+
+enum class ConnectionState {
+  kConnecting = RDA_STATE_CONNECTING,
+  kConnected = RDA_STATE_CONNECTED,
+  kDisconnected = RDA_STATE_DISCONNECTED,  // final
+};
+
+// Application message types: library types below kFirstUserMessage.
+inline constexpr uint32_t kClipboardTextMessage = RDA_MSG_CLIPBOARD_TEXT;  // UTF-8
+inline constexpr uint32_t kFirstUserMessage = RDA_MSG_USER_FIRST;
+inline constexpr size_t kMaxMessageSize = RDA_MSG_MAX_SIZE;
+
+// `reason`: RDA_OK, or for kDisconnected RDA_ERR_CLOSED, RDA_ERR_TIMEOUT,
+// RDA_ERR_PROTOCOL or RDA_ERR_AUTH. Use rda_status_str() for text.
+using StateHandler = std::function<void(ConnectionState state, rda_status reason)>;
+using MessageHandler = std::function<void(uint32_t type, std::span<const uint8_t> payload)>;
+
 namespace detail {
 
 inline rda_input_event ToC(const InputEvent& e) {
@@ -165,6 +204,7 @@ enum class Channel : uint8_t {
   kSurface = RDA_CHANNEL_SURFACE,
   kVideo = RDA_CHANNEL_VIDEO,
   kCursor = RDA_CHANNEL_CURSOR,
+  kMessage = RDA_CHANNEL_MESSAGE,
 };
 
 struct TransportStats {
@@ -433,6 +473,10 @@ struct HostConfig {
   bool adaptive_bitrate = true;
   int64_t min_bitrate_bps = 300'000;
   int32_t max_queue_ms = 50;
+  int32_t peer_timeout_ms = 10'000;
+  // Whether a viewer may connect, from its auth token (transport thread).
+  // Empty = everyone may.
+  std::function<bool(std::span<const uint8_t> token)> auth;
 };
 
 struct HostStats {
@@ -502,7 +546,32 @@ class Host {
     c.adaptive_bitrate = config.adaptive_bitrate;
     c.min_bitrate_bps = config.min_bitrate_bps;
     c.max_queue_ms = config.max_queue_ms;
+    c.peer_timeout_ms = config.peer_timeout_ms;
     c.user = state_.get();
+    state_->auth = std::move(config.auth);
+    if (state_->auth) {
+      c.on_auth = [](void* u, const uint8_t* token, size_t n) -> int {
+        return static_cast<State*>(u)->auth(std::span<const uint8_t>(token, n)) ? 1 : 0;
+      };
+    }
+    c.on_state = [](void* u, rda_state st, rda_status reason) {
+      auto* s = static_cast<State*>(u);
+      StateHandler fn;
+      {
+        std::lock_guard<std::mutex> lock(s->mu);
+        fn = s->on_state;
+      }
+      if (fn) fn(static_cast<ConnectionState>(st), reason);
+    };
+    c.on_message = [](void* u, uint32_t type, const uint8_t* p, size_t n) {
+      auto* s = static_cast<State*>(u);
+      MessageHandler fn;
+      {
+        std::lock_guard<std::mutex> lock(s->mu);
+        fn = s->on_message;
+      }
+      if (fn) fn(type, std::span<const uint8_t>(p, n));
+    };
     c.on_input = [](void* u, const rda_input_event* ev) {
       auto* s = static_cast<State*>(u);
       InputHandler fn;
@@ -541,6 +610,30 @@ class Host {
   void SetErrorHandler(ErrorHandler fn) {
     std::lock_guard<std::mutex> lock(state_->mu);
     state_->on_error = std::move(fn);
+  }
+
+  // Connection changes (transport or timer thread). Set it before the
+  // viewer can connect, or check state() afterwards.
+  void SetStateHandler(StateHandler fn) {
+    std::lock_guard<std::mutex> lock(state_->mu);
+    state_->on_state = std::move(fn);
+  }
+  ConnectionState state() const {
+    return h_ ? static_cast<ConnectionState>(rda_host_get_state(h_)) : ConnectionState::kDisconnected;
+  }
+  // Application messages from the viewer (transport thread).
+  void SetMessageHandler(MessageHandler fn) {
+    std::lock_guard<std::mutex> lock(state_->mu);
+    state_->on_message = std::move(fn);
+  }
+  // Reliable, ordered, at most kMaxMessageSize; thread-safe.
+  bool SendMessage(uint32_t type, std::span<const uint8_t> payload, std::string* error = nullptr) {
+    if (!h_) return Failed(error);
+    return rda_host_send_message(h_, type, payload.data(), payload.size()) == RDA_OK || detail::SetError(error);
+  }
+  bool SendMessage(uint32_t type, std::string_view text, std::string* error = nullptr) {
+    return SendMessage(type, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(text.data()), text.size()),
+                       error);
   }
 
   // Mode 1: capture the main display.
@@ -631,6 +724,9 @@ class Host {
     std::mutex mu;
     InputHandler on_input;
     ErrorHandler on_error;
+    StateHandler on_state;
+    MessageHandler on_message;
+    std::function<bool(std::span<const uint8_t>)> auth;
   };
 
   bool Failed(std::string* error) const {
@@ -658,12 +754,20 @@ struct ViewerStats {
   uint64_t keyframe_requests = 0;
 };
 
-// All handlers run on the transport thread, one at a time; pointers and
-// views are valid only during the call.
+// Handlers run on the transport thread, one at a time (on_state may also
+// come from the library's timer thread); pointers and views are valid only
+// during the call.
 struct ViewerHandlers {
   std::function<void(int32_t width, int32_t height)> on_stream_info;
   std::function<void(const ImageView& bgra, std::span<const Rect> changed, const FrameInfo& info)> on_frame;
   std::function<void(const CursorState& state)> on_cursor;
+  StateHandler on_state;
+  MessageHandler on_message;
+};
+
+struct ViewerOptions {
+  int32_t peer_timeout_ms = 10'000;  // 0 = never time out
+  std::vector<uint8_t> auth_token;   // for the host's auth hook, at most 4096 bytes
 };
 
 class Viewer {
@@ -672,11 +776,28 @@ class Viewer {
   // Returns null and sets `error` if no HEVC decoder is available.
   static std::unique_ptr<Viewer> Create(std::unique_ptr<Transport> transport, ViewerHandlers handlers,
                                         std::string* error = nullptr) {
+    return Create(std::move(transport), std::move(handlers), ViewerOptions{}, error);
+  }
+  static std::unique_ptr<Viewer> Create(std::unique_ptr<Transport> transport, ViewerHandlers handlers,
+                                        const ViewerOptions& options, std::string* error = nullptr) {
     std::unique_ptr<Viewer> v(new Viewer());
     v->state_->h = std::move(handlers);
     rda_viewer_config c;
     rda_viewer_config_default(&c);
     c.user = v->state_.get();
+    c.peer_timeout_ms = options.peer_timeout_ms;
+    c.auth_token = options.auth_token.data();
+    c.auth_token_len = options.auth_token.size();
+    if (v->state_->h.on_state) {
+      c.on_state = [](void* u, rda_state st, rda_status reason) {
+        static_cast<State*>(u)->h.on_state(static_cast<ConnectionState>(st), reason);
+      };
+    }
+    if (v->state_->h.on_message) {
+      c.on_message = [](void* u, uint32_t type, const uint8_t* p, size_t n) {
+        static_cast<State*>(u)->h.on_message(type, std::span<const uint8_t>(p, n));
+      };
+    }
     if (v->state_->h.on_stream_info) {
       c.on_stream_info = [](void* u, int32_t w, int32_t h) { static_cast<State*>(u)->h.on_stream_info(w, h); };
     }
@@ -728,6 +849,15 @@ class Viewer {
     rda_viewer_send_input(v_, &c);
   }
   void RequestKeyframe() { rda_viewer_request_keyframe(v_); }
+
+  ConnectionState state() const { return static_cast<ConnectionState>(rda_viewer_get_state(v_)); }
+  bool SendMessage(uint32_t type, std::span<const uint8_t> payload, std::string* error = nullptr) {
+    return rda_viewer_send_message(v_, type, payload.data(), payload.size()) == RDA_OK || detail::SetError(error);
+  }
+  bool SendMessage(uint32_t type, std::string_view text, std::string* error = nullptr) {
+    return SendMessage(type, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(text.data()), text.size()),
+                       error);
+  }
   // Decodes a recording synchronously on this thread.
   void FeedRecording(std::span<const uint8_t> bytes) { rda_viewer_feed_recording(v_, bytes.data(), bytes.size()); }
 

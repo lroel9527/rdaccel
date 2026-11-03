@@ -8,7 +8,9 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <vector>
 
+#include "rdacore/connection.h"
 #include "rdacore/cursor.h"
 #include "rdacore/geometry.h"
 #include "rdacore/image.h"
@@ -46,6 +48,21 @@ struct ViewerHandlers {
   // (state.x, state.y) on top of the latest frame, e.g. with DrawCursor() or
   // a hardware cursor. Runs on the transport thread, possibly between frames.
   std::function<void(const CursorState& state)> on_cursor;
+
+  // Connection state: kConnected once the host answered the handshake,
+  // kDisconnected (final) with the reason. Transport or timer thread.
+  std::function<void(ConnectionState state, ConnectionError error)> on_state;
+
+  // Application messages from the host (transport thread).
+  std::function<void(uint32_t type, std::span<const uint8_t> payload)> on_message;
+};
+
+struct ViewerOptions {
+  // No bytes from the host for this long = disconnected (kTimeout).
+  // 0 = never time out.
+  int32_t peer_timeout_ms = 10'000;
+  // Sent to the host's auth hook in the handshake.
+  std::vector<uint8_t> auth_token;
 };
 
 class Viewer {
@@ -55,11 +72,22 @@ class Viewer {
   // HEVC decoder is available.
   static std::unique_ptr<Viewer> Create(std::unique_ptr<Transport> transport,
                                         ViewerHandlers handlers, std::string* error = nullptr);
+  static std::unique_ptr<Viewer> Create(std::unique_ptr<Transport> transport,
+                                        ViewerHandlers handlers, ViewerOptions options,
+                                        std::string* error = nullptr);
   ~Viewer();
   Viewer(const Viewer&) = delete;
   Viewer& operator=(const Viewer&) = delete;
 
+  // Dropped unless connected (the host ignores a viewer it has not accepted).
   void SendInput(const InputEvent& ev);
+
+  // Reliable, ordered application message to the host (see Host::SendMessage).
+  bool SendMessage(uint32_t type, std::span<const uint8_t> payload, std::string* error = nullptr);
+
+  // kConnecting until the host answers; kDisconnected is final. A viewer
+  // without a transport (recording playback) stays kConnecting.
+  ConnectionState state() const;
 
   // Asks the host for a full refresh. The viewer does this by itself when
   // it cannot decode what arrives (at most every 250 ms); applications only

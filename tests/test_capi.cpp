@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -388,4 +389,135 @@ TEST(CApi, RecordingRoundTripAndFree) {
   std::remove(path.c_str());
   EXPECT_EQ(rda_recording_read(path.c_str(), &bytes, &n), RDA_ERR_IO);
   EXPECT_EQ(bytes, nullptr);
+}
+
+namespace {
+
+struct ConnEvents {
+  std::mutex mu;
+  std::vector<std::pair<rda_state, rda_status>> states;
+  std::vector<std::pair<uint32_t, std::string>> messages;
+  std::string token;
+  int accept = 1;
+
+  static void OnState(void* u, rda_state s, rda_status r) {
+    auto* e = static_cast<ConnEvents*>(u);
+    std::lock_guard<std::mutex> lock(e->mu);
+    e->states.emplace_back(s, r);
+  }
+  static void OnMessage(void* u, uint32_t type, const uint8_t* p, size_t n) {
+    auto* e = static_cast<ConnEvents*>(u);
+    std::lock_guard<std::mutex> lock(e->mu);
+    e->messages.emplace_back(type, std::string(reinterpret_cast<const char*>(p), n));
+  }
+  static int OnAuth(void* u, const uint8_t* t, size_t n) {
+    auto* e = static_cast<ConnEvents*>(u);
+    std::lock_guard<std::mutex> lock(e->mu);
+    e->token.assign(reinterpret_cast<const char*>(t), n);
+    return e->accept;
+  }
+  bool Has(rda_state s) {
+    std::lock_guard<std::mutex> lock(mu);
+    for (auto& st : states) {
+      if (st.first == s) return true;
+    }
+    return false;
+  }
+  rda_status LastReason() {
+    std::lock_guard<std::mutex> lock(mu);
+    return states.empty() ? RDA_OK : states.back().second;
+  }
+  size_t MessageCount() {
+    std::lock_guard<std::mutex> lock(mu);
+    return messages.size();
+  }
+};
+
+// A host and a viewer over a pipe with all connection callbacks.
+struct ConnPair {
+  ConnEvents host_ev, viewer_ev;
+  rda_host* host = nullptr;
+  rda_viewer* viewer = nullptr;
+  std::string token = "secret";
+
+  rda_status Create(int accept) {
+    host_ev.accept = accept;
+    rda_transport *a = nullptr, *b = nullptr;
+    if (rda_pipe_create(&a, &b) != RDA_OK) return RDA_ERR_TRANSPORT;
+    rda_host_config hc;
+    rda_host_config_default(&hc);
+    hc.user = &host_ev;
+    hc.on_state = &ConnEvents::OnState;
+    hc.on_message = &ConnEvents::OnMessage;
+    hc.on_auth = &ConnEvents::OnAuth;
+    if (rda_status s = rda_host_create(a, &hc, &host); s != RDA_OK) {
+      rda_transport_destroy(b);
+      return s;
+    }
+    rda_viewer_config vc;
+    rda_viewer_config_default(&vc);
+    vc.user = &viewer_ev;
+    vc.on_state = &ConnEvents::OnState;
+    vc.on_message = &ConnEvents::OnMessage;
+    vc.auth_token = reinterpret_cast<const uint8_t*>(token.data());
+    vc.auth_token_len = token.size();
+    return rda_viewer_create(b, &vc, &viewer);
+  }
+  ~ConnPair() {
+    rda_viewer_destroy(viewer);
+    rda_host_destroy(host);
+  }
+};
+
+}  // namespace
+
+TEST(CApi, ConnectionStateMessagesAndGoodbye) {
+  ConnPair p;
+  ASSERT_EQ(p.Create(1), RDA_OK) << rda_last_error();
+  ASSERT_TRUE(WaitUntil([&] { return p.host_ev.Has(RDA_STATE_CONNECTED); }));
+  ASSERT_TRUE(WaitUntil([&] { return p.viewer_ev.Has(RDA_STATE_CONNECTED); }));
+  EXPECT_EQ(rda_host_get_state(p.host), RDA_STATE_CONNECTED);
+  EXPECT_EQ(rda_viewer_get_state(p.viewer), RDA_STATE_CONNECTED);
+  EXPECT_EQ(p.host_ev.token, "secret");
+
+  const std::string clip = "hello clipboard";
+  ASSERT_EQ(rda_viewer_send_message(p.viewer, RDA_MSG_CLIPBOARD_TEXT, reinterpret_cast<const uint8_t*>(clip.data()),
+                                    clip.size()),
+            RDA_OK);
+  const uint8_t user[3] = {'a', 'b', 'c'};
+  ASSERT_EQ(rda_host_send_message(p.host, RDA_MSG_USER_FIRST + 1, user, 3), RDA_OK);
+  EXPECT_EQ(rda_host_send_message(p.host, 2, user, 3), RDA_ERR_INVALID_ARG);
+  EXPECT_EQ(rda_host_send_message(p.host, RDA_MSG_USER_FIRST, nullptr, 3), RDA_ERR_INVALID_ARG);
+  ASSERT_TRUE(WaitUntil([&] { return p.host_ev.MessageCount() == 1 && p.viewer_ev.MessageCount() == 1; }));
+  EXPECT_EQ(p.host_ev.messages[0].first, RDA_MSG_CLIPBOARD_TEXT);
+  EXPECT_EQ(p.host_ev.messages[0].second, clip);
+  EXPECT_EQ(p.viewer_ev.messages[0].first, RDA_MSG_USER_FIRST + 1);
+  EXPECT_EQ(p.viewer_ev.messages[0].second, "abc");
+
+  // The viewer leaves: the host hears goodbye, and further sends fail.
+  rda_viewer_destroy(p.viewer);
+  p.viewer = nullptr;
+  ASSERT_TRUE(WaitUntil([&] { return p.host_ev.Has(RDA_STATE_DISCONNECTED); }));
+  EXPECT_EQ(p.host_ev.LastReason(), RDA_ERR_CLOSED);
+  EXPECT_EQ(rda_host_send_message(p.host, RDA_MSG_USER_FIRST, user, 3), RDA_ERR_CLOSED);
+  std::vector<uint8_t> px(static_cast<size_t>(kW) * kH * 4, 0);
+  const rda_image img{px.data(), kW, kH, kW * 4};
+  EXPECT_EQ(rda_host_submit_frame(p.host, &img, 0, nullptr, 0), RDA_ERR_CLOSED);
+}
+
+TEST(CApi, AuthHookRejects) {
+  ConnPair p;
+  ASSERT_EQ(p.Create(0), RDA_OK) << rda_last_error();
+  ASSERT_TRUE(WaitUntil([&] { return p.viewer_ev.Has(RDA_STATE_DISCONNECTED); }));
+  EXPECT_EQ(p.viewer_ev.LastReason(), RDA_ERR_AUTH);
+  EXPECT_EQ(p.host_ev.LastReason(), RDA_ERR_AUTH);
+  EXPECT_FALSE(p.viewer_ev.Has(RDA_STATE_CONNECTED));
+}
+
+TEST(CApi, KeyCodes) {
+  EXPECT_EQ(rda_keycode_from_mac(0x00), 0x04u);
+  EXPECT_EQ(rda_keycode_to_evdev(0x04), 30u);
+  EXPECT_EQ(rda_keycode_from_evdev(125), 0xE3u);
+  EXPECT_EQ(rda_keycode_to_mac(0xE3), 0x37u);
+  EXPECT_EQ(rda_keycode_to_mac(0x46), RDA_KEYCODE_NONE);
 }

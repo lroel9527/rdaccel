@@ -42,7 +42,40 @@ MsgType Write(ByteWriter& w, const Hello& m) {
   w.varint(m.width);
   w.varint(m.height);
   w.u8(static_cast<uint8_t>(m.codec));
+  w.varint(m.min_version);
+  w.varint(m.caps);
   return MsgType::kHello;
+}
+
+MsgType Write(ByteWriter& w, const ViewerHello& m) {
+  w.varint(m.version);
+  w.varint(m.min_version);
+  w.varint(m.caps);
+  w.blob(m.auth_token);
+  return MsgType::kViewerHello;
+}
+
+MsgType Write(ByteWriter& w, const Welcome& m) {
+  w.varint(m.version);
+  w.varint(m.min_version);
+  w.varint(m.caps);
+  return MsgType::kWelcome;
+}
+
+MsgType Write(ByteWriter& w, const Ping& m) {
+  w.varint(m.time_us);
+  return MsgType::kPing;
+}
+
+MsgType Write(ByteWriter& w, const Goodbye& m) {
+  w.u8(static_cast<uint8_t>(m.reason));
+  return MsgType::kGoodbye;
+}
+
+MsgType Write(ByteWriter& w, const AppMessage& m) {
+  w.varint(m.type);
+  w.blob(m.payload);
+  return MsgType::kAppMessage;
 }
 
 MsgType Write(ByteWriter& w, const FrameBegin& m) {
@@ -144,6 +177,50 @@ std::optional<Message> ReadHello(ByteReader& r) {
   }
   if (codec != static_cast<uint8_t>(VideoCodec::kHevc)) return std::nullopt;
   m.codec = static_cast<VideoCodec>(codec);
+  // Version 4 fields; older hosts serve only their own version.
+  m.min_version = m.version;
+  m.caps = 0;
+  if (!r.at_end() && !(r.varint32(m.min_version) && r.varint(m.caps))) return std::nullopt;
+  return m;
+}
+
+std::optional<Message> ReadViewerHello(ByteReader& r) {
+  ViewerHello m;
+  std::span<const uint8_t> token;
+  if (!(r.varint32(m.version) && r.varint32(m.min_version) && r.varint(m.caps) && r.blob(token))) {
+    return std::nullopt;
+  }
+  if (token.size() > 4096) return std::nullopt;
+  m.auth_token = ToVec(token);
+  return m;
+}
+
+std::optional<Message> ReadWelcome(ByteReader& r) {
+  Welcome m;
+  if (!(r.varint32(m.version) && r.varint32(m.min_version) && r.varint(m.caps))) return std::nullopt;
+  return m;
+}
+
+std::optional<Message> ReadPing(ByteReader& r) {
+  Ping m;
+  if (!r.varint(m.time_us)) return std::nullopt;
+  return m;
+}
+
+std::optional<Message> ReadGoodbye(ByteReader& r) {
+  Goodbye m;
+  uint8_t reason = 0;
+  if (!r.u8(reason)) return std::nullopt;
+  m.reason = reason <= static_cast<uint8_t>(GoodbyeReason::kRejected) ? static_cast<GoodbyeReason>(reason)
+                                                                       : GoodbyeReason::kClosed;
+  return m;
+}
+
+std::optional<Message> ReadAppMessage(ByteReader& r) {
+  AppMessage m;
+  std::span<const uint8_t> payload;
+  if (!(r.varint32(m.type) && r.blob(payload)) || payload.size() > kMaxAppMessage) return std::nullopt;
+  m.payload = ToVec(payload);
   return m;
 }
 
@@ -258,9 +335,11 @@ std::optional<Message> ReadLosslessData(ByteReader& r) {
   return m;
 }
 
-std::optional<Message> DecodePayload(MsgType type, std::span<const uint8_t> payload) {
+// `known` = false for a message type this version does not know (skipped).
+std::optional<Message> DecodePayload(MsgType type, std::span<const uint8_t> payload, bool& known) {
   ByteReader r(payload);
   std::optional<Message> m;
+  known = true;
   switch (type) {
     case MsgType::kHello: m = ReadHello(r); break;
     case MsgType::kFrameBegin: m = ReadFrameBegin(r); break;
@@ -273,10 +352,15 @@ std::optional<Message> DecodePayload(MsgType type, std::span<const uint8_t> payl
     case MsgType::kFeedback: m = ReadFeedback(r); break;
     case MsgType::kLosslessData: m = ReadLosslessData(r); break;
     case MsgType::kKeyframeRequest: m = ReadKeyframeRequest(r); break;
-    default: return std::nullopt;
+    case MsgType::kViewerHello: m = ReadViewerHello(r); break;
+    case MsgType::kPing: m = ReadPing(r); break;
+    case MsgType::kGoodbye: m = ReadGoodbye(r); break;
+    case MsgType::kAppMessage: m = ReadAppMessage(r); break;
+    case MsgType::kWelcome: m = ReadWelcome(r); break;
+    default: known = false; return std::nullopt;
   }
-  // Trailing bytes mean the peer and we disagree about the format.
-  if (!m || !r.ok() || !r.at_end()) return std::nullopt;
+  // Trailing bytes are fields added by a later version: ignored.
+  if (!m || !r.ok()) return std::nullopt;
   return m;
 }
 
@@ -308,32 +392,39 @@ void StreamParser::Append(std::span<const uint8_t> data) {
 }
 
 std::optional<Message> StreamParser::Next() {
-  if (!error_.empty()) return std::nullopt;
+  while (error_.empty()) {
+    ByteReader r(std::span<const uint8_t>(buf_).subspan(pos_));
+    uint8_t type = 0;
+    uint64_t len = 0;
+    if (!r.u8(type) || !r.varint(len)) {
+      // A varint header is at most 10 bytes; if we have more than that and
+      // still can't parse it, the stream is corrupt rather than incomplete.
+      if (buf_.size() - pos_ > 11) error_ = "malformed message header";
+      return std::nullopt;
+    }
+    if (len > kMaxMessageSize) {
+      error_ = "message too large";
+      return std::nullopt;
+    }
+    std::span<const uint8_t> payload;
+    if (!r.bytes(static_cast<size_t>(len), payload)) return std::nullopt;  // need more bytes
 
-  ByteReader r(std::span<const uint8_t>(buf_).subspan(pos_));
-  uint8_t type = 0;
-  uint64_t len = 0;
-  if (!r.u8(type) || !r.varint(len)) {
-    // A varint header is at most 10 bytes; if we have more than that and still
-    // can't parse it, the stream is corrupt rather than incomplete.
-    if (buf_.size() - pos_ > 11) error_ = "malformed message header";
-    return std::nullopt;
+    const size_t consumed = (buf_.size() - pos_) - r.remaining();
+    bool known = true;
+    auto msg = DecodePayload(static_cast<MsgType>(type), payload, known);
+    pos_ += consumed;
+    if (!known) {  // a message type from a later version: skip it
+      ++skipped_;
+      continue;
+    }
+    if (!msg) {
+      pos_ -= consumed;
+      error_ = "malformed payload for message type " + std::to_string(type);
+      return std::nullopt;
+    }
+    return msg;
   }
-  if (len > kMaxMessageSize) {
-    error_ = "message too large";
-    return std::nullopt;
-  }
-  std::span<const uint8_t> payload;
-  if (!r.bytes(static_cast<size_t>(len), payload)) return std::nullopt;  // need more bytes
-
-  const size_t consumed = (buf_.size() - pos_) - r.remaining();
-  auto msg = DecodePayload(static_cast<MsgType>(type), payload);
-  if (!msg) {
-    error_ = "malformed payload for message type " + std::to_string(type);
-    return std::nullopt;
-  }
-  pos_ += consumed;
-  return msg;
+  return std::nullopt;
 }
 
 }  // namespace rdacore::proto

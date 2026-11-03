@@ -27,7 +27,10 @@ enum class Channel : uint8_t {
   kSurface = 2,
   kVideo = 3,
   kCursor = 4,
+  kMessage = 5,  // application messages (clipboard, ...): reliable, ordered
 };
+
+inline constexpr int kChannelCount = 6;
 
 // What a transport knows about the path. The Host uses it to adapt its
 // bitrate and to skip frames instead of letting a queue build up.
