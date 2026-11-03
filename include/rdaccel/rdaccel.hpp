@@ -363,6 +363,11 @@ inline std::unique_ptr<Transport> ListenTcp(uint16_t port, std::string* error = 
   rda_transport* t = nullptr;
   return detail::Native(rda_tcp_listen(port, &t), &t, error);
 }
+// Returns at once; the first viewer to connect becomes the peer.
+inline std::unique_ptr<Transport> BindTcp(uint16_t port, std::string* error = nullptr) {
+  rda_transport* t = nullptr;
+  return detail::Native(rda_tcp_bind(port, &t), &t, error);
+}
 inline std::unique_ptr<Transport> ConnectTcp(const std::string& host, uint16_t port, std::string* error = nullptr) {
   rda_transport* t = nullptr;
   return detail::Native(rda_tcp_connect(host.c_str(), port, &t), &t, error);

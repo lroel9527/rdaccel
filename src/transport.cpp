@@ -15,6 +15,10 @@ std::unique_ptr<Transport> ListenTcp(uint16_t port, std::string* error) {
   return transport::TcpTransport::Listen(port, error);
 }
 
+std::unique_ptr<Transport> BindTcp(uint16_t port, std::string* error) {
+  return transport::TcpTransport::Bind(port, error);
+}
+
 std::unique_ptr<Transport> ConnectTcp(const std::string& host, uint16_t port, std::string* error) {
   return transport::TcpTransport::Connect(host, port, error);
 }

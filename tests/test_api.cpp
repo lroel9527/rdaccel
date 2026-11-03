@@ -587,6 +587,32 @@ TEST(PublicApi, UdpBindDoesNotBlockAndHoldsFramesUntilTheViewerComes) {
   EXPECT_EQ(viewer->stats().decode_errors, 0u);
 }
 
+TEST(PublicApi, TcpBindDoesNotBlockAndHoldsFramesUntilTheViewerComes) {
+  std::string err;
+  auto host_t = rdaccel::BindTcp(47312, &err);
+  ASSERT_NE(host_t, nullptr) << err;
+  const std::vector<uint8_t> key(32, 0x6b);
+  rdaccel::HostConfig cfg;
+  cfg.encryption_key = key;
+  rdaccel::Host host(std::move(host_t), cfg);
+  ASSERT_TRUE(host.ok());
+  std::vector<uint8_t> px;
+  for (int i = 0; i < 30; ++i) {
+    const auto dirty = rdaccel::RenderTestPattern(static_cast<uint64_t>(i), kW, kH, px);
+    ASSERT_TRUE(host.SubmitFrame({px.data(), kW, kH, kW * 4}, rdaccel::NowMicros(), dirty, &err)) << err;
+  }
+  EXPECT_EQ(host.stats().frames_encoded, 0u);
+  EXPECT_EQ(host.state(), rdaccel::ConnectionState::kConnecting);
+
+  rdaccel::ViewerOptions vo;
+  vo.encryption_key = key;
+  auto viewer = rdaccel::Viewer::Create(rdaccel::ConnectTcp("127.0.0.1", 47312, &err), {}, vo, &err);
+  ASSERT_NE(viewer, nullptr) << err;
+  ASSERT_TRUE(StreamUntil(host, *viewer, 5));
+  EXPECT_EQ(host.state(), rdaccel::ConnectionState::kConnected);
+  EXPECT_EQ(viewer->stats().decode_errors, 0u);
+}
+
 TEST(PublicApi, UdpFromYourOwnSockets) {
   int fds[2];
   ASSERT_EQ(::socketpair(AF_UNIX, SOCK_DGRAM, 0, fds), 0);

@@ -84,6 +84,9 @@ std::pair<std::unique_ptr<Transport>, std::unique_ptr<Transport>> CreateLocalPip
 std::unique_ptr<Transport> ListenTcp(uint16_t port, std::string* error = nullptr);
 std::unique_ptr<Transport> ConnectTcp(const std::string& host, uint16_t port,
                                       std::string* error = nullptr);
+// Host side without blocking: listens on `port` (IPv4 and IPv6) and returns
+// at once; the first viewer to connect becomes the peer.
+std::unique_ptr<Transport> BindTcp(uint16_t port, std::string* error = nullptr);
 
 // UDP with its own loss recovery (selective acknowledgements and resends,
 // one ordered stream per channel, so lost video never delays input) and
