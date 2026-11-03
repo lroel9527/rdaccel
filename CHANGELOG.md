@@ -3,6 +3,14 @@
 版本号遵循语义化版本。1.0 之前，次版本号（0.x）变化时 C ABI 可能有不兼容改动；
 补丁版本（0.x.y）保持兼容。`find_package(rdaccel 0.3)` 只接受同一个 0.3.x。
 
+## 未发布
+
+- **选择显示器**：新增 `rda_list_displays()` / `rdaccel::ListDisplays()` 和 `rda_host_config.display_index`（追加在结构体末尾，旧调用方不受影响）。
+  Linux 用 RandR 1.5 的 monitor 列表（没有时整个 X screen 算一块），macOS 用 ScreenCaptureKit 的 SCDisplay；
+  0 永远是主显示器。光标坐标相对所选显示器。`rdaccel_serve --list-displays` / `--display=N`。
+- Linux 新增依赖 libxrandr（`libxrandr-dev`）。
+- CI 在 Xvfb 里跑 X11 采集、区域选择和光标测试。
+
 ## 0.3.0
 
 第二阶段：安全与健壮性，外加打包。

@@ -35,6 +35,9 @@ struct HostConfig {
   // image is scaled to match.
   int32_t capture_width = 0;
   int32_t capture_height = 0;
+  // Which display to capture (DisplayInfo::index from ListDisplays()); 0 =
+  // the primary one.
+  int32_t display_index = 0;
   // Draw the cursor into the captured picture. Off by default: the cursor
   // channel below is cheaper and smoother.
   bool capture_cursor = false;

@@ -10,7 +10,7 @@ if(RDACCEL_STATIC)
   if(NOT APPLE)
     find_dependency(PkgConfig)
     pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale)
-    pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11 xext xfixes)
+    pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11 xext xfixes xrandr)
   endif()
 endif()
 

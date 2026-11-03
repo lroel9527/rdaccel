@@ -1,5 +1,7 @@
 #include "mac/capture_sck.h"
 
+#include "mac/displays_mac.h"
+
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
@@ -114,7 +116,16 @@ bool SckCapturer::Start(const capture::CaptureConfig& cfg, capture::FrameFn on_f
     return false;
   }
 
-  SCDisplay* display = content.displays.firstObject;
+  CGDirectDisplayID want = 0;
+  if (!MacDisplayId(cfg.display_index, want, &error_)) return false;
+  SCDisplay* display = nil;
+  for (SCDisplay* d in content.displays) {
+    if (d.displayID == want) display = d;
+  }
+  if (!display) {
+    error_ = "display " + std::to_string(cfg.display_index) + " is not available for capture";
+    return false;
+  }
   NSMutableArray<SCRunningApplication*>* excluded = [NSMutableArray array];
   if (exclude_self_) {
     const pid_t me = getpid();

@@ -75,7 +75,7 @@ TEST(PlatformCodec, EncodeDecodeRoundTrip) {
 
 TEST(PlatformCursor, ReadsTheSystemCursor) {
   std::string err;
-  auto src = platform::CreateCursorSource(&err);
+  auto src = platform::CreateCursorSource(0, &err);
   if (!src) GTEST_SKIP() << "no cursor source: " << err;  // e.g. no X display
   capture::CursorSample s;
   bool any_image = false;
@@ -94,4 +94,20 @@ TEST(PlatformCursor, ReadsTheSystemCursor) {
   }
   std::printf("cursor at %.0f,%.0f on %.0fx%.0f, image %s\n", s.x, s.y, s.screen_width,
               s.screen_height, any_image ? "read" : "not available");
+}
+
+TEST(PlatformDisplays, ListsThePrimaryDisplayFirst) {
+  std::vector<capture::DisplayInfo> d;
+  std::string err;
+  if (!platform::ListDisplays(d, &err)) GTEST_SKIP() << err;
+  ASSERT_FALSE(d.empty());
+  EXPECT_TRUE(d[0].primary);
+  for (size_t i = 0; i < d.size(); ++i) {
+    EXPECT_EQ(d[i].index, static_cast<int32_t>(i));
+    EXPECT_GT(d[i].width, 0);
+    EXPECT_GT(d[i].height, 0);
+    if (i > 0) {
+      EXPECT_FALSE(d[i].primary);
+    }
+  }
 }

@@ -420,6 +420,7 @@ bool Host::StartScreenCapture(std::string* error) {
     return false;
   }
   capture::CaptureConfig cc;
+  cc.display_index = impl_->config.display_index;
   cc.fps = impl_->config.fps;
   cc.width = impl_->config.capture_width;
   cc.height = impl_->config.capture_height;
@@ -435,7 +436,7 @@ bool Host::StartScreenCapture(std::string* error) {
   impl_->capturer = std::move(cap);
   if (impl_->config.cursor_channel && !impl_->config.capture_cursor) {
     std::string cerr;
-    if (auto src = platform::CreateCursorSource(&cerr)) {
+    if (auto src = platform::CreateCursorSource(impl_->config.display_index, &cerr)) {
       impl_->cursor_running = true;
       impl_->cursor_thread = std::thread(
           [impl, s = std::move(src)]() mutable { impl->PollCursor(std::move(s)); });

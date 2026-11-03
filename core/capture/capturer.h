@@ -23,7 +23,20 @@ struct CapturedFrame {
 
 using FrameFn = std::function<void(const CapturedFrame&)>;
 
+// One display (monitor) of the desktop. Index 0 is the primary display.
+struct DisplayInfo {
+  int32_t index = 0;
+  // Origin on the desktop, in the OS's desktop units (points on macOS,
+  // pixels on X11); size in pixels.
+  int32_t x = 0, y = 0;
+  int32_t width = 0, height = 0;
+  bool primary = false;
+  std::string name;  // UTF-8, may be empty
+};
+
 struct CaptureConfig {
+  // Which display (DisplayInfo::index); 0 = the primary one.
+  int32_t display_index = 0;
   int32_t fps = 60;
   // 0 = native resolution of the display.
   int32_t width = 0;

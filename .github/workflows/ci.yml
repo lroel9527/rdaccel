@@ -13,13 +13,20 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxext-dev libxfixes-dev zlib1g-dev
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxext-dev libxfixes-dev libxrandr-dev xvfb zlib1g-dev
       - name: Build (ASan + UBSan)
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined" -DCMAKE_C_FLAGS="-fsanitize=address,undefined"
           cmake --build build -j4
       - name: Test
         run: ctest --test-dir build --output-on-failure
+      - name: X11 capture, display selection and cursor (Xvfb)
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          xvfb-run -a -s "-screen 0 1280x720x24" ./build/bin/rdaccel_platform_tests \
+            --gtest_filter='Platform*:CApi.ListDisplays*' 2>&1 | tee x11.log
+          if grep -q SKIPPED x11.log; then echo "X11 tests skipped under Xvfb"; exit 1; fi
       - name: Install, then build examples/minimal against the installed package
         env:
           ASAN_OPTIONS: detect_leaks=0
@@ -70,7 +77,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libclang-rt-18-dev libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxext-dev libxfixes-dev zlib1g-dev
+          sudo apt-get install -y clang libclang-rt-18-dev libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxext-dev libxfixes-dev libxrandr-dev zlib1g-dev
       - name: Build fuzzers (libFuzzer + ASan + UBSan)
         run: |
           F="-fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=undefined"
@@ -161,7 +168,7 @@ jobs:
         if: steps.dl.outcome == 'success'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxext-dev libxfixes-dev
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxext-dev libxfixes-dev libxrandr-dev
       - name: Decode the Mac stream with FFmpeg (interop)
         if: steps.dl.outcome == 'success'
         run: |

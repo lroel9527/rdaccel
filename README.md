@@ -244,7 +244,7 @@ CI 每次会在 Linux 上用 x265 录一段合成码流、在 macOS 上用 Video
 ## 在 Linux 上编译
 
 ```bash
-sudo apt-get install cmake g++ libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxext-dev libxfixes-dev zlib1g-dev
+sudo apt-get install cmake g++ libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxext-dev libxfixes-dev libxrandr-dev zlib1g-dev
 cmake -S . -B build && cmake --build build -j
 ctest --test-dir build
 ```

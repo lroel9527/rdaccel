@@ -7,6 +7,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "capture/capturer.h"
 #include "capture/cursor_source.h"
@@ -17,7 +18,12 @@ namespace rdacore::platform {
 // Short name of the platform, e.g. "macOS" or "Linux".
 const char* PlatformName();
 
-// Captures the main display. Returns null with `error` set on failure.
+// The displays that can be captured, primary first (index 0). False with
+// `error` set when there is no display at all (no X server, ...).
+bool ListDisplays(std::vector<capture::DisplayInfo>& out, std::string* error);
+
+// Captures CaptureConfig::display_index. Returns null with `error` set on
+// failure.
 std::unique_ptr<capture::ICapturer> CreateScreenCapturer(std::string* error);
 
 // `prefer` optionally names a backend to try first (Linux: "hevc_nvenc",
@@ -28,8 +34,9 @@ std::unique_ptr<codec::IHevcEncoder> CreateHevcEncoder(const codec::EncoderConfi
 
 std::unique_ptr<codec::IHevcDecoder> CreateHevcDecoder(std::string* error);
 
-// The system cursor of the main display. Null with `error` set if it cannot
-// be read (e.g. no X display).
-std::unique_ptr<capture::ICursorSource> CreateCursorSource(std::string* error);
+// The system cursor, relative to display `display_index` (invisible while it
+// is on another display). Null with `error` set if it cannot be read (e.g. no
+// X display, or no such display).
+std::unique_ptr<capture::ICursorSource> CreateCursorSource(int32_t display_index, std::string* error);
 
 }  // namespace rdacore::platform

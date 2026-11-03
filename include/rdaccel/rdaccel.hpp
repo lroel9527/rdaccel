@@ -31,6 +31,37 @@ inline const char* Version() { return rda_version_string(); }
 inline const char* PlatformName() { return rda_platform_name(); }
 inline uint64_t NowMicros() { return rda_now_us(); }
 
+// A display (monitor). Origin in desktop units (points on macOS, pixels on
+// X11), size in pixels. Index 0 is the primary display.
+struct DisplayInfo {
+  int32_t index = 0;
+  int32_t x = 0, y = 0;
+  int32_t width = 0, height = 0;
+  bool primary = false;
+  std::string name;
+};
+
+// The displays Host::StartScreenCapture() can capture (HostConfig::display_index).
+inline std::vector<DisplayInfo> ListDisplays(std::string* error = nullptr) {
+  size_t n = 0;
+  if (rda_list_displays(nullptr, 0, &n) != RDA_OK) {
+    if (error) *error = rda_last_error();
+    return {};
+  }
+  std::vector<rda_display_info> c(n);
+  if (n == 0) return {};
+  c[0].struct_size = sizeof(rda_display_info);
+  if (rda_list_displays(c.data(), c.size(), &n) != RDA_OK) {
+    if (error) *error = rda_last_error();
+    return {};
+  }
+  std::vector<DisplayInfo> out;
+  for (size_t i = 0; i < n && i < c.size(); ++i) {
+    out.push_back({c[i].index, c[i].x, c[i].y, c[i].width, c[i].height, c[i].primary != 0, c[i].name});
+  }
+  return out;
+}
+
 // The text of the last failing rda_* call on this thread.
 inline std::string LastError() { return rda_last_error(); }
 
@@ -472,6 +503,7 @@ struct HostConfig {
   std::string encoder;  // empty = automatic
   int32_t capture_width = 0;
   int32_t capture_height = 0;
+  int32_t display_index = 0;  // which display StartScreenCapture() takes; see ListDisplays()
   bool capture_cursor = false;
   bool cursor_channel = true;
   int32_t cursor_poll_hz = 120;
@@ -550,6 +582,7 @@ class Host {
     c.encoder = config.encoder.empty() ? nullptr : config.encoder.c_str();
     c.capture_width = config.capture_width;
     c.capture_height = config.capture_height;
+    c.display_index = config.display_index;
     c.capture_cursor = config.capture_cursor;
     c.cursor_channel = config.cursor_channel;
     c.cursor_poll_hz = config.cursor_poll_hz;
