@@ -27,7 +27,8 @@ struct HostConfig {
   // for under 1 dB; 0 lets the encoder decide.
   int32_t min_qp = 24;
   // HEVC encoder backend to try first. Empty picks automatically. macOS always
-  // uses VideoToolbox; Linux accepts "hevc_nvenc" or "libx265".
+  // uses VideoToolbox; Linux accepts "hevc_nvenc", "libx265" or
+  // "hevc_vaapi" (experimental, never picked automatically).
   std::string encoder;
 
   // Only used by StartScreenCapture(). 0 = native resolution. Otherwise the

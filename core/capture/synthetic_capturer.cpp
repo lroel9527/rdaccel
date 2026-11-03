@@ -10,10 +10,23 @@ constexpr int32_t kGlyphW = 14;   // Retina-ish 7pt glyph cell
 constexpr int32_t kGlyphH = 28;
 constexpr int32_t kMargin = 48;
 
-void Fill(uint8_t* px, int32_t stride_px, const Rect& r, uint8_t b, uint8_t g,
-          uint8_t rr) {
+// The frame being drawn. Everything drawn is clipped to it, so any size
+// works (small ones just show less of the page).
+struct Canvas {
+  uint8_t* px;
+  int32_t w, h;
+};
+
+Rect Clip(const Rect& r, int32_t w, int32_t h) {
+  const int32_t x0 = std::clamp(r.x, 0, w), y0 = std::clamp(r.y, 0, h);
+  const int32_t x1 = std::clamp(r.right(), 0, w), y1 = std::clamp(r.bottom(), 0, h);
+  return {x0, y0, x1 - x0, y1 - y0};
+}
+
+void Fill(const Canvas& c, const Rect& area, uint8_t b, uint8_t g, uint8_t rr) {
+  const Rect r = Clip(area, c.w, c.h);
   for (int32_t y = r.y; y < r.bottom(); ++y) {
-    uint8_t* p = px + (static_cast<size_t>(y) * stride_px + r.x) * 4;
+    uint8_t* p = c.px + (static_cast<size_t>(y) * c.w + r.x) * 4;
     for (int32_t x = 0; x < r.w; ++x, p += 4) {
       p[0] = b;
       p[1] = g;
@@ -32,7 +45,7 @@ uint32_t Hash32(uint64_t x) {
 
 // Draws a pseudo-glyph: a few strokes chosen from the character index, in
 // near-black with one anti-aliasing grey level, like rendered text.
-void DrawGlyph(uint8_t* px, int32_t stride_px, int32_t x0, int32_t y0, uint64_t ch) {
+void DrawGlyph(const Canvas& px, int32_t x0, int32_t y0, uint64_t ch) {
   const uint32_t bits = Hash32(ch);
   if ((bits & 0x7) == 0) return;  // a space
   const int32_t sx = 3, sy = 4;
@@ -40,8 +53,8 @@ void DrawGlyph(uint8_t* px, int32_t stride_px, int32_t x0, int32_t y0, uint64_t 
     if (!(bits & (1u << (i + 3)))) continue;
     const int32_t cx = x0 + 2 + (i % 3) * sx;
     const int32_t cy = y0 + 6 + (i / 3) * (sy + 2);
-    Fill(px, stride_px, {cx, cy, sx, sy + 2}, 30, 30, 30);
-    Fill(px, stride_px, {cx + sx, cy, 1, sy + 2}, 140, 140, 140);
+    Fill(px, {cx, cy, sx, sy + 2}, 30, 30, 30);
+    Fill(px, {cx + sx, cy, 1, sy + 2}, 140, 140, 140);
   }
 }
 
@@ -52,11 +65,12 @@ Rect VideoRect(int32_t w, int32_t h) {
   return {w - vw - kMargin, h - vh - kMargin, vw, vh};
 }
 
-void DrawVideo(uint8_t* px, int32_t stride_px, const Rect& v, uint64_t index) {
+void DrawVideo(const Canvas& c, const Rect& v, uint64_t index) {
   // A moving gradient with a bouncing bar: changes every frame, many colours.
-  for (int32_t y = 0; y < v.h; ++y) {
-    uint8_t* p = px + (static_cast<size_t>(v.y + y) * stride_px + v.x) * 4;
-    for (int32_t x = 0; x < v.w; ++x, p += 4) {
+  const Rect vis = Clip(v, c.w, c.h);
+  for (int32_t y = vis.y - v.y; y < vis.bottom() - v.y; ++y) {
+    uint8_t* p = c.px + (static_cast<size_t>(v.y + y) * c.w + vis.x) * 4;
+    for (int32_t x = vis.x - v.x; x < vis.right() - v.x; ++x, p += 4) {
       p[0] = static_cast<uint8_t>(x + index * 3);
       p[1] = static_cast<uint8_t>(y * 2 + index);
       p[2] = static_cast<uint8_t>((x + y) / 2 + index * 5);
@@ -64,7 +78,8 @@ void DrawVideo(uint8_t* px, int32_t stride_px, const Rect& v, uint64_t index) {
     }
   }
   const int32_t bar_x = static_cast<int32_t>((index * 9) % static_cast<uint64_t>(std::max(1, v.w - 40)));
-  Fill(px, stride_px, {v.x + bar_x, v.y, 40, v.h}, 250, 250, 250);
+  const Rect bar{v.x + bar_x, v.y, std::min(40, v.w - bar_x), v.h};  // within the video
+  Fill(c, bar, 250, 250, 250);
 }
 
 }  // namespace
@@ -83,32 +98,39 @@ std::vector<Rect> RenderSyntheticFrame(uint64_t index, int32_t w, int32_t h, uin
   const int32_t per_line = CharsPerLine(w);
   const int32_t max_lines = std::max(1, (h - 2 * kMargin) / kGlyphH);
   const Rect video = VideoRect(w, h);
+  const Canvas canvas{bgra, w, h};
   std::vector<Rect> dirty;
+  auto mark = [&](const Rect& r) {
+    const Rect c = Clip(r, w, h);
+    if (c.w > 0 && c.h > 0) dirty.push_back(c);
+  };
 
   if (full) {
-    Fill(bgra, w, {0, 0, w, h}, 245, 242, 240);
+    Fill(canvas, {0, 0, w, h}, 245, 242, 240);
     // Re-type everything up to this frame so random access is deterministic.
     for (uint64_t c = 0; c < index; ++c) {
       const auto line = static_cast<int32_t>((c / per_line) % max_lines);
       const auto col = static_cast<int32_t>(c % per_line);
-      DrawGlyph(bgra, w, kMargin + col * kGlyphW, kMargin + line * kGlyphH, c);
+      // As the incremental path does: a new line clears it first.
+      if (col == 0) Fill(canvas, {kMargin, kMargin + line * kGlyphH, per_line * kGlyphW, kGlyphH}, 245, 242, 240);
+      DrawGlyph(canvas, kMargin + col * kGlyphW, kMargin + line * kGlyphH, c);
     }
-    dirty.push_back({0, 0, w, h});
+    mark({0, 0, w, h});
   } else {
     const uint64_t c = index - 1;
     const auto line = static_cast<int32_t>((c / per_line) % max_lines);
     const auto col = static_cast<int32_t>(c % per_line);
     if (col == 0) {  // starting a new line clears it (wraps around the page)
       const Rect row{kMargin, kMargin + line * kGlyphH, per_line * kGlyphW, kGlyphH};
-      Fill(bgra, w, row, 245, 242, 240);
-      dirty.push_back(row);
+      Fill(canvas, row, 245, 242, 240);
+      mark(row);
     }
     const Rect cell{kMargin + col * kGlyphW, kMargin + line * kGlyphH, kGlyphW, kGlyphH};
-    DrawGlyph(bgra, w, cell.x, cell.y, c);
-    dirty.push_back(cell);
-    dirty.push_back(video);
+    DrawGlyph(canvas, cell.x, cell.y, c);
+    mark(cell);
+    mark(video);
   }
-  DrawVideo(bgra, w, video, index);
+  DrawVideo(canvas, video, index);
   return dirty;
 }
 

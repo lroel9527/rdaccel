@@ -384,7 +384,9 @@ typedef struct rda_host_config {
   int32_t fps;             /* 60 */
   int64_t bitrate_bps;     /* 8 Mbps; the ceiling with adaptive bitrate */
   int32_t min_qp;          /* 24; video quality ceiling, 0 = encoder decides */
-  const char* encoder;     /* NULL = automatic; Linux: "hevc_nvenc" or "libx265" */
+  const char* encoder;     /* NULL = automatic; Linux: "hevc_nvenc", "libx265" or
+                              "hevc_vaapi" (experimental; device from
+                              RDACCEL_VAAPI_DEVICE, default renderD128) */
 
   /* rda_host_start_capture() only */
   int32_t capture_width;   /* 0 = native; otherwise scaled (even numbers) */

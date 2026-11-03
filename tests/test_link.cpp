@@ -121,6 +121,8 @@ TEST(Link, HandshakeConnectsBothSides) {
   Pair p;
   ASSERT_TRUE(WaitUntil([&] { return p.host->state() == LinkState::kConnected; }));
   ASSERT_TRUE(WaitUntil([&] { return p.viewer->state() == LinkState::kConnected; }));
+  // The state changes before its callback runs: wait for the callbacks.
+  ASSERT_TRUE(WaitUntil([&] { return p.host_ev.state_log().size() >= 1 && p.viewer_ev.state_log().size() >= 1; }));
   EXPECT_EQ(p.host_ev.state_log().size(), 1u);
   EXPECT_EQ(p.viewer_ev.state_log().size(), 1u);
 }
@@ -170,7 +172,9 @@ TEST(Link, CloseSaysGoodbye) {
   std::string err;
   EXPECT_FALSE(p.host->SendMessage(kFirstUserMessage, {}, &err));
   EXPECT_EQ(err.rfind("disconnected", 0), 0u) << err;
-  // Disconnected is final: exactly connected, then disconnected.
+  // Disconnected is final: exactly connected, then disconnected. (The state
+  // changes before its callback runs, so wait for the second callback.)
+  ASSERT_TRUE(WaitUntil([&] { return p.host_ev.state_log().size() >= 2; }));
   const auto log = p.host_ev.state_log();
   ASSERT_EQ(log.size(), 2u);
   EXPECT_EQ(log[1].first, LinkState::kDisconnected);

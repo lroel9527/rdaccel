@@ -13,6 +13,12 @@ UBSan; a crash fails the job and its reproducer is uploaded as an artifact.
 | `fuzz_secure` | the encrypted transport's receive side: peer hello, record framing, alerts, bad tags |
 | `fuzz_reliable` | the UDP reliability layer's datagram parser |
 | `fuzz_hevc` | the HEVC Annex B / access unit helpers |
+| `fuzz_recording` | `.rdstream` playback (what `rdaccel_play` and `rda_viewer_feed_recording()` read), through the platform's real HEVC decoder; seeded with real recordings |
+
+Seed inputs live in `fuzz/corpus/<target>/` (for `recording`: synthetic
+recordings at a few sizes and an Xvfb screen capture with the cursor, made
+with `rdaccel_record`). CI passes them as a second, read-only corpus
+directory.
 
 Multi-channel targets read their input as `[channel][len][bytes]...`
 (`fuzz_input.h`), so the fuzzer can interleave channels.

@@ -519,7 +519,8 @@ TEST(PublicApi, ConnectionAndMessages) {
     return f();
   };
   ASSERT_TRUE(wait([&] { return viewer->state() == rdaccel::ConnectionState::kConnected; }));
-  EXPECT_EQ(viewer_state.load(), static_cast<int>(rdaccel::ConnectionState::kConnected));
+  // The state changes before its callback runs.
+  EXPECT_TRUE(wait([&] { return viewer_state.load() == static_cast<int>(rdaccel::ConnectionState::kConnected); }));
   EXPECT_EQ(host.state(), rdaccel::ConnectionState::kConnected);
   ASSERT_TRUE(viewer->SendMessage(rdaccel::kClipboardTextMessage, std::string_view("copy"), &err)) << err;
   ASSERT_TRUE(host.SendMessage(rdaccel::kFirstUserMessage, std::string_view("ping"), &err)) << err;
