@@ -119,11 +119,14 @@ host.SetInputHandler([&](const rdaccel::InputEvent& ev) { injector->Inject(ev); 
 
 **文字输入。** 按键码只描述“按了哪个物理键”，两边键盘布局不同、或者用输入法打中文时就不够了。这时发 `kText`（C：`RDA_INPUT_TEXT`）事件，`code` 是一个 Unicode 字符（码点 1..0x10FFFF，不含代理区），被控端照字面输入，与它自己的布局无关。C++ 里 `viewer->SendText("你好")` 会把 UTF-8 字符串拆成一个字符一个事件；无效的 UTF-8 整串不发。对方是 0.3 及更早的版本、不支持文字输入时（握手里没有这个能力位），发送返回失败（C：`RDA_ERR_UNSUPPORTED`），什么也不发。被控端遇到以后版本新增的输入类型会跳过而不是断开。
 
+**控制端怎么选。** 能打出字的键（字母、数字、标点、空格，以及控制端输入法上屏的文字）一律发 `kText`；只把不出字的键（回车、退格、方向键、Tab、Esc、功能键，以及带 Ctrl / Command 的快捷键）当按键事件发。否则被控端正好开着输入法（拼音、日文假名等）时，按键会进它的输入法组合，文字就乱了。macOS 上 `Injector` 注入文字时，如果当前输入源是输入法，会临时切到 ASCII 键盘布局再打字，停打 1 秒后的下一个按键事件、或者销毁 `Injector` 时切回来（用户中途自己换了输入源就不动）。切换输入源要在主线程做，所以主线程得跑着 run loop（AppKit 程序、`dispatch_main()` 或 `CFRunLoopRun()` 都行）；没有的话文字照常注入，但被输入法吞掉的情况就避免不了，日志里会有一条警告。
+
 ## 2. 线程
 
 | 回调 / 调用 | 在哪个线程 | 注意 |
 | --- | --- | --- |
-| `on_stream_info`、`on_frame`、`on_cursor` | 传输的接收线程，同一个线程依次调用 | `ImageView` 和 `CursorState::image` 只在回调期间有效，要在别的线程用就先拷贝。回调里不要做耗时的事，否则后面的数据会积压 |
+| `on_stream_info`、`on_frame` | 库的解码线程，依次调用 | `ImageView` 只在回调期间有效，要在别的线程用就先拷贝。回调慢只会让后面的画面积压，不影响光标和传输 |
+| `on_cursor` | 传输的接收线程 | 光标不等画面解码，所以可能和 `on_frame` 同时执行，两者共用的状态要加锁。`CursorState::image` 只在回调期间有效 |
 | `Host` 的 `SetInputHandler`、`SetMessageHandler`、认证钩子，`Viewer` 的 `on_message` | 传输的接收线程 | 同上 |
 | 连接状态回调（`SetStateHandler` / `on_state`） | 传输的接收线程，或库的心跳线程（超时） | 可能和画面回调同时执行。回调里可以调用 `SendMessage`，但不要析构 `Host` / `Viewer` |
 | `Host` 的 `SetErrorHandler` 回调（C：`on_error`） | 出错的那个后台线程（采集线程、光标线程） | 不要在回调里析构 `Host` 或调用 `StopScreenCapture` |

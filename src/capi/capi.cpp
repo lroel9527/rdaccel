@@ -891,9 +891,10 @@ size_t rda_host_encoder_name(const rda_host* h, char* buf, size_t buf_size) {
 
 struct rda_viewer {
   rda_viewer_config config;
-  std::unique_ptr<rdacore::Viewer> viewer;
-  // Callback scratch, only touched on the transport thread.
+  // Callback scratch, only touched on the decode thread. Declared before
+  // `viewer`, so it outlives the thread that uses it.
   std::vector<rda_rect> changed;
+  std::unique_ptr<rdacore::Viewer> viewer;
 };
 
 extern "C" {

@@ -161,3 +161,54 @@ TEST(RateController, SkipsFramesAndBacksOffWhenTheQueueBuilds) {
   for (uint64_t t = 1'200'000; t < 5'000'000; t += 300'000) rc.Update(t, st);
   EXPECT_EQ(rc.target_bps(), 4'000'000);
 }
+
+TEST(RateController, BacksOffWhenTheRoundTripGrows) {
+  // The local queue stays short, but the round trip has tripled: a queue is
+  // building inside the network, so the target drops below the estimate.
+  session::RateController rc(8'000'000, 300'000, 50);
+  TransportStats st;
+  st.bandwidth_bps = 4'000'000;
+  st.queued_bytes = 1'000;
+  st.rtt_us = 40'000;
+  rc.Update(0, st);
+  EXPECT_EQ(rc.target_bps(), 8'000'000);
+  st.rtt_us = 60'000;  // a little jitter is fine
+  rc.Update(300'000, st);
+  EXPECT_EQ(rc.target_bps(), 8'000'000);
+  st.rtt_us = 200'000;
+  auto d = rc.Update(600'000, st);
+  EXPECT_EQ(d.new_target_bps, 3'400'000);
+}
+
+TEST(ReliableTransport, EstimateFollowsABandwidthDrop) {
+  // 4 Mbps, then 1 Mbps from 2 s on, with a sender that keeps the queue
+  // short (as the Host does by skipping frames): the estimate has to come
+  // down to the new rate, or the Host keeps encoding for the old one.
+  net::LinkConditions c;
+  c.bandwidth_bps = 4'000'000;
+  c.delay_ms = 20;
+  c.queue_ms = 200;
+  c.bandwidth_schedule = {{2000, 1'000'000}};
+  Sink sink;
+  auto [a, b] = net::MakeSimulatedLink(c, net::LinkConditions{.delay_ms = 20});
+  net::ReliableTransport host(std::move(a));
+  net::ReliableTransport viewer(std::move(b), {.client = true});
+  viewer.SetReceiver(sink.Fn());
+  const auto chunk = Pattern(10'000, 4);
+  const uint64_t t0 = capture::MonotonicMicros();
+  TransportStats st;
+  uint64_t caught_up = 0;  // when the estimate first came down after the drop
+  while (capture::MonotonicMicros() - t0 < 5'000'000) {
+    host.GetStats(&st);
+    const uint64_t t = capture::MonotonicMicros() - t0;
+    if (!caught_up && t > 2'000'000 && st.bandwidth_bps > 0 && st.bandwidth_bps < 1'300'000) caught_up = t;
+    if (st.queued_bytes < 20'000) host.Send(Channel::kVideo, chunk);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  // Before the time window it took ~2.7 s; now well under one second.
+  ASSERT_NE(caught_up, 0u);
+  EXPECT_LT(caught_up, 3'200'000u);
+  host.GetStats(&st);
+  EXPECT_LT(st.bandwidth_bps, 1'300'000);
+  EXPECT_GT(st.bandwidth_bps, 700'000);
+}

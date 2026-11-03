@@ -26,9 +26,35 @@
 
 #include "args.h"
 
+#ifdef __APPLE__
+#include <CoreFoundation/CoreFoundation.h>
+#endif
+
 namespace {
 
 std::atomic<bool> g_stop{false};
+
+// Waits until `t`. On macOS the main thread keeps its run loop going
+// meanwhile: the input injector does part of its work there (selecting the
+// input source before typing text). An application with an event loop of its
+// own (AppKit, dispatch_main, CFRunLoopRun) has nothing to do for that.
+void WaitUntil(std::chrono::steady_clock::time_point t) {
+#ifdef __APPLE__
+  static CFRunLoopTimerRef keep_alive = [] {
+    // A run loop with no source returns at once instead of waiting.
+    CFRunLoopTimerRef timer = CFRunLoopTimerCreate(nullptr, CFAbsoluteTimeGetCurrent() + 1e9, 0, 0, 0,
+                                                   [](CFRunLoopTimerRef, void*) {}, nullptr);
+    CFRunLoopAddTimer(CFRunLoopGetMain(), timer, kCFRunLoopDefaultMode);
+    return timer;
+  }();
+  (void)keep_alive;
+  for (auto now = std::chrono::steady_clock::now(); now < t; now = std::chrono::steady_clock::now()) {
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, std::chrono::duration<double>(t - now).count(), true);
+  }
+#else
+  std::this_thread::sleep_until(t);
+#endif
+}
 
 void PrintLine(const rdaccel::HostStats& now, const rdaccel::HostStats& before, double secs) {
   std::printf("%6.1fs  %3llu fps (%llu dropped for congestion)  %7.0f kbps  target %6.0f kbps  "
@@ -155,9 +181,9 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "%s\n", err.c_str());
         return 1;
       }
-      std::this_thread::sleep_until(t0 + std::chrono::microseconds((i + 1) * 1'000'000 / fps));
+      WaitUntil(t0 + std::chrono::microseconds((i + 1) * 1'000'000 / fps));
     } else {
-      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      WaitUntil(std::chrono::steady_clock::now() + std::chrono::milliseconds(20));
     }
     if (std::chrono::steady_clock::now() >= next_print) {
       next_print += std::chrono::seconds(1);

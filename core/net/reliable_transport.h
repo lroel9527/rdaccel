@@ -123,6 +123,7 @@ class ReliableTransport final : public transport::ITransport {
   uint64_t backlog_since_ = UINT64_MAX;  // when the send queue last became non-empty  // bytes per microsecond; 0 = initial
   struct BwSample {
     uint64_t round;
+    uint64_t time;  // when it was taken
     double bw;
   };
   std::deque<BwSample> bw_samples_;

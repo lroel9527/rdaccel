@@ -2,15 +2,22 @@
 // Accessibility permission (System Settings > Privacy & Security >
 // Accessibility).
 
+#import <Carbon/Carbon.h>
 #import <CoreGraphics/CoreGraphics.h>
+#include <dispatch/dispatch.h>
+#include <pthread.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <functional>
 #include <memory>
+#include <atomic>
 #include <mutex>
+#include <thread>
 
+#include "log/log.h"
 #include "platform.h"
 #include "mac/displays_mac.h"
 #include "rdacore/keycodes.h"
@@ -46,6 +53,82 @@ void Post(CGEventRef ev) {
   CFRelease(ev);
 }
 
+// Runs `fn` on the main thread (the Text Input Sources API must not be used
+// on another one) and waits at most `timeout_ms`. False when the main thread
+// does not run a run loop: `fn` may then still run later, so it may only
+// touch what it owns.
+bool RunOnMain(std::function<void()> fn, int timeout_ms) {
+  if (pthread_main_np()) {
+    fn();
+    return true;
+  }
+  dispatch_semaphore_t done = dispatch_semaphore_create(0);
+  auto task = std::make_shared<std::function<void()>>(std::move(fn));
+  dispatch_async(dispatch_get_main_queue(), ^{
+    (*task)();
+    dispatch_semaphore_signal(done);
+  });
+  return dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, int64_t{timeout_ms} * NSEC_PER_MSEC)) == 0;
+}
+
+// An input method (Pinyin, Kana, ...) as opposed to a plain keyboard layout.
+bool IsInputMethod(TISInputSourceRef src) {
+  if (!src) return false;
+  CFStringRef type = static_cast<CFStringRef>(TISGetInputSourceProperty(src, kTISPropertyInputSourceType));
+  return type && (CFEqual(type, kTISTypeKeyboardInputMode) || CFEqual(type, kTISTypeKeyboardInputMethodWithoutModes) ||
+                  CFEqual(type, kTISTypeKeyboardInputMethodModeEnabled));
+}
+
+// While an input method is the current input source it takes the injected
+// characters as keystrokes of a composition (or drops them while one is
+// open). So text is typed with an ASCII-capable layout selected, and the
+// user's input method comes back once text has stopped for a while (key
+// events go through it as on the real keyboard) or the injector goes away.
+// Shared with blocks that may outlive the injector (see RunOnMain).
+struct InputSourceSwitch {
+  std::mutex mu;
+  TISInputSourceRef saved = nullptr;  // the input method we switched away from
+  TISInputSourceRef ours = nullptr;   // the layout we selected
+
+  // Main thread. True if it switched just now.
+  bool LeaveInputMethod() {
+    std::lock_guard<std::mutex> lock(mu);
+    if (saved) return false;
+    TISInputSourceRef cur = TISCopyCurrentKeyboardInputSource();
+    if (!IsInputMethod(cur)) {
+      if (cur) CFRelease(cur);
+      return false;
+    }
+    TISInputSourceRef ascii = TISCopyCurrentASCIICapableKeyboardLayoutInputSource();
+    if (!ascii || TISSelectInputSource(ascii) != noErr) {
+      if (ascii) CFRelease(ascii);
+      CFRelease(cur);
+      return false;
+    }
+    saved = cur;
+    ours = ascii;
+    return true;
+  }
+
+  // Main thread. Gives the input method back, unless the user picked
+  // another source meanwhile.
+  void Restore() {
+    std::lock_guard<std::mutex> lock(mu);
+    if (!saved) return;
+    TISInputSourceRef cur = TISCopyCurrentKeyboardInputSource();
+    if (cur && CFEqual(cur, ours)) TISSelectInputSource(saved);
+    if (cur) CFRelease(cur);
+    CFRelease(saved);
+    CFRelease(ours);
+    saved = ours = nullptr;
+  }
+
+  bool switched() {
+    std::lock_guard<std::mutex> lock(mu);
+    return saved != nullptr;
+  }
+};
+
 class MacInjector final : public IInputInjector {
  public:
   MacInjector(CGDirectDisplayID id, int32_t src_w, int32_t src_h) : id_(id) {
@@ -60,6 +143,7 @@ class MacInjector final : public IInputInjector {
     for (int b = 0; b < 5; ++b) {
       if (held_ & (1u << b)) Post(MouseEvent(false, b, last_));
     }
+    if (ime_->switched()) RunOnMain([ime = ime_] { ime->Restore(); }, kMainTimeoutMs);
   }
 
   bool Inject(const InputEvent& ev, std::string* error) override {
@@ -117,6 +201,10 @@ class MacInjector final : public IInputInjector {
       }
       case InputKind::kKeyDown:
       case InputKind::kKeyUp: {
+        if (ev.kind == InputKind::kKeyDown && ime_->switched() &&
+            std::chrono::steady_clock::now() - last_text_ > kTextIdle) {
+          RunOnMain([ime = ime_] { ime->Restore(); }, kMainTimeoutMs);
+        }
         const uint32_t vk = HidToMacKeyCode(ev.code);
         if (vk == kNoKeyCode) {
           if (error) *error = "no macOS key for HID usage " + std::to_string(ev.code);
@@ -129,6 +217,8 @@ class MacInjector final : public IInputInjector {
         return true;
       }
       case InputKind::kText: {
+        LeaveInputMethod();
+        last_text_ = std::chrono::steady_clock::now();
         // The character itself rides on the event, whatever key 0 is.
         UniChar utf16[2];
         UniCharCount n = 1;
@@ -156,6 +246,24 @@ class MacInjector final : public IInputInjector {
   }
 
  private:
+  static constexpr int kMainTimeoutMs = 200;
+  static constexpr auto kTextIdle = std::chrono::seconds(1);
+
+  void LeaveInputMethod() {
+    if (!main_ok_ || ime_->switched()) return;
+    bool now = false;
+    auto flag = std::make_shared<std::atomic<bool>>(false);
+    main_ok_ = RunOnMain([ime = ime_, flag] { *flag = ime->LeaveInputMethod(); }, kMainTimeoutMs);
+    now = *flag;
+    if (!main_ok_) {
+      log::Warn("input: the main thread runs no run loop, so text is injected without leaving the input method "
+                "(an active one such as Pinyin may swallow it)");
+      return;
+    }
+    // Let the switch land before the first character.
+    if (now) std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  }
+
   // Viewer pixels -> global points on this display.
   CGPoint Point(int32_t x, int32_t y) const {
     const CGRect b = CGDisplayBounds(id_);
@@ -192,6 +300,9 @@ class MacInjector final : public IInputInjector {
   }
 
   std::mutex mu_;
+  std::shared_ptr<InputSourceSwitch> ime_ = std::make_shared<InputSourceSwitch>();
+  bool main_ok_ = true;  // false once the main thread failed to answer
+  std::chrono::steady_clock::time_point last_text_{};
   const CGDirectDisplayID id_;
   int32_t src_w_ = 1, src_h_ = 1;
   CGPoint last_ = CGPointZero;

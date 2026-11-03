@@ -22,7 +22,9 @@ RateController::Decision RateController::Update(uint64_t now_us, const Transport
   skipped_ = 0;
   const bool draining = st.queued_bytes < last_queued_;
   last_queued_ = st.queued_bytes;
-  if (skipped || queue_delay_us_ > max_queue_us_ / 2) {
+  if (st.rtt_us > 0 && (min_rtt_us_ == 0 || st.rtt_us < min_rtt_us_)) min_rtt_us_ = st.rtt_us;
+  const bool path_queue = min_rtt_us_ > 0 && st.rtt_us > 2 * min_rtt_us_ + max_queue_us_;
+  if (skipped || path_queue || queue_delay_us_ > max_queue_us_ / 2) {
     // The queue is building (frames had to be skipped), so the sender is
     // not application limited and the estimate is the path's rate: back off
     // below it at once. Fewer bits per frame beat fewer frames. Below that,

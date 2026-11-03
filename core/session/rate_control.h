@@ -9,7 +9,10 @@
 //     85% of the estimated bandwidth; while it stays short the target grows
 //     by 25% per step (at most to twice the estimate, which is only a lower
 //     bound while the sender is application limited), between `min_bps` and
-//     the configured bitrate.
+//     the configured bitrate;
+//   * a round trip well above the lowest one seen means a queue is building
+//     inside the network (the path slowed down before the bandwidth estimate
+//     noticed), which also counts as a building queue.
 
 #include <cstdint>
 
@@ -42,6 +45,7 @@ class RateController {
   uint64_t queue_delay_us_ = 0;
   uint64_t skipped_ = 0;  // frames skipped since the last update
   uint64_t last_queued_ = 0;
+  uint32_t min_rtt_us_ = 0;  // lowest smoothed RTT seen
 };
 
 }  // namespace rdacore::session

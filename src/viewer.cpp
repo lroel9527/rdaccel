@@ -22,6 +22,7 @@ Viewer::Viewer(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 
 Viewer::~Viewer() {
   if (impl_->link) impl_->link->Shutdown();  // Goodbye while the transport works
+  impl_->session->Stop();                    // its decode thread may send
   impl_->transport.reset();
 }
 

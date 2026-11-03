@@ -292,7 +292,9 @@ TEST(CApi, CustomTransportThroughVtable) {
     const rda_image img{px.data(), kW, kH, kW * 4};
     ASSERT_EQ(rda_host_submit_frame(h, &img, rda_now_us(), nullptr, 0), RDA_OK) << rda_last_error();
   }
-  EXPECT_EQ(got.frames, 3);  // delivered synchronously
+  // Decoded on the viewer's own thread.
+  for (int i = 0; i < 500 && got.frames < 3; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  EXPECT_EQ(got.frames, 3);
   rda_host_stats hs{};
   hs.struct_size = sizeof(hs);
   ASSERT_EQ(rda_host_get_stats(h, &hs), RDA_OK);

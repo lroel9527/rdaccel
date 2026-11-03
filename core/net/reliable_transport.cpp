@@ -20,6 +20,10 @@ constexpr uint64_t kMaxAckDelay = 5'000;
 constexpr uint64_t kPacingCredit = 15'000;  // us
 constexpr uint64_t kMinRttWindow = 10'000'000;
 constexpr uint64_t kBwWindowRounds = 10;
+// ... and at most this long: once the bottleneck queue fills, a round lasts
+// as long as the queue delay, and ten of them would keep a stale, higher
+// rate for seconds after the path slows down (4 -> 1 Mbps took ~2.7 s).
+constexpr uint64_t kBwWindowUs = 1'000'000;
 constexpr double kStartupGain = 2.885;
 constexpr double kProbeGains[8] = {1.25, 0.75, 1, 1, 1, 1, 1, 1};
 constexpr size_t kMaxAckRanges = 32;
@@ -342,9 +346,18 @@ void ReliableTransport::OnRateSample(const SentPacket& p, uint64_t now) {
   first_sent_time_ = p.time;
   if (interval > 0 && (min_rtt_ == 0 || interval >= min_rtt_ / 2)) {
     const double rate = static_cast<double>(delivered_ - p.delivered) / static_cast<double>(interval);
-    if (!p.app_limited || rate >= bw_) bw_samples_.push_back({round_, rate});
+    if (!p.app_limited || rate >= bw_) bw_samples_.push_back({round_, now, rate});
   }
-  while (bw_samples_.size() > 1 && bw_samples_.front().round + kBwWindowRounds < round_) {
+  // A standing queue at the bottleneck (the round trip well above its
+  // minimum while we are backlogged) means we send faster than the path
+  // delivers: the path has slowed down. Samples from before the last round
+  // trip then describe the old path, so only the recent ones count.
+  uint64_t oldest = now > kBwWindowUs ? now - kBwWindowUs : 0;
+  if (mode_ == Mode::kProbeBw && !p.app_limited && min_rtt_ > 0 && latest_rtt_ > 2 * min_rtt_ + 20'000) {
+    oldest = std::max(oldest, now > srtt_ ? now - srtt_ : 0);
+  }
+  while (bw_samples_.size() > 1 && (bw_samples_.front().round + kBwWindowRounds < round_ ||
+                                    bw_samples_.front().time < oldest)) {
     bw_samples_.pop_front();
   }
   double best = 0;

@@ -1,5 +1,7 @@
 #include "mac/video_vt.h"
 
+#include "log/log.h"
+
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
@@ -27,6 +29,30 @@ void SetIntProp(VTSessionRef s, CFStringRef key, int64_t v) {
   CFNumberRef n = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt64Type, &v);
   SetProp(s, key, n);
   CFRelease(n);
+}
+
+// The target rate: AverageBitRate alone is a long-run average that the
+// low-latency rate control overshoots for seconds after a cut (seen at
+// 1 Mbps: ~1.5 Mbps out). DataRateLimits adds a hard cap per second, with
+// some headroom so a keyframe still fits.
+void SetRate(VTSessionRef s, int64_t bps) {
+  SetIntProp(s, kVTCompressionPropertyKey_AverageBitRate, bps);
+  const double bytes = static_cast<double>(bps) / 8.0 * 1.25;
+  const double seconds = 1.0;
+  CFNumberRef b = CFNumberCreate(kCFAllocatorDefault, kCFNumberDoubleType, &bytes);
+  CFNumberRef t = CFNumberCreate(kCFAllocatorDefault, kCFNumberDoubleType, &seconds);
+  const void* pair[2] = {b, t};
+  CFArrayRef limits = CFArrayCreate(kCFAllocatorDefault, pair, 2, &kCFTypeArrayCallBacks);
+  const OSStatus st = VTSessionSetProperty(s, kVTCompressionPropertyKey_DataRateLimits, limits);
+  static std::once_flag once;
+  if (st != noErr) {
+    std::call_once(once, [st] {
+      log::Info("VideoToolbox: DataRateLimits not supported here (" + std::to_string(st) + "), AverageBitRate only");
+    });
+  }
+  CFRelease(limits);
+  CFRelease(t);
+  CFRelease(b);
 }
 
 // ---------------------------------------------------------------------------
@@ -88,7 +114,7 @@ class VtHevcEncoder final : public codec::IHevcEncoder {
     // No periodic keyframes: the host asks for one when it needs it.
     SetIntProp(session_, kVTCompressionPropertyKey_MaxKeyFrameInterval, 1 << 30);
     SetIntProp(session_, kVTCompressionPropertyKey_ExpectedFrameRate, cfg.fps);
-    SetIntProp(session_, kVTCompressionPropertyKey_AverageBitRate, cfg.bitrate_bps);
+    SetRate(session_, cfg.bitrate_bps);
     SetProp(session_, kVTCompressionPropertyKey_ColorPrimaries, kCVImageBufferColorPrimaries_ITU_R_709_2);
     SetProp(session_, kVTCompressionPropertyKey_TransferFunction,
             kCVImageBufferTransferFunction_ITU_R_709_2);
@@ -116,9 +142,7 @@ class VtHevcEncoder final : public codec::IHevcEncoder {
   }
   const std::string& last_error() const override { return error_; }
 
-  void SetBitrate(int64_t bps) override {
-    SetIntProp(session_, kVTCompressionPropertyKey_AverageBitRate, bps);
-  }
+  void SetBitrate(int64_t bps) override { SetRate(session_, bps); }
 
   std::optional<codec::HevcAccessUnit> Encode(const tile::ImageView& img, uint64_t pts_us,
                                               bool force_keyframe) override {

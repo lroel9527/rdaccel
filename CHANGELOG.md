@@ -14,6 +14,13 @@
 - **输入注入（可选）**：新增 `rda_injector_*` / `rdaccel::Injector`，把收到的输入事件注入被控系统。Linux 用 XTest
   （CI 在 Xvfb 里验证移动、缩放坐标、点击、滚轮、按键和任意字符输入），macOS 用 CGEvent（需要辅助功能权限）。
   `rdaccel_serve --inject`。滚轮单位明确为“行”，y > 0 向上、x > 0 向右。
+- **低带宽下延迟**（Mac 复测 4 → 1 Mbps 时 p95 约 1 秒）：链路降速后带宽估计要 2.7 秒才跟上，码率因此不降。
+  带宽估计改为最多看最近 1 秒（网络里排起队时只看最近一个往返）；码率控制看到往返时延明显高于最低值也立刻降码率；
+  VideoToolbox 除了平均码率再设 `DataRateLimits` 硬上限（低码率时它会超出平均码率）。
+- **光标延迟**：光标消息不再排在画面解码后面。Viewer 的 `on_stream_info` / `on_frame` 改在库自己的解码线程调用，
+  `on_cursor` 仍在传输的接收线程，**两者可能同时执行**，共用的状态要加锁。云端 1.5 Mbps 模拟里光标 p95 从 57 ms 降到 29 ms。
+- **输入法吞字**：macOS 注入文字时若当前输入源是输入法（如拼音），临时切到 ASCII 键盘布局，停打 1 秒后的按键或销毁时切回；
+  需要主线程跑 run loop（`rdaccel_serve` 已处理）。文档写明：能出字的键一律发 `kText`，只有不出字的键发按键事件。
 - **fuzz**：新增 `fuzz_recording`（录制文件回放，走真实 HEVC 解码器）和 `fuzz/corpus/recording/` 种子语料。
 - **修复**：`rda_test_pattern_render()` / `RenderTestPattern` 在宽或高小于约 120 像素时越界写内存；
   文字绕回页首后整帧渲染与增量渲染不一致。
