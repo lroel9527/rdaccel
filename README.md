@@ -13,7 +13,8 @@ rdaccel 是给其他程序集成的 C++20 库，只有一个 CMake 目标 `rdacc
 | --- | --- |
 | `rdaccel::Host` | 发送端：自己采集主屏（`StartScreenCapture`），或接收应用送来的画面（`SubmitFrame`）；做变化检测、HEVC 编码、发送 |
 | `rdaccel::Viewer` | 接收端：解码，通过回调把 BGRA 画面和变化区域交给应用自己绘制；`SendInput` 回传输入事件 |
-| `rdaccel::Transport` | 传输接口。自带进程内管道和 TCP，应用可以实现自己的（QUIC、WebRTC、中继服务器等） |
+| `rdaccel::Transport` | 传输接口。自带进程内管道、TCP 和带拥塞控制的 UDP，应用可以实现自己的（QUIC、WebRTC、中继服务器等） |
+| `CursorImage` / `CursorState` / `DrawCursor` | 光标单独传输，接收端自己画（`ViewerHandlers::on_cursor`） |
 | `CreateRecordingTransport` / `ReadRecording` | 录制和回放码流（`.rdstream`），用于对比码率和跨平台互通测试 |
 | `RenderTestPattern` | 确定性的合成桌面，没有真实屏幕时用来测试集成 |
 
@@ -22,11 +23,12 @@ rdaccel 是给其他程序集成的 C++20 库，只有一个 CMake 目标 `rdacc
 ```cpp
 #include <rdaccel/rdaccel.h>
 
-auto [host_end, viewer_end] = rdaccel::CreateLocalPipe();  // 跨机器换成 ListenTcp / ConnectTcp
+auto [host_end, viewer_end] = rdaccel::CreateLocalPipe();  // 跨机器换成 ListenUdp / ConnectUdp
 
 rdaccel::ViewerHandlers handlers;
 handlers.on_frame = [](const rdaccel::ImageView& bgra, std::span<const rdaccel::Rect> changed,
                        const rdaccel::FrameInfo& info) { /* 画到你的窗口上 */ };
+handlers.on_cursor = [](const rdaccel::CursorState& c) { /* 在 (c.x, c.y) 画 c.image */ };
 auto viewer = rdaccel::Viewer::Create(std::move(viewer_end), std::move(handlers));
 
 rdaccel::Host host(std::move(host_end));
@@ -44,11 +46,18 @@ cmake --install build --prefix /opt/rdaccel
 # 2) 作为子目录：add_subdirectory(rdaccel)，此时默认不编译测试和示例
 ```
 
-API 在 1.0 之前还会变。M1 的功能都加在 `Host` / `Viewer` 后面，现有接口没有改，`HostConfig` / `HostStats` 只增加了字段。
+线程、生命周期、传输选择、出错处理和平台要求见 **[集成指南](docs/integration.md)**。跨两台机器试用：
 
-## 当前进度：M1 按区域分类传输
+```bash
+./build/bin/rdaccel_serve --udp=7300                     # 被控机：采集主屏，等一个接收端
+./build/bin/rdaccel_view 10.0.0.2 --udp=7300 --seconds=30 --dump=last.ppm   # 控制端：解码并每秒打印统计
+```
 
-M0 是整屏硬编基线；M1 在它上面加了按区域分类，每一项都可以在 `HostConfig` 里单独关掉做对比。
+API 在 1.0 之前还会变。M1、M2 的功能都加在 `Host` / `Viewer` 后面，现有接口没有改，只增加了字段和函数。
+
+## 当前进度：M2 视频区域、网络传输、光标通道
+
+M0 是整屏硬编基线；M1 在它上面加了按区域分类；M2 加了视频区域单独编码、带拥塞控制和自适应码率的 UDP 传输、独立光标通道。每一项都可以在 `HostConfig` 里单独关掉做对比。M2 目前只在 Linux 和 macOS CI 上验证过，还要在真实 Mac 上复测。
 
 | 模块 | 说明 | 开关 |
 | --- | --- | --- |
@@ -64,7 +73,8 @@ M0 是整屏硬编基线；M1 在它上面加了按区域分类，每一项都�
 | 传输 | 进程内管道（回环）、TCP、UDP（M2，`ListenUdp` / `ConnectUdp`）。UDP 传输自带丢包恢复（选择性确认 + 重传，每个通道独立有序，丢一个视频包不会卡住输入）和 BBR 式拥塞控制（按测得的瓶颈带宽发包，不把路由器缓冲塞满） | — |
 | 自适应码率（M2） | 传输层报告带宽估计和发送队列（`Transport::GetStats`）。队列超过 `max_queue_ms` 时跳过这一帧（下一帧会带上所有变化），排队时码率降到估计带宽的 85%，畅通时每 250 ms 最多升 25% | `adaptive_bitrate`、`min_bitrate_bps`、`max_queue_ms`（默认 50） |
 | 光标通道（M2） | 光标不画进画面：Host 单独发指针位置（每次约 17 字节）和光标图像（每种图像只发一次，deflate 压缩，两端各记最近 64 种），Viewer 通过 `on_cursor` 拿到位置和图像自己画（可用 `DrawCursor()`，或交给系统的硬件光标）。光标走单独的高优先级通道，大帧还在路上时指针照样跟手。`StartScreenCapture()` 时库自己以 120 Hz 读系统光标（macOS：CoreGraphics + NSCursor；Linux：XFixes）；自己喂帧的程序调用 `Host::SetCursor()` / `SetCursorImage()` | `cursor_channel`、`cursor_poll_hz`（默认 120）、`capture_cursor`（改回画进画面） |
-| 示例 | `rdaccel_record`、`rdaccel_play`、`rdaccel_bench`（场景评测）、`rdaccel_loopback`（macOS 窗口程序）、`minimal` | — |
+| 关键帧请求（M2） | 接收端解码失败或中途接入时自动向发送端要一次全屏刷新（最多每 250 ms 一次），应用也可以调用 `Viewer::RequestKeyframe()` | — |
+| 示例 | `rdaccel_serve` / `rdaccel_view`（跨机器）、`rdaccel_record`、`rdaccel_play`、`rdaccel_bench`（场景评测）、`rdaccel_netsim`（模拟网络）、`rdaccel_loopback`（macOS 窗口程序，含光标层）、`minimal` | — |
 
 只支持 HEVC，没有 H.264 回退。
 
@@ -208,7 +218,8 @@ include/rdaccel/   公开 API（唯一会被安装的头文件）
 src/               公开 API 的实现
 core/              内部：协议、分块比对、HEVC 码流格式、会话、传输（net/：UDP、可靠传输、网络模拟）、合成画面
 platform/          内部：mac/（ScreenCaptureKit、VideoToolbox、光标）、linux/（X11、XFixes 光标、FFmpeg）
-examples/          只用公开 API 的示例：record、play、bench、netsim、loopback_mac、minimal（独立 CMake 工程）
+examples/          只用公开 API 的示例：serve、view、record、play、bench、netsim、loopback_mac、minimal（独立 CMake 工程）
+docs/              集成指南
 tools/             开发辅助脚本（make_desktop.py：生成评测用的仿真桌面）
 tests/             GoogleTest（test_api.cpp 只用公开 API）
 cmake/             find_package 配置模板

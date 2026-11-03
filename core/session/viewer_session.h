@@ -46,6 +46,8 @@ class ViewerSession {
   using DecoderFactory = std::function<std::unique_ptr<codec::IHevcDecoder>()>;
   void SetDecoderFactory(DecoderFactory fn) { decoder_factory_ = std::move(fn); }
   void SendInput(const proto::InputEvent& ev);
+  // Sends a KeyframeRequest (no-op without a transport).
+  void RequestKeyframe();
 
   ViewerStats stats() const;
 
@@ -92,6 +94,8 @@ class ViewerSession {
   int32_t width_ = 0, height_ = 0;
   std::vector<uint8_t> screen_;
   bool have_keyframe_ = false;  // screen_ holds a whole picture
+  uint64_t last_shown_ = 0;        // frame id
+  uint64_t last_request_us_ = 0;   // automatic keyframe requests, rate limited
   codec::LosslessDecoder lossless_dec_;
 
   mutable std::mutex mu_;

@@ -9,6 +9,9 @@
 // second: encoded fps, bitrate, encode/decode time and capture-to-display
 // latency (both ends share one clock, so the latency is exact).
 //
+// The mouse cursor arrives on the cursor channel and is shown as its own
+// layer on top of the picture, so it moves even when no frame changes.
+//
 //   open rdaccel_loopback.app --args --fps=60 --bitrate=8000000
 
 #import <AppKit/AppKit.h>
@@ -16,6 +19,7 @@
 
 #include <rdaccel/rdaccel.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <memory>
@@ -39,6 +43,10 @@ long ArgNum(const char* key, long def) {
 @implementation AppDelegate {
   NSWindow* _window;
   CALayer* _layer;
+  CALayer* _cursorLayer;
+  CGImageRef _cursorImage;  // owned
+  rdaccel::CursorState _cursor;  // main thread
+  int32_t _streamW, _streamH;    // main thread
   NSTimer* _timer;
 
   std::unique_ptr<rdaccel::Host> _host;
@@ -64,6 +72,10 @@ long ArgNum(const char* key, long def) {
   _layer = view.layer;
   _layer.backgroundColor = NSColor.blackColor.CGColor;
   _layer.contentsGravity = kCAGravityResizeAspect;
+  _cursorLayer = [CALayer layer];
+  _cursorLayer.anchorPoint = CGPointZero;
+  _cursorLayer.hidden = YES;
+  [_layer addSublayer:_cursorLayer];
   [_window makeKeyAndOrderFront:nil];
   [NSApp activateIgnoringOtherApps:YES];
 
@@ -75,6 +87,31 @@ long ArgNum(const char* key, long def) {
   handlers.on_frame = [weakSelf](const rdaccel::ImageView& img, std::span<const rdaccel::Rect>,
                                  const rdaccel::FrameInfo& info) {
     [weakSelf presentFrame:img captureTime:info.capture_time_us];
+  };
+  handlers.on_stream_info = [weakSelf](int32_t w, int32_t h) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      AppDelegate* me = weakSelf;
+      if (!me) return;
+      me->_streamW = w;
+      me->_streamH = h;
+    });
+  };
+  handlers.on_cursor = [weakSelf](const rdaccel::CursorState& c) {
+    // Runs on the transport thread; the image pointer is only valid now.
+    CGImageRef image = nullptr;
+    if (c.image_changed && c.image) image = [AppDelegate makeCursorImage:*c.image];
+    rdaccel::CursorState state = c;
+    state.image = nullptr;  // not valid after this call; the size is passed instead
+    const int32_t iw = c.image ? c.image->width : 0, ih = c.image ? c.image->height : 0;
+    const int32_t hx = c.image ? c.image->hotspot_x : 0, hy = c.image ? c.image->hotspot_y : 0;
+    dispatch_async(dispatch_get_main_queue(), ^{
+      AppDelegate* me = weakSelf;
+      if (!me) {
+        if (image) CGImageRelease(image);
+        return;
+      }
+      [me showCursor:state image:image width:iw height:ih hotX:hx hotY:hy];
+    });
   };
   _viewer = rdaccel::Viewer::Create(std::move(viewerEnd), std::move(handlers), &err);
   if (!_viewer) {
@@ -134,6 +171,48 @@ long ArgNum(const char* key, long def) {
   });
 }
 
++ (CGImageRef)makeCursorImage:(const rdaccel::CursorImage&)c {
+  CFDataRef data = CFDataCreate(kCFAllocatorDefault, c.bgra.data(), static_cast<CFIndex>(c.bgra.size()));
+  CGDataProviderRef provider = CGDataProviderCreateWithCFData(data);
+  CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+  CGImageRef image = CGImageCreate(c.width, c.height, 8, 32, static_cast<size_t>(c.width) * 4, cs,
+                                   static_cast<CGBitmapInfo>(kCGBitmapByteOrder32Little) |
+                                       static_cast<CGBitmapInfo>(kCGImageAlphaPremultipliedFirst),
+                                   provider, nullptr, false, kCGRenderingIntentDefault);
+  CGColorSpaceRelease(cs);
+  CGDataProviderRelease(provider);
+  CFRelease(data);
+  return image;
+}
+
+// Main thread. Places the cursor layer where the pointer is in the
+// aspect-fitted picture. `image` (owned, may be null) replaces the old one.
+- (void)showCursor:(const rdaccel::CursorState&)c
+             image:(CGImageRef)image
+             width:(int32_t)iw
+            height:(int32_t)ih
+              hotX:(int32_t)hx
+              hotY:(int32_t)hy {
+  [CATransaction begin];
+  [CATransaction setDisableActions:YES];
+  if (image) {
+    if (_cursorImage) CGImageRelease(_cursorImage);
+    _cursorImage = image;
+    _cursorLayer.contents = (__bridge id)image;
+  }
+  const CGSize b = _layer.bounds.size;
+  if (_streamW > 0 && _streamH > 0 && iw > 0 && b.width > 0 && b.height > 0) {
+    const double s = std::min(b.width / _streamW, b.height / _streamH);
+    const double ox = (b.width - _streamW * s) / 2, oy = (b.height - _streamH * s) / 2;
+    // Layer coordinates have their origin at the bottom left.
+    _cursorLayer.frame = CGRectMake(ox + (c.x - hx) * s, oy + (_streamH - (c.y - hy) - ih) * s, iw * s, ih * s);
+    _cursorLayer.hidden = !c.visible;
+  } else {
+    _cursorLayer.hidden = YES;
+  }
+  [CATransaction commit];
+}
+
 - (void)tick {
   if (!_host || !_viewer) return;
   const auto hs = _host->stats();
@@ -181,6 +260,8 @@ long ArgNum(const char* key, long def) {
   // Host first: it stops capture, and nothing feeds the viewer after that.
   _host.reset();
   _viewer.reset();
+  if (_cursorImage) CGImageRelease(_cursorImage);
+  _cursorImage = nullptr;
 }
 
 @end

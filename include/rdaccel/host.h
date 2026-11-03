@@ -88,6 +88,7 @@ struct HostStats {
   uint64_t frames_encoded = 0;  // frames sent: video, lossless or both
   uint64_t video_frames = 0;    // frames that went through the video encoder
   uint64_t keyframes = 0;
+  uint64_t keyframe_requests = 0;  // from the viewer (it could not decode)
   uint64_t encode_errors = 0;
   uint64_t bytes_sent = 0;      // everything, cursor channel included
   uint64_t video_bytes = 0;     // HEVC payload only

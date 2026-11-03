@@ -2,9 +2,12 @@
 
 // How a Host and a Viewer talk to each other.
 //
-// The library ships an in-process pipe (both ends in one process) and a TCP
-// transport. Applications can plug in their own (QUIC, WebRTC data channels,
-// a relay server, ...) by implementing Transport.
+// The library ships an in-process pipe (both ends in one process), TCP, and
+// UDP with loss recovery and congestion control (the one to use on real
+// networks). Applications can plug in their own (QUIC, WebRTC data channels,
+// a relay server, ...) by implementing Transport. None of them encrypts or
+// authenticates; across the internet, run inside a VPN or your own secure
+// transport. See docs/integration.md.
 
 #include <cstdint>
 #include <functional>

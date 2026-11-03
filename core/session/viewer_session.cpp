@@ -43,6 +43,17 @@ void ViewerSession::SendInput(const proto::InputEvent& ev) {
   if (transport_) transport_->Send(transport::Channel::kInput, proto::Encode(ev));
 }
 
+void ViewerSession::RequestKeyframe() {
+  if (!transport_) return;
+  uint64_t last;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    ++stats_.keyframe_requests;
+    last = last_shown_;
+  }
+  transport_->Send(transport::Channel::kControl, proto::Encode(proto::KeyframeRequest{last}));
+}
+
 void ViewerSession::OnReceive(transport::Channel ch, std::span<const uint8_t> bytes) {
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -259,9 +270,15 @@ void ViewerSession::Handle(proto::Message&& m) {
     if (ok) {
       ++stats_.frames_decoded;
       stats_.decode_us_total += t1 - t0;
+      last_shown_ = frame_id;
     } else {
       ++stats_.decode_errors;
     }
+  }
+  // Undecodable: ask for a refresh, but not for every frame still on the way.
+  if (!ok && transport_ && (last_request_us_ == 0 || t1 - last_request_us_ >= 250'000)) {
+    last_request_us_ = t1;
+    RequestKeyframe();
   }
   begin_.reset();
   videos_.clear();

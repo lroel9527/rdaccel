@@ -388,3 +388,28 @@ TEST(PublicApi, RecordingKeepsTheCursor) {
   EXPECT_EQ(cursors, 1);
   std::remove(path.c_str());
 }
+
+TEST(PublicApi, ViewerCanAskForAKeyframe) {
+  auto [host_end, viewer_end] = rdaccel::CreateLocalPipe();
+  Received got;
+  std::string err;
+  auto viewer = rdaccel::Viewer::Create(std::move(viewer_end), got.Handlers(), &err);
+  ASSERT_TRUE(viewer) << err;
+  rdaccel::Host host(std::move(host_end));
+  std::vector<uint8_t> px;
+  for (int i = 0; i < 3; ++i) {
+    const auto dirty = rdaccel::RenderTestPattern(i, kW, kH, px);
+    ASSERT_TRUE(host.SubmitFrame({px.data(), kW, kH, kW * 4}, rdaccel::NowMicros(), dirty, &err)) << err;
+    if (i == 1) {
+      ASSERT_TRUE(got.WaitFor(2));
+      viewer->RequestKeyframe();
+      for (int k = 0; k < 500 && host.stats().keyframe_requests == 0; ++k) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+    }
+  }
+  ASSERT_TRUE(got.WaitFor(3));
+  EXPECT_EQ(viewer->stats().keyframe_requests, 1u);
+  EXPECT_EQ(host.stats().keyframe_requests, 1u);
+  EXPECT_EQ(host.stats().keyframes, 2u);
+}

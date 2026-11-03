@@ -27,6 +27,7 @@ struct ViewerStats {
   uint64_t decode_errors = 0;
   uint64_t bytes_received = 0;
   uint64_t decode_us_total = 0;
+  uint64_t keyframe_requests = 0;  // sent to the host after decode errors
 };
 
 struct ViewerHandlers {
@@ -59,6 +60,12 @@ class Viewer {
   Viewer& operator=(const Viewer&) = delete;
 
   void SendInput(const InputEvent& ev);
+
+  // Asks the host for a full refresh. The viewer does this by itself when
+  // it cannot decode what arrives (at most every 250 ms); applications only
+  // need it if they lose pictures on their side. The refresh comes with the
+  // host's next frame.
+  void RequestKeyframe();
 
   // Decodes a recording (see recording.h) synchronously on this thread.
   void FeedRecording(std::span<const uint8_t> bytes);

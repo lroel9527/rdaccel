@@ -32,6 +32,7 @@ enum class MsgType : uint8_t {
   kInputEvent = 8,
   kFeedback = 9,
   kLosslessData = 10,
+  kKeyframeRequest = 11,
 };
 
 // HEVC only: the project deliberately has no H.264 fallback.
@@ -141,8 +142,15 @@ struct Feedback {
   friend bool operator==(const Feedback&, const Feedback&) = default;
 };
 
+// Viewer -> host, on the control channel: the viewer cannot decode the
+// stream (a decoder error, or it missed the start) and needs a full refresh.
+struct KeyframeRequest {
+  uint64_t last_frame_id = 0;  // last frame the viewer showed, 0 = none
+  friend bool operator==(const KeyframeRequest&, const KeyframeRequest&) = default;
+};
+
 using Message = std::variant<Hello, FrameBegin, VideoData, FrameEnd, CopyRect, CursorPos,
-                             CursorShape, InputEvent, Feedback, LosslessData>;
+                             CursorShape, InputEvent, Feedback, LosslessData, KeyframeRequest>;
 
 // Serializes one message including its type and length header.
 std::vector<uint8_t> Encode(const Message& msg);
