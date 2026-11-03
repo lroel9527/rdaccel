@@ -1,3 +1,5 @@
+#include <cstring>
+
 #include <gtest/gtest.h>
 
 #include "tile/motion.h"
