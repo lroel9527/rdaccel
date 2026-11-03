@@ -96,7 +96,9 @@ TEST(Session, FramesFlowAndStaticFramesAreSkipped) {
   constexpr int W = 200, H = 120;
   session::HostSession host(host_end.get(), std::make_unique<FakeEncoder>(), W, H,
                             {.lossless = false, .refine_frames = 0});
-  session::ViewerSession viewer(viewer_end.get(), std::make_unique<FakeDecoder>());
+  // Attached only once the handlers are set: the Hello is already waiting
+  // in the pipe and would otherwise race the handler.
+  session::ViewerSession viewer(nullptr, std::make_unique<FakeDecoder>());
 
   std::mutex mu;
   std::condition_variable cv;
@@ -114,6 +116,8 @@ TEST(Session, FramesFlowAndStaticFramesAreSkipped) {
     got.emplace_back(id, regions.size());
     cv.notify_all();
   });
+
+  viewer.Attach(viewer_end.get());
 
   std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 50);
   capture::CapturedFrame f{{px.data(), W, H, W * 4}, {}, 0};
@@ -163,7 +167,8 @@ TEST(Session, FewColourTilesGoLosslessAndSkipTheEncoder) {
   constexpr int W = 200, H = 120;
   auto enc = std::make_unique<FakeEncoder>();
   FakeEncoder* raw = enc.get();
-  session::HostSession host(host_end.get(), std::move(enc), W, H, {.refine_frames = 0});
+  session::HostSession host(host_end.get(), std::move(enc), W, H,
+                            {.refine_frames = 0, .progressive = false});
   session::ViewerSession viewer(viewer_end.get(), std::make_unique<FakeDecoder>());
 
   std::mutex mu;
@@ -368,4 +373,72 @@ TEST(Session, ViewerAsksForAKeyframeAfterADecodeError) {
   EXPECT_TRUE(encoder->keyframe_requests[2]);
   std::unique_lock<std::mutex> lock(mu);
   ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(5), [&] { return shown == 2; }));
+}
+
+TEST(Session, ProgressiveKeyframeSendsVideoFirstAndLosslessAfter) {
+  auto [host_end, viewer_end] = transport::MakeLocalPipe();
+  constexpr int W = 200, H = 120;  // 4 x 2 tiles
+  auto enc = std::make_unique<FakeEncoder>();
+  FakeEncoder* raw = enc.get();
+  // A budget of about 3 lossless tiles per frame.
+  session::HostSession host(host_end.get(), std::move(enc), W, H,
+                            {.refine_frames = 0, .fps = 10, .bitrate_bps = 10 * 8 * 1500 * 3 * 2});
+  session::ViewerSession viewer(viewer_end.get(), std::make_unique<FakeDecoder>());
+  std::mutex mu;
+  std::condition_variable cv;
+  std::vector<std::vector<uint8_t>> shown;
+  viewer.SetFrameHandler([&](const tile::ImageView& img, const std::vector<Rect>&, uint64_t, uint64_t) {
+    std::lock_guard<std::mutex> lock(mu);
+    shown.emplace_back(img.data, img.data + static_cast<size_t>(img.stride) * img.height);
+    cv.notify_all();
+  });
+  // Two-colour stripes (text-like, lossless), except the first tile: noise
+  // with too many colours, which stays video.
+  std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4);
+  uint32_t seed = 1;
+  for (int y = 0; y < H; ++y) {
+    for (int x = 0; x < W; ++x) {
+      uint8_t* p = px.data() + (static_cast<size_t>(y) * W + x) * 4;
+      seed = seed * 1664525u + 1013904223u;
+      const uint8_t v = x < 64 && y < 64 ? static_cast<uint8_t>(seed >> 24) : (y % 4 < 2 ? 30 : 220);
+      p[0] = p[1] = v;
+      p[2] = static_cast<uint8_t>(x < 64 && y < 64 ? seed >> 16 : v);
+      p[3] = 255;
+    }
+  }
+  capture::CapturedFrame f{{px.data(), W, H, W * 4}, {}, 0};
+  // The screen never changes; frames keep coming until all tiles are exact.
+  int frames = 0;
+  while (frames < 10) {
+    host.OnFrame(f);
+    ++frames;
+    if (host.stats().progressive_tiles == 7) break;
+  }
+  EXPECT_EQ(host.stats().progressive_tiles, 7u);
+  EXPECT_GE(frames, 3);  // spread over frames, not all at once
+  // Only the keyframe went through the encoder so far ...
+  ASSERT_EQ(raw->keyframe_requests.size(), 1u);
+  EXPECT_TRUE(raw->keyframe_requests[0]);
+  // ... then the video tile gets a fresh intra picture of its own ...
+  host.OnFrame(f);
+  ++frames;
+  ASSERT_EQ(raw->keyframe_requests.size(), 2u);
+  EXPECT_TRUE(raw->keyframe_requests[1]);
+  host.OnFrame(f);  // ... and nothing is owed any more: skipped
+  EXPECT_EQ(host.stats().frames_skipped, 1u);
+
+  PipeStopper stop{host_end, viewer_end};
+  std::unique_lock<std::mutex> lock(mu);
+  ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(5), [&] { return static_cast<int>(shown.size()) == frames; }));
+  // The keyframe is video only (the fake decoder shows zeros) ...
+  EXPECT_NE(shown.front(), px);
+  // ... and the lossless tiles make the text exact.
+  const auto& last = shown.back();
+  for (int y = 0; y < H; ++y) {
+    for (int x = 0; x < W; ++x) {
+      if (x < 64 && y < 64) continue;
+      const size_t o = (static_cast<size_t>(y) * W + x) * 4;
+      ASSERT_EQ(std::memcmp(&last[o], &px[o], 3), 0) << x << "," << y;
+    }
+  }
 }

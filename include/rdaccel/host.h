@@ -59,6 +59,12 @@ struct HostConfig {
   // scrolled in) once they stop changing. Off by default: on the benchmark
   // scenes it cost more than it gained (see README).
   bool refresh = false;
+  // Progressive keyframes: the first picture (and any full refresh) goes out
+  // as video only, which is several times smaller and appears quickly even
+  // on a slow link; text and UI then turn exact over the next frames, using
+  // most of the bitrate, and what stays video gets one sharper picture at the
+  // end. Off: the first picture is exact but arrives late.
+  bool progressive = true;
   // Give areas that behave like video (many neighbouring tiles that need the
   // video encoder nearly every frame: a movie, a game) their own HEVC stream,
   // cropped to the area. The full-screen encoder then only handles the rest
@@ -97,6 +103,7 @@ struct HostStats {
   uint64_t moved_tiles = 0;     // sent as copies of what the viewer shows
   uint64_t cached_tiles = 0;    // painted from the viewer's tile cache
   uint64_t refreshed_tiles = 0; // re-sent at better quality once static
+  uint64_t progressive_tiles = 0;  // lossless tiles sent after a progressive keyframe
   uint64_t region_pictures = 0;  // pictures of video area streams
   uint64_t region_bytes = 0;     // their HEVC payload (also in video_bytes)
   uint64_t regions_opened = 0;   // video areas detected so far
