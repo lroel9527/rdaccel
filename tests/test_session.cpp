@@ -72,12 +72,23 @@ class FakeDecoder final : public codec::IHevcDecoder {
   std::string err_;
 };
 
+// Stops both pipe workers before the test's locals they call into go away.
+struct PipeStopper {
+  std::unique_ptr<transport::LocalPipeEndpoint>& a;
+  std::unique_ptr<transport::LocalPipeEndpoint>& b;
+  ~PipeStopper() {
+    a.reset();
+    b.reset();
+  }
+};
+
 }  // namespace
 
 TEST(Session, FramesFlowAndStaticFramesAreSkipped) {
   auto [host_end, viewer_end] = transport::MakeLocalPipe();
   constexpr int W = 200, H = 120;
-  session::HostSession host(host_end.get(), std::make_unique<FakeEncoder>(), W, H);
+  session::HostSession host(host_end.get(), std::make_unique<FakeEncoder>(), W, H,
+                            {.lossless = false, .refine_frames = 0});
   session::ViewerSession viewer(viewer_end.get(), std::make_unique<FakeDecoder>());
 
   std::mutex mu;
@@ -104,6 +115,7 @@ TEST(Session, FramesFlowAndStaticFramesAreSkipped) {
   px[(70 * W + 150) * 4] = 99;  // one pixel in tile (2, 1)
   host.OnFrame(f);
 
+  PipeStopper stop{host_end, viewer_end};
   std::unique_lock<std::mutex> lock(mu);
   ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(5), [&] { return got.size() == 2; }));
   EXPECT_EQ(hello.width, static_cast<uint32_t>(W));
@@ -122,7 +134,7 @@ TEST(Session, EncoderFailureIsReportedAndForcesKeyframe) {
   auto enc = std::make_unique<FakeEncoder>();
   FakeEncoder* raw = enc.get();
   constexpr int W = 128, H = 64;
-  session::HostSession host(host_end.get(), std::move(enc), W, H);
+  session::HostSession host(host_end.get(), std::move(enc), W, H, {.lossless = false, .refine_frames = 0});
   std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 50);
   capture::CapturedFrame f{{px.data(), W, H, W * 4}, {}, 0};
   std::string err;
@@ -137,6 +149,50 @@ TEST(Session, EncoderFailureIsReportedAndForcesKeyframe) {
   ASSERT_TRUE(host.OnFrame(f, &err));
   EXPECT_EQ(raw->keyframe_requests, (std::vector<bool>{true, false, true}));
   EXPECT_EQ(host.stats().frames_encoded, 2u);
+}
+
+TEST(Session, FewColourTilesGoLosslessAndSkipTheEncoder) {
+  auto [host_end, viewer_end] = transport::MakeLocalPipe();
+  constexpr int W = 200, H = 120;
+  auto enc = std::make_unique<FakeEncoder>();
+  FakeEncoder* raw = enc.get();
+  session::HostSession host(host_end.get(), std::move(enc), W, H, {.refine_frames = 0});
+  session::ViewerSession viewer(viewer_end.get(), std::make_unique<FakeDecoder>());
+
+  std::mutex mu;
+  std::condition_variable cv;
+  std::vector<std::vector<Rect>> got;
+  std::vector<uint8_t> shown;
+  viewer.SetFrameHandler([&](const tile::ImageView& img, const std::vector<Rect>& regions,
+                             uint64_t, uint64_t) {
+    std::lock_guard<std::mutex> lock(mu);
+    got.push_back(regions);
+    shown.assign(img.data, img.data + static_cast<size_t>(img.stride) * img.height);
+    cv.notify_all();
+  });
+
+  std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 50);
+  for (size_t i = 3; i < px.size(); i += 4) px[i] = 255;  // the viewer shows opaque pixels
+  capture::CapturedFrame f{{px.data(), W, H, W * 4}, {}, 0};
+  host.OnFrame(f);              // keyframe: video + every tile lossless
+  px[(70 * W + 150) * 4] = 99;  // one pixel in tile (2, 1): two colours
+  host.OnFrame(f);
+
+  PipeStopper stop{host_end, viewer_end};
+  std::unique_lock<std::mutex> lock(mu);
+  ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(5), [&] { return got.size() == 2; }));
+  EXPECT_TRUE(got[0].empty());
+  ASSERT_EQ(got[1].size(), 1u);
+  EXPECT_EQ(got[1][0], (Rect{128, 64, 64, 56}));
+  // The fake decoder outputs zeros, so every pixel shown came from the
+  // lossless layer, which is exact.
+  EXPECT_EQ(shown, px);
+  EXPECT_EQ(raw->keyframe_requests, (std::vector<bool>{true}));  // no second encode
+
+  const auto hs = host.stats();
+  EXPECT_EQ(hs.frames_encoded, 2u);
+  EXPECT_EQ(hs.video_frames, 1u);
+  EXPECT_EQ(hs.lossless_tiles, 8u + 1u);  // 4x2 tiles, then the changed one
 }
 
 TEST(Session, InputReachesHost) {
@@ -155,6 +211,7 @@ TEST(Session, InputReachesHost) {
   viewer.SendInput({proto::InputKind::kMouseDown, 10, 20, 0, 0, 1, 0});
   viewer.SendInput({proto::InputKind::kKeyDown, 0, 0, 0, 0, 36, 0});
 
+  PipeStopper stop{host_end, viewer_end};
   std::unique_lock<std::mutex> lock(mu);
   ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(5), [&] { return events.size() == 2; }));
   EXPECT_EQ(events[0].kind, proto::InputKind::kMouseDown);

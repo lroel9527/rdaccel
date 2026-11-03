@@ -35,6 +35,7 @@ std::vector<Message> SampleMessages() {
       cursor,
       InputEvent{InputKind::kScroll, 100, 200, 0, -3, 0, 0x100000},
       Feedback{42, 1000, 2000},
+      LosslessData{8, true, {1, 2, 3}},
   };
 }
 

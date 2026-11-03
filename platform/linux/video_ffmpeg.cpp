@@ -78,6 +78,7 @@ class FfmpegHevcEncoder final : public codec::IHevcEncoder {
     ctx->color_trc = AVCOL_TRC_BT709;
     ctx->color_range = AVCOL_RANGE_MPEG;
     ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
+    if (cfg.min_qp > 0) ctx->qmin = cfg.min_qp;  // NVENC; x265 gets it below
 
     if (backend == "libx265") {
       av_opt_set(ctx->priv_data, "preset", "ultrafast", 0);
@@ -85,8 +86,9 @@ class FfmpegHevcEncoder final : public codec::IHevcEncoder {
       av_opt_set_int(ctx->priv_data, "forced-idr", 1, 0);
       // repeat-headers: VPS/SPS/PPS in-band on every keyframe, which is what
       // the wire format expects. keyint=-1: infinite GOP.
-      av_opt_set(ctx->priv_data, "x265-params",
-                 "repeat-headers=1:keyint=-1:scenecut=0:info=0:log-level=error", 0);
+      std::string params = "repeat-headers=1:keyint=-1:scenecut=0:info=0:log-level=error";
+      if (cfg.min_qp > 0) params += ":qpmin=" + std::to_string(cfg.min_qp);
+      av_opt_set(ctx->priv_data, "x265-params", params.c_str(), 0);
     } else if (backend == "hevc_nvenc") {
       av_opt_set(ctx->priv_data, "preset", "p1", 0);
       av_opt_set(ctx->priv_data, "tune", "ull", 0);

@@ -1,16 +1,19 @@
 #pragma once
 
-// Viewer side of a connection (M0): reassembles frames from the video
-// channel, decodes them, and hands BGRA pictures to the display.
+// Viewer side of a connection: reassembles frames from the video channel,
+// decodes the video and lossless layers into one composed screen, and hands
+// that BGRA picture to the display.
 
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 
+#include "codec/lossless.h"
 #include "codec/video_codec.h"
 #include "rdaccel/viewer.h"
 #include "proto/messages.h"
+#include "tile/motion.h"
 #include "transport/transport.h"
 
 namespace rdaccel::session {
@@ -19,8 +22,8 @@ using ViewerStats = rdaccel::ViewerStats;
 
 class ViewerSession {
  public:
-  // `on_frame` receives each decoded picture plus the regions that changed
-  // (empty = whole screen) on the transport thread.
+  // `on_frame` receives the composed screen after each frame plus the regions
+  // that changed (empty = whole screen) on the transport thread.
   using FrameFn = std::function<void(const tile::ImageView& bgra, const std::vector<Rect>& regions,
                                      uint64_t frame_id, uint64_t capture_time_us)>;
   using HelloFn = std::function<void(const proto::Hello&)>;
@@ -44,6 +47,7 @@ class ViewerSession {
  private:
   void OnReceive(transport::Channel ch, std::span<const uint8_t> bytes);
   void Handle(proto::Message&& m);
+  void EnsureScreen(int32_t w, int32_t h);
 
   transport::ITransport* transport_ = nullptr;
   std::unique_ptr<codec::IHevcDecoder> decoder_;
@@ -53,6 +57,22 @@ class ViewerSession {
   // Frame being assembled.
   std::optional<proto::FrameBegin> begin_;
   std::optional<proto::VideoData> video_;
+  std::optional<proto::LosslessData> lossless_;
+  codec::RegionOps ops_;           // decoded from lossless_, reused
+  std::vector<tile::Move> moves_;  // ops_.moves in the form ApplyMoves takes
+  struct CacheSlot {
+    int32_t w = 0, h = 0;
+    std::vector<uint8_t> bgra;
+  };
+  std::vector<CacheSlot> cache_;  // proto::kTileCacheSlots, filled on demand
+  std::vector<uint8_t> scratch_;
+
+  // The composed screen: video regions and lossless tiles are applied to it
+  // in frame order. Only touched on the receive thread.
+  int32_t width_ = 0, height_ = 0;
+  std::vector<uint8_t> screen_;
+  bool have_keyframe_ = false;  // screen_ holds a whole picture
+  codec::LosslessDecoder lossless_dec_;
 
   mutable std::mutex mu_;
   ViewerStats stats_;

@@ -4,6 +4,7 @@
 # must be found here too.
 include(CMakeFindDependencyMacro)
 find_dependency(Threads)
+find_dependency(ZLIB)
 if(NOT APPLE)
   find_dependency(PkgConfig)
   pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale)

@@ -108,6 +108,13 @@ MsgType Write(ByteWriter& w, const Feedback& m) {
   return MsgType::kFeedback;
 }
 
+MsgType Write(ByteWriter& w, const LosslessData& m) {
+  w.varint(m.frame_id);
+  w.u8(m.reset ? 1 : 0);
+  w.blob(m.data);
+  return MsgType::kLosslessData;
+}
+
 // --- per-message payload decoders -----------------------------------------
 
 std::optional<Message> ReadHello(ByteReader& r) {
@@ -203,6 +210,14 @@ std::optional<Message> ReadFeedback(ByteReader& r) {
   return m;
 }
 
+std::optional<Message> ReadLosslessData(ByteReader& r) {
+  LosslessData m;
+  std::span<const uint8_t> data;
+  if (!(r.varint(m.frame_id) && GetBool(r, m.reset) && r.blob(data))) return std::nullopt;
+  m.data = ToVec(data);
+  return m;
+}
+
 std::optional<Message> DecodePayload(MsgType type, std::span<const uint8_t> payload) {
   ByteReader r(payload);
   std::optional<Message> m;
@@ -216,6 +231,7 @@ std::optional<Message> DecodePayload(MsgType type, std::span<const uint8_t> payl
     case MsgType::kCursorShape: m = ReadCursorShape(r); break;
     case MsgType::kInputEvent: m = ReadInputEvent(r); break;
     case MsgType::kFeedback: m = ReadFeedback(r); break;
+    case MsgType::kLosslessData: m = ReadLosslessData(r); break;
     default: return std::nullopt;
   }
   // Trailing bytes mean the peer and we disagree about the format.

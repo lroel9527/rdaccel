@@ -109,16 +109,25 @@ TEST(PublicApi, StaticScreenIsSkipped) {
   Received got;
   auto viewer = rdaccel::Viewer::Create(std::move(viewer_end), got.Handlers());
   ASSERT_TRUE(viewer);
-  rdaccel::Host host(std::move(host_end));
+  rdaccel::HostConfig cfg;
+  rdaccel::Host host(std::move(host_end), cfg);
   std::vector<uint8_t> px;
   rdaccel::RenderTestPattern(0, kW, kH, px);
-  for (int i = 0; i < 10; ++i) {
+  // After the first frame the encoder may refine the static picture for
+  // `refine_frames` frames; after that, nothing more is sent.
+  const int n = cfg.refine_frames + 20;
+  for (int i = 0; i < n; ++i) {
     ASSERT_TRUE(host.SubmitFrame({px.data(), kW, kH, kW * 4}, rdaccel::NowMicros()));
   }
   ASSERT_TRUE(got.WaitFor(1));
   const auto st = host.stats();
-  EXPECT_EQ(st.frames_encoded, 1u);
-  EXPECT_EQ(st.frames_skipped, 9u);
+  EXPECT_LE(st.frames_encoded, 1u + static_cast<uint64_t>(cfg.refine_frames));
+  EXPECT_EQ(st.frames_encoded + st.frames_skipped, static_cast<uint64_t>(n));
+  const uint64_t sent = st.bytes_sent;
+  for (int i = 0; i < 10; ++i) {
+    ASSERT_TRUE(host.SubmitFrame({px.data(), kW, kH, kW * 4}, rdaccel::NowMicros()));
+  }
+  EXPECT_EQ(host.stats().bytes_sent, sent);
 }
 
 TEST(PublicApi, RejectsSizeChangeAndBadImages) {

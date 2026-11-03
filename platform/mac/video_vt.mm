@@ -93,6 +93,9 @@ class VtHevcEncoder final : public codec::IHevcEncoder {
     SetProp(session_, kVTCompressionPropertyKey_TransferFunction,
             kCVImageBufferTransferFunction_ITU_R_709_2);
     SetProp(session_, kVTCompressionPropertyKey_YCbCrMatrix, kCVImageBufferYCbCrMatrix_ITU_R_709_2);
+    if (cfg.min_qp > 0) {
+      SetIntProp(session_, kVTCompressionPropertyKey_MinAllowedFrameQP, cfg.min_qp);
+    }
     VTCompressionSessionPrepareToEncodeFrames(session_);
     return true;
   }

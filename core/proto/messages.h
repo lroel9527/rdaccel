@@ -18,7 +18,7 @@
 
 namespace rdaccel::proto {
 
-inline constexpr uint32_t kProtocolVersion = 1;
+inline constexpr uint32_t kProtocolVersion = 2;  // 2: lossless, moves, tile cache
 
 enum class MsgType : uint8_t {
   kHello = 1,
@@ -30,6 +30,7 @@ enum class MsgType : uint8_t {
   kCursorShape = 7,
   kInputEvent = 8,
   kFeedback = 9,
+  kLosslessData = 10,
 };
 
 // HEVC only: the project deliberately has no H.264 fallback.
@@ -68,6 +69,22 @@ struct FrameEnd {
   uint64_t frame_id = 0;
   friend bool operator==(const FrameEnd&, const FrameEnd&) = default;
 };
+
+// Region commands of a frame (tile cache stores and loads, moves) and its
+// few-colour tiles coded losslessly; see codec/lossless.h. The viewer applies
+// stores, moves and loads before the video picture of the same frame and the
+// tiles after it, so they win where both cover a tile. `reset` restarts the
+// deflate stream (keyframes).
+struct LosslessData {
+  uint64_t frame_id = 0;
+  bool reset = false;
+  std::vector<uint8_t> data;
+  friend bool operator==(const LosslessData&, const LosslessData&) = default;
+};
+
+// The viewer's tile cache (see tile/tile_cache.h) has this many slots of at
+// most kTileSize x kTileSize pixels.
+inline constexpr uint32_t kTileCacheSlots = 1024;
 
 // Copy an already-displayed rectangle by (dx, dy). Used for scrolling and
 // window moves (M1+).
@@ -108,7 +125,7 @@ struct Feedback {
 };
 
 using Message = std::variant<Hello, FrameBegin, VideoData, FrameEnd, CopyRect, CursorPos,
-                             CursorShape, InputEvent, Feedback>;
+                             CursorShape, InputEvent, Feedback, LosslessData>;
 
 // Serializes one message including its type and length header.
 std::vector<uint8_t> Encode(const Message& msg);

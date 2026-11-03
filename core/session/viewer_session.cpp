@@ -1,5 +1,8 @@
 #include "session/viewer_session.h"
 
+#include <algorithm>
+#include <cstring>
+
 #include "capture/capturer.h"
 
 namespace rdaccel::session {
@@ -61,8 +64,37 @@ void ViewerSession::FeedVideoBytes(std::span<const uint8_t> bytes) {
   while (auto m = video_parser_.Next()) Handle(std::move(*m));
 }
 
+void ViewerSession::EnsureScreen(int32_t w, int32_t h) {
+  if (w == width_ && h == height_ && !screen_.empty()) return;
+  width_ = w;
+  height_ = h;
+  screen_.assign(static_cast<size_t>(w) * h * 4, 0);
+  have_keyframe_ = false;
+}
+
+namespace {
+
+void CopyRegion(const tile::ImageView& src, Rect r, uint8_t* dst, int32_t dst_stride, int32_t w,
+                int32_t h) {
+  const int32_t x1 = std::min({r.right(), w, src.width});
+  const int32_t y1 = std::min({r.bottom(), h, src.height});
+  r.x = std::max(r.x, 0);
+  r.y = std::max(r.y, 0);
+  r.w = x1 - r.x;
+  r.h = y1 - r.y;
+  if (r.empty()) return;
+  const size_t row = static_cast<size_t>(r.w) * 4;
+  for (int32_t y = r.y; y < r.bottom(); ++y) {
+    std::memcpy(dst + static_cast<size_t>(y) * dst_stride + static_cast<size_t>(r.x) * 4,
+                src.data + static_cast<size_t>(y) * src.stride + static_cast<size_t>(r.x) * 4, row);
+  }
+}
+
+}  // namespace
+
 void ViewerSession::Handle(proto::Message&& m) {
   if (auto* hello = std::get_if<proto::Hello>(&m)) {
+    EnsureScreen(static_cast<int32_t>(hello->width), static_cast<int32_t>(hello->height));
     HelloFn fn;
     {
       std::lock_guard<std::mutex> lock(mu_);
@@ -74,17 +106,21 @@ void ViewerSession::Handle(proto::Message&& m) {
   if (auto* b = std::get_if<proto::FrameBegin>(&m)) {
     begin_ = *b;
     video_.reset();
+    lossless_.reset();
     return;
   }
   if (auto* v = std::get_if<proto::VideoData>(&m)) {
     if (begin_ && v->frame_id == begin_->frame_id) video_ = std::move(*v);
     return;
   }
+  if (auto* l = std::get_if<proto::LosslessData>(&m)) {
+    if (begin_ && l->frame_id == begin_->frame_id) lossless_ = std::move(*l);
+    return;
+  }
   auto* end = std::get_if<proto::FrameEnd>(&m);
-  if (!end || !begin_ || end->frame_id != begin_->frame_id || !video_) return;
-
-  // Parameter sets come with keyframes only; decoders keep them as state.
-  const auto& ps = video_->parameter_sets;
+  if (!end || !begin_ || end->frame_id != begin_->frame_id || (!video_ && !lossless_)) {
+    return;
+  }
 
   FrameFn fn;
   {
@@ -94,11 +130,93 @@ void ViewerSession::Handle(proto::Message&& m) {
   const uint64_t t0 = capture::MonotonicMicros();
   const uint64_t frame_id = begin_->frame_id;
   const uint64_t capture_time = begin_->capture_time_us;
-  const auto& regions = video_->regions;
-  const bool ok = decoder_->Decode(ps, video_->nal_data, capture_time,
-                                   [&](const tile::ImageView& img, uint64_t) {
-                                     if (fn) fn(img, regions, frame_id, capture_time);
-                                   });
+  bool ok = true;
+  bool full = false;
+  std::vector<Rect> changed;
+
+  // Order matters: stores and moves read the screen as the previous frame
+  // left it, then cache loads, then video regions, then lossless tiles on top.
+  ops_ = {};
+  if (lossless_) {
+    ok = width_ > 0 &&
+         lossless_dec_.Decode(lossless_->data, lossless_->reset, width_, height_,
+                              proto::kTileCacheSlots, ops_);
+  }
+  const bool needs_screen = !ops_.stores.empty() || !ops_.moves.empty() || !ops_.loads.empty();
+  if (ok && needs_screen && !have_keyframe_) ok = false;
+  const size_t stride = static_cast<size_t>(width_) * 4;
+  if (ok) {
+    if (!ops_.stores.empty() && cache_.size() < proto::kTileCacheSlots) {
+      cache_.resize(proto::kTileCacheSlots);
+    }
+    for (const auto& st : ops_.stores) {
+      CacheSlot& slot = cache_[st.slot];
+      slot.w = st.rect.w;
+      slot.h = st.rect.h;
+      slot.bgra.resize(static_cast<size_t>(slot.w) * slot.h * 4);
+      for (int32_t y = 0; y < slot.h; ++y) {
+        std::memcpy(slot.bgra.data() + static_cast<size_t>(y) * slot.w * 4,
+                    screen_.data() + (st.rect.y + y) * stride + static_cast<size_t>(st.rect.x) * 4,
+                    static_cast<size_t>(slot.w) * 4);
+      }
+    }
+  }
+  if (ok && !ops_.moves.empty()) {
+    moves_.clear();
+    for (const auto& mv : ops_.moves) moves_.push_back({mv.dst, mv.dx, mv.dy});
+    tile::ApplyMoves(moves_, screen_.data(), width_, height_, scratch_);
+    for (const auto& mv : moves_) changed.push_back(mv.dst);
+  }
+  if (ok) {
+    for (const auto& ld : ops_.loads) {
+      const CacheSlot* slot = ld.slot < cache_.size() ? &cache_[ld.slot] : nullptr;
+      if (!slot || static_cast<int64_t>(ld.sx) + ld.rect.w > slot->w ||
+          static_cast<int64_t>(ld.sy) + ld.rect.h > slot->h) {
+        ok = false;  // a slot that was never filled this large
+        break;
+      }
+      for (int32_t y = 0; y < ld.rect.h; ++y) {
+        std::memcpy(screen_.data() + (ld.rect.y + y) * stride + static_cast<size_t>(ld.rect.x) * 4,
+                    slot->bgra.data() + ((ld.sy + y) * static_cast<size_t>(slot->w) + ld.sx) * 4,
+                    static_cast<size_t>(ld.rect.w) * 4);
+      }
+      changed.push_back(ld.rect);
+    }
+  }
+  if (ok && video_) {
+    // Parameter sets come with keyframes only; decoders keep them as state.
+    ok = decoder_->Decode(video_->parameter_sets, video_->nal_data, capture_time,
+                          [&](const tile::ImageView& img, uint64_t) {
+                            if (screen_.empty()) EnsureScreen(img.width, img.height);
+                            const int32_t stride = width_ * 4;
+                            if (video_->regions.empty()) {
+                              full = true;
+                              CopyRegion(img, {0, 0, width_, height_}, screen_.data(), stride,
+                                         width_, height_);
+                            } else {
+                              for (const Rect& r : video_->regions) {
+                                CopyRegion(img, r, screen_.data(), stride, width_, height_);
+                              }
+                              changed.insert(changed.end(), video_->regions.begin(),
+                                             video_->regions.end());
+                            }
+                            if (full) have_keyframe_ = true;
+                          });
+  }
+  if (ok && !ops_.tiles.empty()) {
+    if (!have_keyframe_) {
+      ok = false;  // nothing to paint on before the first keyframe
+    } else {
+      for (const auto& t : ops_.tiles) {
+        codec::PaintPalette(t, screen_.data(), width_ * 4);
+        if (!full) changed.push_back(t.rect);
+      }
+    }
+  }
+  if (ok && have_keyframe_ && fn) {
+    if (full) changed.clear();
+    fn({screen_.data(), width_, height_, width_ * 4}, changed, frame_id, capture_time);
+  }
   const uint64_t t1 = capture::MonotonicMicros();
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -111,6 +229,7 @@ void ViewerSession::Handle(proto::Message&& m) {
   }
   begin_.reset();
   video_.reset();
+  lossless_.reset();
 }
 
 }  // namespace rdaccel::session
