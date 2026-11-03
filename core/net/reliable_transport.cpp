@@ -152,7 +152,10 @@ uint64_t ReliableTransport::Cwnd() const {
 }
 
 bool ReliableTransport::PathQueued() const {
-  return min_rtt_ > 0 && latest_rtt_ > min_rtt_ + std::max<uint64_t>(min_rtt_ / 4, 5'000) + kMaxAckDelay;
+  // The smoothed round trip: single samples jitter by several ms where
+  // threads wake late (acknowledgements go out late too), which would
+  // shrink the window on a path with no queue at all.
+  return min_rtt_ > 0 && srtt_ > min_rtt_ + std::max<uint64_t>(min_rtt_ / 4, 5'000) + kMaxAckDelay;
 }
 
 double ReliableTransport::PacingRate() const {

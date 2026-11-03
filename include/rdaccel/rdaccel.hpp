@@ -635,6 +635,7 @@ struct HostStats {
   uint64_t encode_us_total = 0;
   uint64_t lossless_us_total = 0;
   uint64_t resolution_changes = 0;
+  uint64_t encoder_drops = 0;  // pictures the encoder chose not to produce
 };
 
 class Host {
@@ -846,6 +847,7 @@ class Host {
     o.encode_us_total = s.encode_us_total;
     o.lossless_us_total = s.lossless_us_total;
     o.resolution_changes = s.resolution_changes;
+    o.encoder_drops = s.encoder_drops;
     return o;
   }
 

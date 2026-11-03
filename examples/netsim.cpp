@@ -187,10 +187,13 @@ int main(int argc, char** argv) {
     }
     const auto st = host.stats();
     if (args.has("verbose") && i % static_cast<uint64_t>(fps) == 0) {
-      std::printf("t=%3.0fs target %5.0f kbps, estimate %5.0f kbps, rtt %3u ms, sent %7.0f kB, skipped %llu\n",
+      std::printf("t=%3.0fs target %5.0f kbps, estimate %5.0f kbps, rtt %3u ms, sent %7.0f kB, skipped %llu, "
+                  "video frames %llu, encoder drops %llu\n",
                   static_cast<double>(i) / fps, st.target_bitrate_bps / 1000.0,
                   st.bandwidth_estimate_bps / 1000.0, st.rtt_us / 1000, st.bytes_sent / 1000.0,
-                  static_cast<unsigned long long>(st.frames_dropped_congestion));
+                  static_cast<unsigned long long>(st.frames_dropped_congestion),
+                  static_cast<unsigned long long>(st.video_frames),
+                  static_cast<unsigned long long>(st.encoder_drops));
     }
     if (i == warmup_frames) {
       warm_bytes = st.bytes_sent;

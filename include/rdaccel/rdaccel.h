@@ -488,6 +488,8 @@ typedef struct rda_host_stats {
   uint64_t encode_us_total;
   uint64_t lossless_us_total;
   uint64_t resolution_changes; /* frames of a new size started a new stream */
+  uint64_t encoder_drops;      /* pictures the video encoder chose not to produce
+                                  (their changes go out with the next one) */
 } rda_host_stats;
 
 RDA_API void rda_host_config_default(rda_host_config* c);
