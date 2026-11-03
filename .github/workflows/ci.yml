@@ -1,0 +1,99 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxext-dev
+      - name: Build (ASan + UBSan)
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined"
+          cmake --build build -j4
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Install, then build examples/minimal against the installed package
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          cmake --install build --prefix "$PWD/inst"
+          cmake -S examples/minimal -B build-minimal -DCMAKE_PREFIX_PATH="$PWD/inst" -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined"
+          cmake --build build-minimal
+          ./build-minimal/minimal
+      - name: Record synthetic stream (x265)
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: ./build/bin/rdaccel_record --out=linux.rdstream --frames=120 --size=1280x720 --bitrate=3000000
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-stream
+          path: linux.rdstream
+
+  macos:
+    needs: linux
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build -j4
+      - name: Core tests
+        run: ./build/bin/rdaccel_tests
+      - name: Install, then build examples/minimal against the installed package
+        run: |
+          cmake --install build --prefix "$PWD/inst"
+          cmake -S examples/minimal -B build-minimal -DCMAKE_PREFIX_PATH="$PWD/inst"
+          cmake --build build-minimal
+      # Hosted macOS runners are VMs; the hardware HEVC encoder may be
+      # missing there, so codec steps report but do not fail the build.
+      - name: VideoToolbox codec + public API tests
+        continue-on-error: true
+        run: |
+          ./build/bin/rdaccel_platform_tests
+          ./build-minimal/minimal
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-stream
+      - name: Decode the Linux stream with VideoToolbox (interop)
+        continue-on-error: true
+        run: ./build/bin/rdaccel_play linux.rdstream --check-synthetic
+      - name: Record synthetic stream (VideoToolbox)
+        id: record
+        continue-on-error: true
+        run: ./build/bin/rdaccel_record --out=mac.rdstream --frames=120 --size=1280x720 --bitrate=3000000
+      - uses: actions/upload-artifact@v4
+        if: steps.record.outcome == 'success'
+        with:
+          name: mac-stream
+          path: mac.rdstream
+
+  interop-linux-decodes-mac:
+    needs: macos
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        id: dl
+        continue-on-error: true
+        with:
+          name: mac-stream
+      - name: Install dependencies
+        if: steps.dl.outcome == 'success'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxext-dev
+      - name: Decode the Mac stream with FFmpeg (interop)
+        if: steps.dl.outcome == 'success'
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DRDACCEL_BUILD_TESTS=OFF
+          cmake --build build -j4 --target rdaccel_play
+          RDACCEL_DEBUG=1 ./build/bin/rdaccel_play mac.rdstream --check-synthetic

@@ -1,0 +1,3 @@
+# libx265 leaks some encoder-internal allocations on close (inside the
+# library, not in rdaccel code). Used when running tests under ASan.
+leak:libx265

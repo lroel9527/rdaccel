@@ -1,0 +1,14 @@
+@PACKAGE_INIT@
+
+# rdaccel is usually built as a static library, so its private dependencies
+# must be found here too.
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+if(NOT APPLE)
+  find_dependency(PkgConfig)
+  pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale)
+  pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11 xext)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/rdaccelTargets.cmake")
+check_required_components(rdaccel)
