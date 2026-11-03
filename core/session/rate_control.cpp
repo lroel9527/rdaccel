@@ -4,7 +4,8 @@
 
 namespace rdacore::session {
 
-RateController::Decision RateController::Update(uint64_t now_us, const TransportStats& st) {
+RateController::Decision RateController::Update(uint64_t now_us, const TransportStats& st,
+                                                uint64_t sent_bytes) {
   Decision d;
   const int64_t drain_bps = st.bandwidth_bps > 0 ? st.bandwidth_bps : target_;
   queue_delay_us_ = drain_bps > 0 ? st.queued_bytes * 8'000'000 / static_cast<uint64_t>(drain_bps) : 0;
@@ -39,11 +40,36 @@ RateController::Decision RateController::Update(uint64_t now_us, const Transport
     next = std::min(target_ + target_ / 4, std::max(st.bandwidth_bps * 2, min_bps_));
     next = std::max(next, target_);
   }
-  next = std::clamp(next, min_bps_, max_bps_);
+  target_ = std::clamp(next, min_bps_, max_bps_);
+
+  // Overshoot: compare what was sent with what the encoder was asked for,
+  // over at least a second at one setting (the encoder needs time to settle).
+  if (sent_bytes > 0) {
+    if (window_start_us_ == 0 || sent_bytes < window_bytes_) {
+      window_start_us_ = now_us;
+      window_bytes_ = sent_bytes;
+    } else if (now_us - window_start_us_ >= 1'000'000) {
+      const double out = static_cast<double>(sent_bytes - window_bytes_) * 8e6 /
+                         static_cast<double>(now_us - window_start_us_);
+      const auto asked = static_cast<double>(encoder_);
+      if (out > asked * 1.1) {
+        scale_ = std::max(0.25, scale_ * asked / out);
+      } else if (scale_ < 1) {
+        // Keeping to it (or under it: a quiet screen, skipped frames): ease
+        // back, 20% per second, in case the overshoot was passing.
+        scale_ = std::min(1.0, scale_ * 1.2);
+      }
+      window_start_us_ = now_us;
+      window_bytes_ = sent_bytes;
+    }
+  }
+  const int64_t enc = std::max(min_bps_ / 2, static_cast<int64_t>(static_cast<double>(target_) * scale_));
   // Small changes are not worth an encoder reconfiguration.
-  if (next * 10 < target_ * 9 || next * 10 > target_ * 11 || (next == max_bps_ && target_ != max_bps_)) {
-    target_ = next;
-    d.new_target_bps = next;
+  if (enc * 10 < encoder_ * 9 || enc * 10 > encoder_ * 11 || (enc == max_bps_ && encoder_ != max_bps_)) {
+    encoder_ = enc;
+    d.new_target_bps = enc;
+    window_start_us_ = now_us;
+    window_bytes_ = sent_bytes;
   }
   return d;
 }

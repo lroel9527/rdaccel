@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cstring>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -180,6 +183,51 @@ TEST(RateController, BacksOffWhenTheRoundTripGrows) {
   EXPECT_EQ(d.new_target_bps, 3'400'000);
 }
 
+TEST(RateController, AsksLessOfAnEncoderThatOvershoots) {
+  session::RateController rc(8'000'000, 300'000, 50);
+  TransportStats st;
+  st.bandwidth_bps = 1'000'000;
+  st.queued_bytes = 10'000;  // 80 ms: congested
+  uint64_t sent = 1;
+  auto d = rc.Update(0, st, sent);
+  EXPECT_EQ(d.new_target_bps, 850'000);
+  // The queue stays long but drains slowly, so the target holds, while the
+  // encoder makes 1.5x what it is asked for.
+  int64_t asked = rc.encoder_bps();
+  uint64_t t = 0;
+  for (int i = 0; i < 12; ++i) {
+    t += 250'000;
+    st.queued_bytes -= 10;
+    sent += static_cast<uint64_t>(static_cast<double>(asked) * 1.5 / 8 / 4);
+    d = rc.Update(t, st, sent);
+    if (d.new_target_bps) asked = d.new_target_bps;
+  }
+  EXPECT_EQ(rc.target_bps(), 850'000);
+  EXPECT_LT(rc.encoder_bps(), 850'000 * 3 / 4);
+  // Now it keeps to the rate: the correction eases off again.
+  for (int i = 0; i < 40; ++i) {
+    t += 250'000;
+    st.queued_bytes -= 10;
+    sent += static_cast<uint64_t>(asked / 8 / 4);
+    d = rc.Update(t, st, sent);
+    if (d.new_target_bps) asked = d.new_target_bps;
+  }
+  EXPECT_GT(rc.encoder_bps(), 850'000 * 9 / 10);
+}
+
+TEST(RateController, KeepsBackingOffWhileTheQueueDoesNotDrain) {
+  // 5% steps used to be below the reconfiguration threshold and were lost.
+  session::RateController rc(8'000'000, 300'000, 50);
+  TransportStats st;
+  st.bandwidth_bps = 1'000'000;
+  st.queued_bytes = 10'000;
+  rc.Update(0, st);
+  EXPECT_EQ(rc.target_bps(), 850'000);
+  for (uint64_t t = 250'000; t <= 1'000'000; t += 250'000) rc.Update(t, st);
+  EXPECT_LT(rc.target_bps(), 850'000 * 85 / 100);
+  EXPECT_LT(rc.encoder_bps(), 850'000 * 9 / 10);
+}
+
 TEST(ReliableTransport, EstimateFollowsABandwidthDrop) {
   // 4 Mbps, then 1 Mbps from 2 s on, with a sender that keeps the queue
   // short (as the Host does by skipping frames): the estimate has to come
@@ -205,10 +253,67 @@ TEST(ReliableTransport, EstimateFollowsABandwidthDrop) {
     if (st.queued_bytes < 20'000) host.Send(Channel::kVideo, chunk);
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
   }
-  // Before the time window it took ~2.7 s; now well under one second.
+  // Before the time window it took ~2.7 s after the drop; now ~0.4 s here
+  // and ~1.3 s on a macOS laptop (coarser timers).
   ASSERT_NE(caught_up, 0u);
-  EXPECT_LT(caught_up, 3'200'000u);
+  EXPECT_LT(caught_up, 3'800'000u);
   host.GetStats(&st);
   EXPECT_LT(st.bandwidth_bps, 1'300'000);
   EXPECT_GT(st.bandwidth_bps, 700'000);
+}
+
+TEST(ReliableTransport, CursorStaysFastUnderASaturatingSender) {
+  // Video keeps the 1.5 Mbps path busy (as VideoToolbox does on the Mac);
+  // small cursor messages every 16 ms must not wait behind a standing queue
+  // inside the network: the sender's own queue lets them jump ahead.
+  net::LinkConditions c;
+  c.bandwidth_bps = 1'500'000;
+  c.delay_ms = 20;
+  c.queue_ms = 200;
+  std::mutex mu;
+  std::vector<double> lat_ms;
+  auto [a, b] = net::MakeSimulatedLink(c, net::LinkConditions{.delay_ms = 20});
+  net::ReliableTransport host(std::move(a));
+  net::ReliableTransport viewer(std::move(b), {.client = true});
+  std::atomic<uint64_t> video_bytes{0};
+  viewer.SetReceiver([&](transport::Channel ch, std::span<const uint8_t> bytes) {
+    if (ch == transport::Channel::kVideo) video_bytes += bytes.size();
+    if (ch != transport::Channel::kCursor) return;
+    const uint64_t now = capture::MonotonicMicros();
+    for (size_t i = 0; i + 8 <= bytes.size(); i += 8) {
+      uint64_t sent;
+      std::memcpy(&sent, bytes.data() + i, 8);
+      std::lock_guard<std::mutex> lock(mu);
+      lat_ms.push_back((now - sent) / 1000.0);
+    }
+  });
+  const auto chunk = Pattern(6'000, 5);
+  const uint64_t t0 = capture::MonotonicMicros();
+  uint64_t next_cursor = t0;
+  TransportStats st;
+  while (capture::MonotonicMicros() - t0 < 6'000'000) {
+    const uint64_t now = capture::MonotonicMicros();
+    host.GetStats(&st);
+    if (st.queued_bytes < 30'000) host.Send(Channel::kVideo, chunk);
+    if (now >= next_cursor) {
+      uint8_t msg[8];
+      std::memcpy(msg, &now, 8);
+      host.Send(Channel::kCursor, msg);
+      next_cursor += 16'000;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  std::lock_guard<std::mutex> lock(mu);
+  // Past the start-up phase.
+  std::vector<double> v(lat_ms.begin() + std::min<size_t>(lat_ms.size(), 120), lat_ms.end());
+  ASSERT_GT(v.size(), 100u);
+  std::sort(v.begin(), v.end());
+  const double p50 = v[v.size() / 2], p95 = v[v.size() * 95 / 100];
+  const double kbps = static_cast<double>(video_bytes.load()) * 8 / 6.0 / 1000;
+  std::printf("cursor under load: p50 %.1f p95 %.1f ms, video %.0f kbps, rtt %u ms\n", p50, p95, kbps,
+              static_cast<unsigned>(st.rtt_us / 1000));
+  EXPECT_LT(p50, 40);  // 68 ms before the sender drained the queue
+  EXPECT_LT(p95, 60);
+  // Without giving up the path's capacity.
+  EXPECT_GT(kbps, 1'200);
 }

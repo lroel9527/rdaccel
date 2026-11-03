@@ -26,6 +26,7 @@ constexpr uint64_t kBwWindowRounds = 10;
 constexpr uint64_t kBwWindowUs = 1'000'000;
 constexpr double kStartupGain = 2.885;
 constexpr double kProbeGains[8] = {1.25, 0.75, 1, 1, 1, 1, 1, 1};
+constexpr double kQueueDrainGain = 0.9;
 constexpr size_t kMaxAckRanges = 32;
 // Sending order: small interactive channels first, then surface commands,
 // application messages (possibly large: a pasted image), video last.
@@ -157,7 +158,18 @@ void ReliableTransport::UpdatePacingRate() {
   switch (mode_) {
     case Mode::kStartup: gain = kStartupGain; break;
     case Mode::kDrain: gain = 1 / kStartupGain; break;
-    case Mode::kProbeBw: gain = kProbeGains[cycle_]; break;
+    case Mode::kProbeBw:
+      gain = kProbeGains[cycle_];
+      // Interactive traffic (cursor, input) shares the bottleneck queue
+      // with video, so a standing queue there is latency for everything.
+      // The max filter tends to sit a little above the true rate (acks
+      // arrive in bunches), which would keep the queue as long as the
+      // window allows. While the round trip shows a queue, send a little
+      // slower than the estimate (and skip probing up) until it drains.
+      if (gain >= 1 && min_rtt_ > 0 && latest_rtt_ > min_rtt_ + std::max<uint64_t>(min_rtt_ / 4, 5'000) + kMaxAckDelay) {
+        gain = kQueueDrainGain;
+      }
+      break;
   }
   const double rate = gain * bw_;
   // During startup the rate only goes up: an early sample taken while the
