@@ -400,9 +400,18 @@ void ReliableTransport::OnRateSample(const SentPacket& p, uint64_t now) {
   // minimum while we are backlogged) means we send faster than the path
   // delivers: the path has slowed down. Samples from before the last round
   // trip then describe the old path, so only the recent ones count.
+  // Only those from before the queue began, though: the ones taken while
+  // it stands describe the path as it is now and keep the full window.
+  // (Cutting the window to one round trip for as long as the round trip
+  // stayed high spiralled the estimate down where threads wake late: a
+  // round trip three times its minimum with no queue on macOS CI, a window
+  // too short for the probe up to count, and the pacing 10% below it.)
   uint64_t oldest = now > kBwWindowUs ? now - kBwWindowUs : 0;
   if (mode_ == Mode::kProbeBw && min_rtt_ > 0 && latest_rtt_ > 2 * min_rtt_ + 20'000) {
-    oldest = std::max(oldest, now > srtt_ ? now - srtt_ : 0);
+    if (queue_since_ == 0) queue_since_ = now;
+    oldest = std::max(oldest, queue_since_ > srtt_ ? queue_since_ - srtt_ : 0);
+  } else {
+    queue_since_ = 0;
   }
   while (bw_samples_.size() > 1 && (bw_samples_.front().round + kBwWindowRounds < round_ ||
                                     bw_samples_.front().time < oldest)) {
