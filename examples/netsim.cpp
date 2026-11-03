@@ -8,6 +8,8 @@
 //                  [--drop-to=BPS --drop-at=SECONDS]   bandwidth change mid-run
 //                  [--bitrate=8000000] [--cc=1] [--abr=1] [--max-queue-ms=50] [--regions=1]
 //                  [--warmup=3]   seconds left out of the steady-state numbers
+//                  [--cursor=1]   also move the mouse pointer (cursor channel) and
+//                                 report how long positions take to arrive
 //
 // The first picture (a full screen, mostly lossless) takes a while on a slow
 // link; it is reported separately, and the other numbers cover the frames
@@ -85,7 +87,15 @@ int main(int argc, char** argv) {
   const auto warmup_frames = static_cast<uint64_t>(args.real("warmup", 3) * fps);
   double first_frame_ms = -1;
   Image ref;
+  std::vector<double> cursor_ms;
+  const bool with_cursor = args.num("cursor", 0) != 0;
+  uint64_t steady_from_us = UINT64_MAX;  // host clock; set when warm-up ends
   rdaccel::ViewerHandlers handlers;
+  handlers.on_cursor = [&](const rdaccel::CursorState& c) {
+    const uint64_t now = rdaccel::NowMicros();
+    std::lock_guard<std::mutex> lock(mu);
+    if (c.time_us >= steady_from_us) cursor_ms.push_back((now - c.time_us) / 1000.0);
+  };
   handlers.on_frame = [&](const rdaccel::ImageView& img, std::span<const rdaccel::Rect>,
                           const rdaccel::FrameInfo& info) {
     const uint64_t now = rdaccel::NowMicros();
@@ -148,6 +158,14 @@ int main(int argc, char** argv) {
     {
       std::lock_guard<std::mutex> lock(mu);
       index_of[ct] = i;
+      if (i == warmup_frames) steady_from_us = ct;
+    }
+    if (with_cursor) {
+      int x, y;
+      bool beam;
+      PointerAt(i * 2, w, h, x, y, beam);
+      host.SetCursorImage(PointerImage(beam));
+      host.SetCursor(x, y, true, ct);
     }
     if (!host.SubmitFrame({frame.data(), w, h, w * 4}, ct, {}, &err)) {
       std::fprintf(stderr, "frame %llu: %s\n", static_cast<unsigned long long>(i), err.c_str());
@@ -195,5 +213,13 @@ int main(int argc, char** argv) {
       static_cast<unsigned long long>(hs.frames_dropped_congestion - warm_dropped), pct(0.5), pct(0.95),
       lat.empty() ? 0.0 : lat.back(), max_gap, psnr_avg, target_n ? target_sum / target_n / 1000.0 : 0.0,
       hs.bandwidth_estimate_bps / 1000.0);
+  if (with_cursor) {
+    std::vector<double> c = cursor_ms;
+    std::sort(c.begin(), c.end());
+    auto cp = [&](double p) { return c.empty() ? 0.0 : c[static_cast<size_t>(p * (c.size() - 1))]; };
+    std::printf("       cursor: %zu positions, latency p50 %5.0f p95 %5.0f max %5.0f ms (%llu bytes)\n", c.size(),
+                cp(0.5), cp(0.95), c.empty() ? 0.0 : c.back(),
+                static_cast<unsigned long long>(hs.cursor_bytes));
+  }
   return 0;
 }

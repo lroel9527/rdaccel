@@ -106,12 +106,18 @@ struct CopyRect {
   friend bool operator==(const CopyRect&, const CopyRect&) = default;
 };
 
+// Cursor messages travel on their own channel (transport::Channel::kCursor),
+// so a big video frame never delays the pointer.
 struct CursorPos {
-  int32_t x = 0;
+  int32_t x = 0;  // pointer position (the hotspot) in screen pixels
   int32_t y = 0;
   bool visible = true;
+  uint64_t shape_id = 0;  // 0 = no image known; otherwise a CursorShape sent earlier
+  uint64_t time_us = 0;   // host clock
   friend bool operator==(const CursorPos&, const CursorPos&) = default;
 };
+
+inline constexpr uint32_t kMaxCursorSize = 256;  // pixels per side
 
 struct CursorShape {
   uint64_t shape_id = 0;
@@ -119,7 +125,8 @@ struct CursorShape {
   int32_t hotspot_y = 0;
   uint32_t width = 0;
   uint32_t height = 0;
-  std::vector<uint8_t> bgra;  // width * height * 4 bytes
+  // width * height * 4 bytes, alpha premultiplied. Deflated on the wire.
+  std::vector<uint8_t> bgra;
   friend bool operator==(const CursorShape&, const CursorShape&) = default;
 };
 

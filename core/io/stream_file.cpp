@@ -6,6 +6,7 @@ namespace rdaccel::io {
 
 bool StreamFileWriter::Open(const std::string& path, std::string* error) {
   Close();
+  std::lock_guard<std::mutex> lock(mu_);
   f_ = std::fopen(path.c_str(), "wb");
   if (!f_) {
     if (error) *error = "cannot create " + path + ": " + std::strerror(errno);
@@ -16,15 +17,20 @@ bool StreamFileWriter::Open(const std::string& path, std::string* error) {
 }
 
 bool StreamFileWriter::Send(transport::Channel ch, std::span<const uint8_t> bytes) {
+  std::lock_guard<std::mutex> lock(mu_);
   if (!f_) return false;
-  // Only screen data belongs in the file; input and feedback are live-only.
-  if (ch != transport::Channel::kVideo && ch != transport::Channel::kControl) return true;
+  // Only what the viewer shows belongs in the file; input is live-only.
+  if (ch != transport::Channel::kVideo && ch != transport::Channel::kControl &&
+      ch != transport::Channel::kCursor) {
+    return true;
+  }
   if (std::fwrite(bytes.data(), 1, bytes.size(), f_) != bytes.size()) return false;
   bytes_ += bytes.size();
   return true;
 }
 
 void StreamFileWriter::Close() {
+  std::lock_guard<std::mutex> lock(mu_);
   if (f_) {
     std::fclose(f_);
     f_ = nullptr;

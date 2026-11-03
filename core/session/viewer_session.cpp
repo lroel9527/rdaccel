@@ -29,6 +29,11 @@ void ViewerSession::SetFrameHandler(FrameFn fn) {
   on_frame_ = std::move(fn);
 }
 
+void ViewerSession::SetCursorHandler(CursorFn fn) {
+  std::lock_guard<std::mutex> lock(mu_);
+  on_cursor_ = std::move(fn);
+}
+
 ViewerStats ViewerSession::stats() const {
   std::lock_guard<std::mutex> lock(mu_);
   return stats_;
@@ -48,6 +53,8 @@ void ViewerSession::OnReceive(transport::Channel ch, std::span<const uint8_t> by
     parser = &video_parser_;
   } else if (ch == transport::Channel::kControl) {
     parser = &control_parser_;
+  } else if (ch == transport::Channel::kCursor) {
+    parser = &cursor_parser_;
   } else {
     return;
   }
@@ -101,6 +108,21 @@ void ViewerSession::Handle(proto::Message&& m) {
       fn = on_hello_;
     }
     if (fn) fn(*hello);
+    return;
+  }
+  if (auto* cs = std::get_if<proto::CursorShape>(&m)) {
+    cursor_.OnShape(std::move(*cs));
+    return;
+  }
+  if (auto* cp = std::get_if<proto::CursorPos>(&m)) {
+    CursorState st;
+    cursor_.OnPos(*cp, st);
+    CursorFn fn;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      fn = on_cursor_;
+    }
+    if (fn) fn(st);
     return;
   }
   if (auto* b = std::get_if<proto::FrameBegin>(&m)) {

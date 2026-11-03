@@ -59,18 +59,21 @@ set(RDACCEL_SOURCES
   core/session/host_session.cpp
   core/session/viewer_session.cpp
   core/session/rate_control.cpp
+  core/session/cursor_channel.cpp
   core/io/stream_file.cpp
 )
 if(APPLE)
   list(APPEND RDACCEL_SOURCES
     platform/mac/platform_mac.mm
     platform/mac/capture_sck.mm
+    platform/mac/cursor_mac.mm
     platform/mac/video_vt.mm
   )
 elseif(UNIX)
   list(APPEND RDACCEL_SOURCES
     platform/linux/platform_linux.cpp
     platform/linux/capture_x11.cpp
+    platform/linux/cursor_xfixes.cpp
     platform/linux/video_ffmpeg.cpp
   )
 else()
@@ -100,6 +103,7 @@ if(APPLE)
   target_compile_options(rdaccel PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
   target_link_libraries(rdaccel PRIVATE
     "-framework Foundation"
+    "-framework AppKit"
     "-framework CoreGraphics"
     "-framework CoreMedia"
     "-framework CoreVideo"
@@ -110,7 +114,7 @@ if(APPLE)
 else()
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale)
-  pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11 xext)
+  pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11 xext xfixes)
   target_link_libraries(rdaccel PRIVATE PkgConfig::FFMPEG PkgConfig::X11)
 endif()
 
@@ -184,6 +188,7 @@ if(RDACCEL_BUILD_TESTS)
     tests/test_tcp_transport.cpp
     tests/test_reliable_transport.cpp
     tests/test_session.cpp
+    tests/test_cursor.cpp
   )
   target_link_libraries(rdaccel_tests PRIVATE rdaccel_internal GTest::gtest_main)
   include(GoogleTest)

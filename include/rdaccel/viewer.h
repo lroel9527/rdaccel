@@ -9,6 +9,7 @@
 #include <span>
 #include <string>
 
+#include "rdaccel/cursor.h"
 #include "rdaccel/geometry.h"
 #include "rdaccel/image.h"
 #include "rdaccel/input.h"
@@ -38,6 +39,12 @@ struct ViewerHandlers {
   // thread; copy the pixels if you draw on another thread.
   std::function<void(const ImageView& bgra, std::span<const Rect> changed, const FrameInfo& info)>
       on_frame;
+
+  // The host's mouse cursor (see cursor.h): called when the pointer moves,
+  // hides or changes its image. Draw state.image with its hotspot at
+  // (state.x, state.y) on top of the latest frame, e.g. with DrawCursor() or
+  // a hardware cursor. Runs on the transport thread, possibly between frames.
+  std::function<void(const CursorState& state)> on_cursor;
 };
 
 class Viewer {

@@ -63,6 +63,7 @@ M0 是整屏硬编基线；M1 在它上面加了按区域分类，每一项都�
 | 屏幕采集 | macOS：ScreenCaptureKit（带脏区，不采集声音）；Linux：X11 MIT-SHM | — |
 | 传输 | 进程内管道（回环）、TCP、UDP（M2，`ListenUdp` / `ConnectUdp`）。UDP 传输自带丢包恢复（选择性确认 + 重传，每个通道独立有序，丢一个视频包不会卡住输入）和 BBR 式拥塞控制（按测得的瓶颈带宽发包，不把路由器缓冲塞满） | — |
 | 自适应码率（M2） | 传输层报告带宽估计和发送队列（`Transport::GetStats`）。队列超过 `max_queue_ms` 时跳过这一帧（下一帧会带上所有变化），排队时码率降到估计带宽的 85%，畅通时每 250 ms 最多升 25% | `adaptive_bitrate`、`min_bitrate_bps`、`max_queue_ms`（默认 50） |
+| 光标通道（M2） | 光标不画进画面：Host 单独发指针位置（每次约 17 字节）和光标图像（每种图像只发一次，deflate 压缩，两端各记最近 64 种），Viewer 通过 `on_cursor` 拿到位置和图像自己画（可用 `DrawCursor()`，或交给系统的硬件光标）。光标走单独的高优先级通道，大帧还在路上时指针照样跟手。`StartScreenCapture()` 时库自己以 120 Hz 读系统光标（macOS：CoreGraphics + NSCursor；Linux：XFixes）；自己喂帧的程序调用 `Host::SetCursor()` / `SetCursorImage()` | `cursor_channel`、`cursor_poll_hz`（默认 120）、`capture_cursor`（改回画进画面） |
 | 示例 | `rdaccel_record`、`rdaccel_play`、`rdaccel_bench`（场景评测）、`rdaccel_loopback`（macOS 窗口程序）、`minimal` | — |
 
 只支持 HEVC，没有 H.264 回退。
@@ -130,6 +131,32 @@ python3 tools/make_desktop.py desktop.ppm
 ./build/bin/rdaccel_netsim --background=desktop.ppm --seconds=15 --drop-to=1000000 --drop-at=6  # 带宽骤降
 ```
 
+### 光标通道（M2，Linux x265）
+
+`rdaccel_bench --scenario=pointer`：桌面静止，只有鼠标指针在全屏来回移动（1080p，60 fps，10 秒，指针在左边三分之一时变成文字光标）。PSNR 按用户实际看到的画面算，含指针。
+
+| 指针 | 稳态码率 | 视频帧 | Host CPU | PSNR |
+| --- | --- | --- | --- | --- |
+| 画进画面（`--cursor=frame`） | 544 kbps | 539 | 179% | 43.3 dB |
+| 光标通道（`--cursor=channel`） | 22 kbps（其中光标 10 kbps） | 9 | 13% | 43.3 dB |
+
+`rdaccel_netsim --cursor=1`：`video` 场景，每帧移动一次指针，看指针位置从 Host 到 Viewer 要多久（单向基础时延 20 ms）。
+
+| 网络 | 画面延迟 p50 / p95 | 指针延迟 p50 / p95 |
+| --- | --- | --- |
+| 20 Mbps | 30 / 37 ms | 20 / 20 ms |
+| 4 Mbps，2% 丢包 | 34 / 91 ms | 20 / 54 ms |
+| 4 Mbps，第 8 秒降到 1 Mbps | 41 / 86 ms | 20 / 71 ms |
+| 1.5 Mbps | 43 / 73 ms | 20 / 41 ms |
+| 1.5 Mbps，含开头 3.2 秒的整屏首帧 | 首帧 3171 ms | 42 / 146 ms |
+
+首帧还没传完时指针已经能动。不做拥塞控制时（`--cc=0`）数据都堵在网络缓冲里，优先级没有用，指针延迟 p50 是 198 ms。
+
+```bash
+./build/bin/rdaccel_bench --background=desktop.ppm --frames=600 --scenario=pointer --cursor=channel
+./build/bin/rdaccel_netsim --background=desktop.ppm --seconds=15 --bandwidth=1500000 --cursor=1
+```
+
 ## 在 Mac 上编译运行
 
 需要 macOS 14+、Apple Silicon、Xcode 命令行工具和 CMake（`brew install cmake`）。
@@ -167,7 +194,7 @@ CI 每次会在 Linux 上用 x265 录一段合成码流、在 macOS 上用 Video
 ## 在 Linux 上编译
 
 ```bash
-sudo apt-get install cmake g++ libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxext-dev zlib1g-dev
+sudo apt-get install cmake g++ libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxext-dev libxfixes-dev zlib1g-dev
 cmake -S . -B build && cmake --build build -j
 ctest --test-dir build
 ```
@@ -180,7 +207,7 @@ ctest --test-dir build
 include/rdaccel/   公开 API（唯一会被安装的头文件）
 src/               公开 API 的实现
 core/              内部：协议、分块比对、HEVC 码流格式、会话、传输（net/：UDP、可靠传输、网络模拟）、合成画面
-platform/          内部：mac/（ScreenCaptureKit、VideoToolbox）、linux/（X11、FFmpeg）
+platform/          内部：mac/（ScreenCaptureKit、VideoToolbox、光标）、linux/（X11、XFixes 光标、FFmpeg）
 examples/          只用公开 API 的示例：record、play、bench、netsim、loopback_mac、minimal（独立 CMake 工程）
 tools/             开发辅助脚本（make_desktop.py：生成评测用的仿真桌面）
 tests/             GoogleTest（test_api.cpp 只用公开 API）

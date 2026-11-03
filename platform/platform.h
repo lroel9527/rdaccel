@@ -9,6 +9,7 @@
 #include <string>
 
 #include "capture/capturer.h"
+#include "capture/cursor_source.h"
 #include "codec/video_codec.h"
 
 namespace rdaccel::platform {
@@ -26,5 +27,9 @@ std::unique_ptr<codec::IHevcEncoder> CreateHevcEncoder(const codec::EncoderConfi
                                                        std::string* error);
 
 std::unique_ptr<codec::IHevcDecoder> CreateHevcDecoder(std::string* error);
+
+// The system cursor of the main display. Null with `error` set if it cannot
+// be read (e.g. no X display).
+std::unique_ptr<capture::ICursorSource> CreateCursorSource(std::string* error);
 
 }  // namespace rdaccel::platform

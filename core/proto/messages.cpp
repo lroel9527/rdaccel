@@ -2,6 +2,8 @@
 
 #include <type_traits>
 
+#include <zlib.h>
+
 #include "proto/wire.h"
 
 namespace rdaccel::proto {
@@ -82,6 +84,8 @@ MsgType Write(ByteWriter& w, const CursorPos& m) {
   w.svarint(m.x);
   w.svarint(m.y);
   w.u8(m.visible ? 1 : 0);
+  w.varint(m.shape_id);
+  w.varint(m.time_us);
   return MsgType::kCursorPos;
 }
 
@@ -91,7 +95,12 @@ MsgType Write(ByteWriter& w, const CursorShape& m) {
   w.svarint(m.hotspot_y);
   w.varint(m.width);
   w.varint(m.height);
-  w.blob(m.bgra);
+  // Cursors are mostly transparent or flat: deflate shrinks them 5-20x.
+  uLongf n = compressBound(static_cast<uLong>(m.bgra.size()));
+  std::vector<uint8_t> z(n);
+  if (compress2(z.data(), &n, m.bgra.data(), static_cast<uLong>(m.bgra.size()), 6) != Z_OK) n = 0;
+  z.resize(n);
+  w.blob(z);
   return MsgType::kCursorShape;
 }
 
@@ -181,7 +190,10 @@ std::optional<Message> ReadCopyRect(ByteReader& r) {
 
 std::optional<Message> ReadCursorPos(ByteReader& r) {
   CursorPos m;
-  if (!(r.svarint32(m.x) && r.svarint32(m.y) && GetBool(r, m.visible))) return std::nullopt;
+  if (!(r.svarint32(m.x) && r.svarint32(m.y) && GetBool(r, m.visible) && r.varint(m.shape_id) &&
+        r.varint(m.time_us))) {
+    return std::nullopt;
+  }
   return m;
 }
 
@@ -192,8 +204,15 @@ std::optional<Message> ReadCursorShape(ByteReader& r) {
         r.varint32(m.width) && r.varint32(m.height) && r.blob(px))) {
     return std::nullopt;
   }
-  if (static_cast<uint64_t>(m.width) * m.height * 4 != px.size()) return std::nullopt;
-  m.bgra = ToVec(px);
+  if (m.width == 0 || m.height == 0 || m.width > kMaxCursorSize || m.height > kMaxCursorSize) {
+    return std::nullopt;
+  }
+  m.bgra.resize(static_cast<size_t>(m.width) * m.height * 4);
+  uLongf n = static_cast<uLongf>(m.bgra.size());
+  if (uncompress(m.bgra.data(), &n, px.data(), static_cast<uLong>(px.size())) != Z_OK ||
+      n != m.bgra.size()) {
+    return std::nullopt;
+  }
   return m;
 }
 

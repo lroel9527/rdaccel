@@ -14,6 +14,7 @@
 #include "codec/video_codec.h"
 #include "rdaccel/viewer.h"
 #include "proto/messages.h"
+#include "session/cursor_channel.h"
 #include "tile/motion.h"
 #include "transport/transport.h"
 
@@ -38,6 +39,8 @@ class ViewerSession {
 
   void SetHelloHandler(HelloFn fn);
   void SetFrameHandler(FrameFn fn);
+  using CursorFn = std::function<void(const CursorState&)>;
+  void SetCursorHandler(CursorFn fn);
   // Creates decoders for video region streams (see proto::VideoData::stream).
   // Without one, region pictures count as decode errors.
   using DecoderFactory = std::function<std::unique_ptr<codec::IHevcDecoder>()>;
@@ -67,6 +70,9 @@ class ViewerSession {
                     std::vector<Rect>& changed);
   proto::StreamParser video_parser_;
   proto::StreamParser control_parser_;
+  proto::StreamParser cursor_parser_;
+  CursorReceiver cursor_;
+  CursorFn on_cursor_;  // guarded by mu_
 
   // Frame being assembled.
   std::optional<proto::FrameBegin> begin_;

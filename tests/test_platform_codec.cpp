@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstdio>
 
 #include "capture/synthetic_capturer.h"
 #include "platform.h"
@@ -70,4 +71,27 @@ TEST(PlatformCodec, EncodeDecodeRoundTrip) {
   ASSERT_TRUE(key);
   EXPECT_TRUE(key->keyframe);
   EXPECT_EQ(key->parameter_sets.size(), 3u);
+}
+
+TEST(PlatformCursor, ReadsTheSystemCursor) {
+  std::string err;
+  auto src = platform::CreateCursorSource(&err);
+  if (!src) GTEST_SKIP() << "no cursor source: " << err;  // e.g. no X display
+  capture::CursorSample s;
+  bool any_image = false;
+  for (int i = 0; i < 8; ++i) {
+    ASSERT_TRUE(src->Poll(s));
+    EXPECT_GT(s.screen_width, 0);
+    EXPECT_GT(s.screen_height, 0);
+    if (s.image_changed) {
+      any_image = true;
+      EXPECT_GT(s.image.width, 0);
+      EXPECT_LE(s.image.width, 256);
+      EXPECT_EQ(s.image.bgra.size(), static_cast<size_t>(s.image.width) * s.image.height * 4);
+      EXPECT_GE(s.image.hotspot_x, 0);
+      EXPECT_LT(s.image.hotspot_x, s.image.width);
+    }
+  }
+  std::printf("cursor at %.0f,%.0f on %.0fx%.0f, image %s\n", s.x, s.y, s.screen_width,
+              s.screen_height, any_image ? "read" : "not available");
 }

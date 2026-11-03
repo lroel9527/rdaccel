@@ -7,10 +7,12 @@
 //
 //   Host   (host.h)    capture or receive screen frames, encode, send
 //   Viewer (viewer.h)  receive, decode, hand pictures to the application
-//   Transport (transport.h)  in-process pipe, TCP, or your own
+//   Transport (transport.h)  in-process pipe, TCP, UDP, or your own
+//   Cursor (cursor.h)  the mouse cursor, sent apart from the picture
 
 #include <cstdint>
 
+#include "rdaccel/cursor.h"
 #include "rdaccel/geometry.h"
 #include "rdaccel/host.h"
 #include "rdaccel/image.h"
