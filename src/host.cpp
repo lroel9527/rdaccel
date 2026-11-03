@@ -7,6 +7,7 @@
 #include "capture/capturer.h"
 #include "platform.h"
 #include "session/host_session.h"
+#include "session/rate_control.h"
 
 namespace rdaccel {
 
@@ -28,7 +29,12 @@ struct Host::Impl {
   uint64_t encode_errors_reported = 0;
   int32_t width = 0, height = 0;
 
+  std::unique_ptr<session::RateController> rate;  // only touched under submit_mu
+
   mutable std::mutex mu;  // guards the fields below
+  uint64_t frames_dropped_congestion = 0;
+  int64_t target_bitrate_bps = 0;
+  TransportStats net;
   std::string encoder_name;
   InputHandler on_input;
   ErrorHandler on_error;
@@ -104,6 +110,24 @@ struct Host::Impl {
         ReportError(err);
       }
       return false;
+    }
+    // Adaptive bitrate: follow what the transport measures.
+    TransportStats st;
+    if (config.adaptive_bitrate && transport->GetStats(&st)) {
+      if (!rate) {
+        rate = std::make_unique<session::RateController>(
+            config.bitrate_bps, std::min(config.min_bitrate_bps, config.bitrate_bps), config.max_queue_ms);
+      }
+      const auto d = rate->Update(capture::MonotonicMicros(), st);
+      if (d.new_target_bps > 0) session->SetBitrate(d.new_target_bps);
+      {
+        std::lock_guard<std::mutex> l(mu);
+        net = st;
+        target_bitrate_bps = rate->target_bps();
+        if (d.skip_frame) ++frames_dropped_congestion;
+      }
+      // The next frame that goes through carries all changes since.
+      if (d.skip_frame) return true;
     }
     std::string err;
     if (!session->OnFrame(f, &err)) {
@@ -202,7 +226,13 @@ std::string Host::encoder_name() const {
 
 HostStats Host::stats() const {
   auto* s = impl_->session_ptr.load();
-  return s ? s->stats() : HostStats{};
+  HostStats st = s ? s->stats() : HostStats{};
+  std::lock_guard<std::mutex> lock(impl_->mu);
+  st.frames_dropped_congestion = impl_->frames_dropped_congestion;
+  st.target_bitrate_bps = impl_->target_bitrate_bps;
+  st.bandwidth_estimate_bps = impl_->net.bandwidth_bps;
+  st.rtt_us = impl_->net.rtt_us;
+  return st;
 }
 
 }  // namespace rdaccel

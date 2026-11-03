@@ -1,0 +1,199 @@
+// rdaccel_netsim: a Host and a Viewer in one process, connected through a
+// simulated network path, in real time. Measures what a user would notice:
+// capture-to-display latency, frame rate, stalls and picture quality.
+// Uses only the public API (rdaccel/rdaccel.h).
+//
+//   rdaccel_netsim [--background=SCREEN.ppm] [--scenario=video] [--seconds=10] [--fps=30]
+//                  [--bandwidth=4000000] [--delay=20] [--jitter=0] [--loss=0] [--queue-ms=200]
+//                  [--drop-to=BPS --drop-at=SECONDS]   bandwidth change mid-run
+//                  [--bitrate=8000000] [--cc=1] [--abr=1] [--max-queue-ms=50] [--regions=1]
+//                  [--warmup=3]   seconds left out of the steady-state numbers
+//
+// The first picture (a full screen, mostly lossless) takes a while on a slow
+// link; it is reported separately, and the other numbers cover the frames
+// captured after --warmup seconds.
+//
+// --cc=0 sends without congestion control; --abr=0 keeps the encoder at
+// --bitrate whatever the network does.
+
+#include <rdaccel/rdaccel.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <map>
+#include <mutex>
+#include <thread>
+#include <vector>
+
+#include "args.h"
+#include "scenes.h"
+
+using namespace rdaccel::examples;
+
+int main(int argc, char** argv) {
+  rdaccel::examples::Args args(argc, argv);
+  const int fps = static_cast<int>(args.num("fps", 30));
+  const double seconds = args.real("seconds", 10);
+  const std::string which = args.str("scenario", "video");
+
+  Image bg;
+  int w = 1920, h = 1080;
+  const std::string bg_path = args.str("background");
+  if (!bg_path.empty()) {
+    if (!LoadPpm(bg_path, bg, w, h)) {
+      std::fprintf(stderr, "cannot read %s (binary PPM expected)\n", bg_path.c_str());
+      return 1;
+    }
+  } else {
+    args.size("size", w, h);
+    rdaccel::RenderTestPattern(600, w, h, bg);
+  }
+  const Scene scene{&bg, w, h};
+  const Scenario* sc = nullptr;
+  for (const auto& s : kScenarios) {
+    if (which == s.name) sc = &s;
+  }
+  if (!sc) {
+    std::fprintf(stderr, "unknown scenario %s\n", which.c_str());
+    return 1;
+  }
+
+  rdaccel::NetworkConditions down;
+  down.bandwidth_bps = args.num("bandwidth", 4'000'000);
+  down.delay_ms = static_cast<int32_t>(args.num("delay", 20));
+  down.jitter_ms = static_cast<int32_t>(args.num("jitter", 0));
+  down.loss = args.real("loss", 0);
+  down.queue_ms = static_cast<int32_t>(args.num("queue-ms", 200));
+  if (args.num("drop-to", 0) > 0) {
+    down.bandwidth_schedule.push_back(
+        {static_cast<int64_t>(args.real("drop-at", 5) * 1000), args.num("drop-to", 0)});
+  }
+  rdaccel::NetworkConditions up = down;
+  up.bandwidth_bps = 0;  // input and acknowledgements
+  up.bandwidth_schedule.clear();
+  up.seed = 2;
+  auto [host_end, viewer_end] =
+      rdaccel::CreateSimulatedNetwork(down, up, args.num("cc", 1) != 0);
+
+  // Frames in flight: capture time -> scene frame index.
+  std::mutex mu;
+  std::map<uint64_t, uint64_t> index_of;
+  std::vector<double> latency_ms, psnr;
+  std::vector<uint64_t> shown_at;
+  const auto warmup_frames = static_cast<uint64_t>(args.real("warmup", 3) * fps);
+  double first_frame_ms = -1;
+  Image ref;
+  rdaccel::ViewerHandlers handlers;
+  handlers.on_frame = [&](const rdaccel::ImageView& img, std::span<const rdaccel::Rect>,
+                          const rdaccel::FrameInfo& info) {
+    const uint64_t now = rdaccel::NowMicros();
+    uint64_t index;
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      auto it = index_of.find(info.capture_time_us);
+      if (it == index_of.end()) return;
+      index = it->second;
+      if (first_frame_ms < 0) first_frame_ms = (now - info.capture_time_us) / 1000.0;
+      if (index < warmup_frames) return;
+      latency_ms.push_back((now - info.capture_time_us) / 1000.0);
+      shown_at.push_back(now);
+    }
+    // Quality on a sample of frames, to keep the viewer thread real time.
+    if (index % 10 == 0) {
+      Render(scene, sc->fn, index, ref);
+      double se = 0;
+      for (int y = 0; y < img.height; ++y) {
+        const uint8_t* a = img.data + static_cast<size_t>(y) * img.stride;
+        const uint8_t* b = ref.data() + static_cast<size_t>(y) * w * 4;
+        for (int x = 0; x < img.width * 4; ++x) {
+          if ((x & 3) == 3) continue;
+          const int d = a[x] - b[x];
+          se += d * d;
+        }
+      }
+      const double mse = se / (static_cast<double>(img.width) * img.height * 3);
+      std::lock_guard<std::mutex> lock(mu);
+      psnr.push_back(mse == 0 ? 99.0 : 10.0 * std::log10(255.0 * 255.0 / mse));
+    }
+  };
+  std::string err;
+  auto viewer = rdaccel::Viewer::Create(std::move(viewer_end), std::move(handlers), &err);
+  if (!viewer) {
+    std::fprintf(stderr, "%s\n", err.c_str());
+    return 1;
+  }
+
+  rdaccel::HostConfig cfg;
+  cfg.fps = fps;
+  cfg.bitrate_bps = args.num("bitrate", 8'000'000);
+  cfg.adaptive_bitrate = args.num("abr", 1) != 0;
+  cfg.max_queue_ms = static_cast<int32_t>(args.num("max-queue-ms", 50));
+  cfg.video_regions = args.num("regions", 1) != 0;
+  rdaccel::Host host(std::move(host_end), cfg);
+
+  const auto frames = static_cast<uint64_t>(seconds * fps);
+  const uint64_t t0 = rdaccel::NowMicros();
+  Image frame;
+  double target_sum = 0;
+  uint64_t warm_bytes = 0, warm_dropped = 0;
+  int target_n = 0;
+  for (uint64_t i = 0; i < frames; ++i) {
+    const uint64_t due = t0 + i * 1'000'000ull / static_cast<uint64_t>(fps);
+    const uint64_t now = rdaccel::NowMicros();
+    if (due > now) std::this_thread::sleep_for(std::chrono::microseconds(due - now));
+    Render(scene, sc->fn, i, frame);
+    const uint64_t ct = rdaccel::NowMicros();
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      index_of[ct] = i;
+    }
+    if (!host.SubmitFrame({frame.data(), w, h, w * 4}, ct, {}, &err)) {
+      std::fprintf(stderr, "frame %llu: %s\n", static_cast<unsigned long long>(i), err.c_str());
+    }
+    const auto st = host.stats();
+    if (args.has("verbose") && i % static_cast<uint64_t>(fps) == 0) {
+      std::printf("t=%3.0fs target %5.0f kbps, estimate %5.0f kbps, rtt %3u ms, sent %7.0f kB, skipped %llu\n",
+                  static_cast<double>(i) / fps, st.target_bitrate_bps / 1000.0,
+                  st.bandwidth_estimate_bps / 1000.0, st.rtt_us / 1000, st.bytes_sent / 1000.0,
+                  static_cast<unsigned long long>(st.frames_dropped_congestion));
+    }
+    if (i == warmup_frames) {
+      warm_bytes = st.bytes_sent;
+      warm_dropped = st.frames_dropped_congestion;
+    }
+    if (i >= warmup_frames && st.target_bitrate_bps > 0) {
+      target_sum += static_cast<double>(st.target_bitrate_bps);
+      ++target_n;
+    }
+  }
+  // Let the last frames arrive.
+  std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+  const auto hs = host.stats();
+
+  std::lock_guard<std::mutex> lock(mu);
+  std::vector<double> lat = latency_ms;
+  std::sort(lat.begin(), lat.end());
+  auto pct = [&](double p) { return lat.empty() ? 0.0 : lat[static_cast<size_t>(p * (lat.size() - 1))]; };
+  double max_gap = 0;
+  for (size_t k = 1; k < shown_at.size(); ++k) {
+    max_gap = std::max(max_gap, (shown_at[k] - shown_at[k - 1]) / 1000.0);
+  }
+  double psnr_avg = 0;
+  for (double p : psnr) psnr_avg += p;
+  if (!psnr.empty()) psnr_avg /= static_cast<double>(psnr.size());
+  const double steady_s = seconds - static_cast<double>(warmup_frames) / fps;
+  const uint64_t steady_frames = frames - warmup_frames;
+  std::printf(
+      "%-6s %4.1f Mbps %3d ms %4.1f%% loss cc %d abr %d | first picture %5.0f ms | steady: %5.0f kbps, "
+      "%3.0f%% frames shown (%llu skipped), latency p50 %5.0f p95 %5.0f max %5.0f ms, stall %4.0f ms, "
+      "PSNR %5.2f dB, target %5.0f kbps, estimate %5.0f kbps\n",
+      sc->name, down.bandwidth_bps / 1e6, down.delay_ms, down.loss * 100, args.num("cc", 1) != 0 ? 1 : 0,
+      cfg.adaptive_bitrate ? 1 : 0, first_frame_ms, (hs.bytes_sent - warm_bytes) * 8 / 1000.0 / steady_s,
+      100.0 * static_cast<double>(latency_ms.size()) / static_cast<double>(steady_frames),
+      static_cast<unsigned long long>(hs.frames_dropped_congestion - warm_dropped), pct(0.5), pct(0.95),
+      lat.empty() ? 0.0 : lat.back(), max_gap, psnr_avg, target_n ? target_sum / target_n / 1000.0 : 0.0,
+      hs.bandwidth_estimate_bps / 1000.0);
+  return 0;
+}

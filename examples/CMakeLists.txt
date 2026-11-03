@@ -22,3 +22,6 @@ if(APPLE)
   set_target_properties(rdaccel_loopback PROPERTIES
     MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_SOURCE_DIR}/loopback_mac/Info.plist.in)
 endif()
+
+add_executable(rdaccel_netsim netsim.cpp)
+target_link_libraries(rdaccel_netsim PRIVATE rdaccel::rdaccel)

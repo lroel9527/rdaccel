@@ -12,6 +12,7 @@
 #include <span>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace rdaccel {
 
@@ -23,6 +24,17 @@ enum class Channel : uint8_t {
   kSurface = 2,
   kVideo = 3,
   kCursor = 4,
+};
+
+// What a transport knows about the path. The Host uses it to adapt its
+// bitrate and to skip frames instead of letting a queue build up.
+struct TransportStats {
+  int64_t bandwidth_bps = 0;   // estimated deliverable send rate; 0 = unknown
+  uint32_t rtt_us = 0;         // smoothed round-trip time; 0 = unknown
+  uint64_t queued_bytes = 0;   // accepted by Send() but not yet on the wire
+  uint64_t bytes_in_flight = 0;
+  uint64_t packets_sent = 0;
+  uint64_t packets_lost = 0;   // detected lost (and resent)
 };
 
 class Transport {
@@ -44,6 +56,14 @@ class Transport {
   // Stops sending and receiving. The destructor must also stop any thread the
   // transport owns and wait for a running receive callback to return.
   virtual void Close() = 0;
+
+  // Fills `out` and returns true if this transport measures the path. The
+  // default (and the in-process pipe and TCP) returns false; the Host then
+  // sends at the configured bitrate.
+  virtual bool GetStats(TransportStats* out) const {
+    (void)out;
+    return false;
+  }
 };
 
 // Two connected in-process endpoints: what one sends, the other receives.
@@ -54,5 +74,33 @@ std::pair<std::unique_ptr<Transport>, std::unique_ptr<Transport>> CreateLocalPip
 std::unique_ptr<Transport> ListenTcp(uint16_t port, std::string* error = nullptr);
 std::unique_ptr<Transport> ConnectTcp(const std::string& host, uint16_t port,
                                       std::string* error = nullptr);
+
+// UDP with its own loss recovery (selective acknowledgements and resends,
+// one ordered stream per channel, so lost video never delays input) and
+// BBR-style congestion control that keeps queues short. Reports TransportStats,
+// so the Host adapts its bitrate. Listen blocks until the peer's first packet
+// arrives. Both ends must use it.
+std::unique_ptr<Transport> ListenUdp(uint16_t port, std::string* error = nullptr);
+std::unique_ptr<Transport> ConnectUdp(const std::string& host, uint16_t port,
+                                      std::string* error = nullptr);
+
+// A network path for tests and benchmarks.
+struct NetworkConditions {
+  int64_t bandwidth_bps = 0;  // 0 = unlimited
+  int32_t delay_ms = 0;       // one way
+  int32_t jitter_ms = 0;      // extra random delay, reorders packets
+  double loss = 0;            // random loss probability per packet
+  int32_t queue_ms = 200;     // bottleneck buffer at `bandwidth_bps`
+  // Bandwidth changes: {milliseconds after creation, bps}.
+  std::vector<std::pair<int64_t, int64_t>> bandwidth_schedule = {};
+  uint32_t seed = 1;
+};
+
+// Two connected endpoints running the UDP transport's protocol over an
+// in-process simulated path (no sockets). `congestion_control` = false sends
+// as fast as data comes, for comparison.
+std::pair<std::unique_ptr<Transport>, std::unique_ptr<Transport>> CreateSimulatedNetwork(
+    const NetworkConditions& host_to_viewer, const NetworkConditions& viewer_to_host,
+    bool congestion_control = true);
 
 }  // namespace rdaccel

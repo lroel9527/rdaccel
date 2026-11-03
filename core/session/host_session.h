@@ -84,6 +84,10 @@ class HostSession {
   // false if the encoder failed on this frame; `error` explains.
   bool OnFrame(const capture::CapturedFrame& frame, std::string* error = nullptr);
 
+  // Changes the video bitrate budget (adaptive bitrate): the full-screen
+  // encoder gets `bps`, each video area its share of it.
+  void SetBitrate(int64_t bps);
+
   // Makes the next encoded frame a keyframe.
   void RequestKeyframe() { force_keyframe_ = true; }
 
@@ -150,6 +154,7 @@ class HostSession {
     bool need_key = true;
   };
   std::unordered_map<uint8_t, RegionEncoder> region_enc_;
+  int64_t RegionBitrate(const Rect& r) const;
   bool regions_disabled_ = false;      // a region encoder could not be created
   std::vector<size_t> pending_sharpen_;  // tiles of closed areas, for the next frame
   uint64_t next_frame_id_ = 1;

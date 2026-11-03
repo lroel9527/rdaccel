@@ -63,6 +63,15 @@ struct HostConfig {
   // Bitrate of each video area's stream; 0 = a share of `bitrate_bps`
   // proportional to the area (at least a quarter of it).
   int64_t video_region_bitrate_bps = 0;
+
+  // Adaptive bitrate, for transports that measure the path (GetStats(), e.g.
+  // the UDP transport): the encoders' bitrate follows the estimated
+  // bandwidth (between `min_bitrate_bps` and `bitrate_bps`), and frames are
+  // skipped while the send queue would take more than `max_queue_ms` to
+  // drain, so a slow link costs frame rate instead of latency.
+  bool adaptive_bitrate = true;
+  int64_t min_bitrate_bps = 300'000;
+  int32_t max_queue_ms = 50;
 };
 
 struct HostStats {
@@ -84,6 +93,11 @@ struct HostStats {
   uint64_t regions_opened = 0;   // video areas detected so far
   uint64_t regions_closed = 0;   // ... and closed after going quiet
   uint64_t region_encode_us_total = 0;
+  // Adaptive bitrate (zero unless the transport measures the path).
+  uint64_t frames_dropped_congestion = 0;  // skipped because the send queue was full
+  int64_t target_bitrate_bps = 0;          // current encoder budget
+  int64_t bandwidth_estimate_bps = 0;      // from the transport
+  uint32_t rtt_us = 0;
   uint64_t encode_us_total = 0;    // video encoder
   uint64_t lossless_us_total = 0;  // palette extraction + deflate
 };

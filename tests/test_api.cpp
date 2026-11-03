@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -257,4 +258,48 @@ TEST(PublicApi, VideoAreaGetsItsOwnStream) {
   EXPECT_EQ(st.regions_opened, 1u);
   EXPECT_GT(st.region_pictures, 20u);
   EXPECT_EQ(viewer->stats().decode_errors, 0u);
+}
+
+// Host and Viewer over a slow simulated network with the UDP transport's
+// protocol: the host learns the path and keeps latency bounded.
+TEST(PublicApi, AdaptsToASlowNetwork) {
+  rdaccel::NetworkConditions down;
+  down.bandwidth_bps = 1'000'000;
+  down.delay_ms = 15;
+  down.loss = 0.01;
+  auto [host_end, viewer_end] = rdaccel::CreateSimulatedNetwork(down, {.delay_ms = 15});
+  std::mutex mu;
+  int frames = 0;
+  uint64_t worst_late_us = 0;
+  rdaccel::ViewerHandlers h;
+  h.on_frame = [&](const rdaccel::ImageView&, std::span<const rdaccel::Rect>,
+                   const rdaccel::FrameInfo& info) {
+    std::lock_guard<std::mutex> lock(mu);
+    ++frames;
+    // Ignore the first second (the first, full picture takes a while).
+    if (frames > 10) worst_late_us = std::max(worst_late_us, rdaccel::NowMicros() - info.capture_time_us);
+  };
+  std::string err;
+  auto viewer = rdaccel::Viewer::Create(std::move(viewer_end), std::move(h), &err);
+  ASSERT_TRUE(viewer) << err;
+  rdaccel::HostConfig cfg;
+  cfg.fps = 30;
+  cfg.bitrate_bps = 8'000'000;
+  rdaccel::Host host(std::move(host_end), cfg);
+  std::vector<uint8_t> px;
+  const uint64_t t0 = rdaccel::NowMicros();
+  for (int i = 0; i < 90; ++i) {
+    while (rdaccel::NowMicros() < t0 + i * 33'333ull) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    rdaccel::RenderTestPattern(i, 640, 360, px);
+    ASSERT_TRUE(host.SubmitFrame({px.data(), 640, 360, 640 * 4}, rdaccel::NowMicros(), {}, &err)) << err;
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
+  const auto st = host.stats();
+  EXPECT_GT(st.bandwidth_estimate_bps, 0);  // a lower bound while little is sent
+  EXPECT_LT(st.bandwidth_estimate_bps, 1'500'000);
+  EXPECT_GT(st.rtt_us, 25'000u);
+  EXPECT_GT(st.target_bitrate_bps, 0);
+  std::lock_guard<std::mutex> lock(mu);
+  EXPECT_GT(frames, 30);
+  EXPECT_LT(worst_late_us, 1'000'000u);
 }
