@@ -73,7 +73,7 @@ viewer->SendInput({rdaccel::InputKind::kMouseMove, 100, 200});
 
 ## 1.1 连接状态、应用消息、输入
 
-**连不上怎么办。** `ConnectUdp` 不阻塞，`Viewer` 创建后在 `peer_timeout_ms` 内等不到 Host 的回应就以 `RDA_ERR_TIMEOUT` 断开，这就是连接超时。`ListenTcp` / `ListenUdp` 会阻塞到对端出现；不想阻塞就用 `BindUdp`，马上创建 `Host`，用状态回调等对方连上。
+**连不上怎么办。** `ConnectUdp` 不阻塞，`Viewer` 创建后在 `peer_timeout_ms` 内等不到 Host 的回应就以 `RDA_ERR_TIMEOUT` 断开，这就是连接超时。`ListenTcp` / `ListenUdp` 会阻塞到对端出现；不想阻塞就用 `BindUdp` / `BindTcp`，马上创建 `Host`，用状态回调等对方连上。
 
 **连接状态。** `Viewer` 创建后先发握手（协议版本、能力位、可选的认证令牌），`Host` 检查后回应，两边进入 `kConnected`。之后双方大约每秒互发心跳，`peer_timeout_ms`（默认 10 秒，0 = 不超时）内收不到对方任何数据就判定断开。主动关闭（析构 `Viewer` / `Host`）会给对方发 Goodbye，对方立刻收到断开而不是等超时。断开是终态，要重连就重建 `Host` / `Viewer` 和传输。
 
@@ -132,6 +132,7 @@ host.SetMessageHandler([](uint32_t type, std::span<const uint8_t> p) { ... });
 | `BindUdp` | 同上，发送端不想阻塞：立刻返回，第一个发来数据的接收端成为对端；之前送进的帧只保留最新一张，连上后从关键帧开始 | 同上 |
 | `UdpFromFd` | 你自己建好的 UDP socket（NAT 打洞之后、由启动器传进来）；成功后归库所有 | 同上 |
 | `ListenTcp` / `ConnectTcp` | 局域网、只能走 TCP 的环境 | 没有：按 `bitrate_bps` 固定码率，网络慢时延迟会越积越大 |
+| `BindTcp` | 同上，发送端不想阻塞：立刻返回，第一个连上来的接收端成为对端；之前送进的帧只保留最新一张 | 同上 |
 | `CreateLocalPipe` | 同一进程（测试、回环演示） | 不需要 |
 | `CreateRecordingTransport` | 录制成 `.rdstream` 文件，之后用 `Viewer::FeedRecording` 回放 | 不需要 |
 | `CreateSimulatedNetwork` | 测试：进程内模拟限速、时延、丢包 | 有（跑的就是 UDP 协议） |

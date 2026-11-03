@@ -55,9 +55,9 @@ int main(int argc, char** argv) {
   std::printf("waiting for a viewer on %s port %u ...\n", tcp ? "TCP" : "UDP", port);
   std::fflush(stdout);
   std::string err;
-  // TCP waits here for the viewer; UDP returns at once and the state
-  // handler below reports when the viewer has connected.
-  auto transport = tcp ? rdaccel::ListenTcp(port, &err) : rdaccel::BindUdp(port, &err);
+  // Both return at once; the state handler below reports when the viewer
+  // has connected.
+  auto transport = tcp ? rdaccel::BindTcp(port, &err) : rdaccel::BindUdp(port, &err);
   if (!transport) {
     std::fprintf(stderr, "%s\n", err.c_str());
     return 1;

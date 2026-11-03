@@ -260,6 +260,10 @@ RDA_API rda_status rda_pipe_create(rda_transport** a, rda_transport** b);
 /* TCP. Listen blocks until one peer connects. Fixed bitrate (no stats). */
 RDA_API rda_status rda_tcp_listen(uint16_t port, rda_transport** out);
 RDA_API rda_status rda_tcp_connect(const char* host, uint16_t port, rda_transport** out);
+/* Host side without blocking: listens on `port` (IPv4 and IPv6) and returns
+ * at once; the first viewer to connect becomes the peer. Watch on_state for
+ * RDA_STATE_CONNECTED. */
+RDA_API rda_status rda_tcp_bind(uint16_t port, rda_transport** out);
 
 /* UDP with loss recovery and BBR-style congestion control; reports stats, so
  * the host adapts its bitrate. Listen blocks until the peer's first packet
