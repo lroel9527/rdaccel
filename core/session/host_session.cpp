@@ -93,6 +93,8 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     refining_ = 0;
     born_.assign(n_tiles, 0);
     quality_.assign(n_tiles, kRough);
+    tile_slot_.assign(n_tiles, -1);
+    tile_slot_hash_.assign(n_tiles, 0);
   }
   ++frame_no_;
   // Tiles the viewer shows at first-pass video quality (or copies of such)
@@ -121,7 +123,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   // shows for tiles that are about to change, if that content is likely to
   // come back: it was on screen for a while (a window about to be covered),
   // or it has been seen before (a cycling animation).
-  std::vector<proto::CacheStore> stores;
+  std::vector<codec::SlotOp> stores;
   if (key) cache_.Clear();
   if (!key && options_.tile_cache) {
     // Recurrence alone is a weak signal (scrolling by a multiple of the tile
@@ -139,7 +141,17 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
         if (!stable) --recurring_budget;
         const uint32_t slot = cache_.Insert(c.prev_hash);
         slot_quality_[slot] = quality_[tile_index(c)];
-        stores.push_back({0, slot, c.rect});
+        stores.push_back({slot, c.rect});
+        // prev_ still holds the previous frame here, i.e. the stored content.
+        constexpr size_t kSlotBytes = static_cast<size_t>(kTileSize) * kTileSize * 4;
+        if (slot_pixels_.empty()) slot_pixels_.resize(proto::kTileCacheSlots * kSlotBytes);
+        for (int32_t y = 0; y < c.rect.h; ++y) {
+          std::memcpy(slot_pixels_.data() + slot * kSlotBytes + static_cast<size_t>(y) * kTileSize * 4,
+                      prev_.data() + static_cast<size_t>(c.rect.y + y) * enc_stride + c.rect.x * 4,
+                      static_cast<size_t>(c.rect.w) * 4);
+        }
+        tile_slot_[tile_index(c)] = slot;
+        tile_slot_hash_[tile_index(c)] = c.prev_hash;
       }
     }
   }
@@ -188,7 +200,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     return q;
   };
   size_t moved_tiles = 0;
-  std::vector<proto::CacheLoad> loads;
+  std::vector<codec::SlotOp> loads;
   std::vector<codec::PaletteTile> lossless_tiles;
   std::vector<tile::TileChange> video_tiles;  // video coded, whole or in part
   const auto refine_frames = static_cast<uint8_t>(std::clamp(options_.refine_frames, 0, 255));
@@ -224,6 +236,75 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     video_tiles.push_back(part);
     return true;
   };
+  // The previous frame's pixels of the tile being processed (prev_ is updated
+  // as tiles are processed).
+  std::vector<uint8_t> prev_tile(static_cast<size_t>(kTileSize) * kTileSize * 4);
+  // Paints the parts of `r` (inside tile `c`) that equal what the tile's last
+  // stored slot holds from that slot, in 16-pixel strips. Returns the parts
+  // still to code; lowers `q` to the slot's quality if the slot was used.
+  // Gives up (returns `r` whole) when less than `min_share` of it matches.
+  auto paint_from_slot = [&](const tile::TileChange& c, const Rect& r, double min_share,
+                             uint8_t& q) {
+    std::vector<Rect> rest;
+    const size_t idx = tile_index(c);
+    const int64_t slot = tile_slot_[idx];
+    if (key || !options_.tile_cache || slot < 0 ||
+        !cache_.Holds(static_cast<uint32_t>(slot), tile_slot_hash_[idx])) {
+      return std::vector<Rect>{r};
+    }
+    constexpr size_t kSlotBytes = static_cast<size_t>(kTileSize) * kTileSize * 4;
+    constexpr int32_t kStrip = 16;
+    const uint8_t* base = slot_pixels_.data() + static_cast<size_t>(slot) * kSlotBytes;
+    const size_t first_load = loads.size();
+    int64_t matched = 0;
+    for (int32_t x0 = r.x; x0 < r.right(); x0 += kStrip) {
+      const int32_t sw = std::min(kStrip, r.right() - x0);
+      // 'U' unchanged since the previous frame (the viewer already shows it),
+      // 'S' from the slot, 'X' to code.
+      auto kind = [&](int32_t y) {
+        const uint8_t* cur = frame.bgra.data + static_cast<size_t>(y) * frame.bgra.stride + x0 * 4;
+        const size_t off = (static_cast<size_t>(y - c.rect.y) * kTileSize + (x0 - c.rect.x)) * 4;
+        const size_t n = static_cast<size_t>(sw) * 4;
+        if (std::memcmp(cur, prev_tile.data() + off, n) == 0) return 'U';
+        if (std::memcmp(cur, base + off, n) == 0) return 'S';
+        return 'X';
+      };
+      for (int32_t y = r.y; y < r.bottom();) {
+        const char k = kind(y);
+        int32_t e = y + 1;
+        while (e < r.bottom() && kind(e) == k) ++e;
+        const Rect run{x0, y, sw, e - y};
+        if (k == 'U') {
+          // nothing to send
+        } else if (k == 'S') {
+          loads.push_back({static_cast<uint32_t>(slot), run, static_cast<uint32_t>(x0 - c.rect.x),
+                           static_cast<uint32_t>(y - c.rect.y)});
+          matched += static_cast<int64_t>(run.w) * run.h;
+        } else {
+          rest.push_back(run);
+        }
+        y = e;
+      }
+    }
+    if (matched == 0 || matched < min_share * r.w * r.h) {
+      loads.resize(first_load);
+      return std::vector<Rect>{r};
+    }
+    q = std::min(q, slot_quality_[slot]);
+    // Join strips that cover the same rows.
+    std::sort(rest.begin(), rest.end(),
+              [](const Rect& a, const Rect& b) { return a.y != b.y ? a.y < b.y : a.x < b.x; });
+    std::vector<Rect> merged;
+    for (const Rect& p : rest) {
+      if (!merged.empty() && merged.back().y == p.y && merged.back().h == p.h &&
+          merged.back().right() == p.x) {
+        merged.back().w += p.w;
+      } else {
+        merged.push_back(p);
+      }
+    }
+    return merged;
+  };
   // Refreshed tiles are coded like changed ones (their content is current in
   // `frame`, as they did not change).
   for (size_t idx : refresh) {
@@ -239,7 +320,14 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   for (size_t i = 0; i < changes.size(); ++i) {
     const auto& c = changes[i];
     const size_t idx = tile_index(c);
-    if (i < n_changed) CopyRectInto(frame.bgra, c.rect, prev_.data(), enc_stride);
+    if (i < n_changed) {
+      for (int32_t y = 0; y < c.rect.h; ++y) {
+        std::memcpy(prev_tile.data() + static_cast<size_t>(y) * kTileSize * 4,
+                    prev_.data() + static_cast<size_t>(c.rect.y + y) * enc_stride + c.rect.x * 4,
+                    static_cast<size_t>(c.rect.w) * 4);
+      }
+      CopyRectInto(frame.bgra, c.rect, prev_.data(), enc_stride);
+    }
     // Whatever happens below, the viewer must not take this tile from a
     // refining video picture any more (lossless tiles are flattened in it).
     set_refine(c, 0);
@@ -247,9 +335,12 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       ++moved_tiles;
       uint8_t q = moved_in_quality(c.rect);
       if (!residual[i].empty()) q = std::min(q, quality_[idx]);  // rows that stayed put
-      // Only the rows that did not move or stay put are left to code.
+      // Only the rows that did not move or stay put are left to code, and of
+      // those, what a dragged window just uncovered can come from the cache.
       for (const Rect& r : residual[i]) {
-        if (code_rect(c, r, hot[i])) q = kRough;
+        for (const Rect& part : paint_from_slot(c, r, 0.0, q)) {
+          if (code_rect(c, part, hot[i])) q = kRough;
+        }
       }
       quality_[idx] = q;
       continue;
@@ -258,8 +349,22 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     // encoder's picture is left alone here.
     if (i < n_changed && !key && options_.tile_cache) {
       if (auto slot = cache_.Find(c.hash)) {
-        loads.push_back({0, *slot, c.rect});
+        loads.push_back({*slot, c.rect});
         quality_[idx] = slot_quality_[*slot];
+        continue;
+      }
+    }
+    // A tile that was static and now changes partly (typing into a line
+    // that was stored, a menu closing) may get most of its pixels from the
+    // slot; hot tiles (video, animation) are left whole.
+    if (i < n_changed && !hot[i]) {
+      uint8_t q = kExact;
+      const auto parts = paint_from_slot(c, c.rect, 0.25, q);
+      if (parts.size() != 1 || parts[0] != c.rect) {
+        for (const Rect& part : parts) {
+          if (code_rect(c, part, hot[i])) q = kRough;
+        }
+        quality_[idx] = q;
         continue;
       }
     }
@@ -322,24 +427,20 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
 
   // Deflate only after the video encode succeeded: the stream's history must
   // match what the viewer actually receives.
+  const size_t n_lossless = lossless_tiles.size();
+  const size_t n_loads = loads.size();
+  codec::RegionOps ops;
+  ops.stores = std::move(stores);
+  for (const auto& m : moves) ops.moves.push_back({m.dst, m.dx, m.dy});
+  ops.loads = std::move(loads);
+  ops.tiles = std::move(lossless_tiles);
   std::vector<uint8_t> lossless_data;
-  if (!lossless_tiles.empty()) lossless_data = lossless_.Encode(lossless_tiles, key);
+  if (!ops.empty()) lossless_data = lossless_.Encode(ops, key);
   const uint64_t t3 = capture::MonotonicMicros();
 
   const uint64_t id = next_frame_id_++;
   std::vector<uint8_t> bytes;
   proto::EncodeTo(proto::FrameBegin{id, frame.capture_time_us}, bytes);
-  // The viewer applies these in this order: stores, moves, loads, video,
-  // lossless.
-  for (auto& st : stores) {
-    st.frame_id = id;
-    proto::EncodeTo(st, bytes);
-  }
-  for (const auto& m : moves) proto::EncodeTo(proto::CopyRect{id, m.src(), m.dx, m.dy}, bytes);
-  for (auto& ld : loads) {
-    ld.frame_id = id;
-    proto::EncodeTo(ld, bytes);
-  }
   size_t video_bytes = 0;
   if (au) {
     proto::VideoData vd;
@@ -369,9 +470,9 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   stats_.bytes_sent += bytes.size();
   stats_.video_bytes += video_bytes;
   stats_.lossless_bytes += lossless_data.size();
-  stats_.lossless_tiles += lossless_tiles.size();
+  stats_.lossless_tiles += n_lossless;
   stats_.moved_tiles += moved_tiles;
-  stats_.cached_tiles += loads.size();
+  stats_.cached_tiles += n_loads;
   stats_.refreshed_tiles += refresh.size();
   stats_.lossless_us_total += (t1 - t0) + (t3 - t2);
   return true;

@@ -109,6 +109,14 @@ class HostSession {
   static constexpr size_t kMaxRefreshPerFrame = 24;  // spreads the cost out
   std::vector<uint8_t> quality_;
   std::vector<uint8_t> slot_quality_ = std::vector<uint8_t>(proto::kTileCacheSlots, kRough);
+
+  // The host's own copy of each slot's pixels, and per tile position the slot
+  // that last stored what was there. When a dragged window uncovers part of
+  // a tile, the uncovered pixels usually equal that stored content, so they
+  // can be painted from the slot instead of being coded.
+  std::vector<uint8_t> slot_pixels_;  // kTileCacheSlots tiles of kTileSize^2 BGRA
+  std::vector<int64_t> tile_slot_;     // per tile, -1 = none
+  std::vector<uint64_t> tile_slot_hash_;
   uint64_t next_frame_id_ = 1;
   std::atomic<bool> force_keyframe_{true};
 

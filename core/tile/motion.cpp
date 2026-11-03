@@ -164,12 +164,13 @@ std::vector<Move> DetectMoves(const ImageView& prev, const ImageView& cur,
     }
   }
 
-  // 4. Split the remaining tiles into 16-pixel-wide strips and classify each
+  // 4. Split the remaining tiles into 4-pixel-wide strips and classify each
   // strip row, for the strongest vector only. Strips (rather than whole rows)
-  // also catch the left and right edges of a dragged window.
+  // also catch the left and right edges of a dragged window; narrow ones keep
+  // what is left to code at the edge itself.
   if (!ranked.empty()) {
     const auto [dx, dy] = ranked.front().second;
-    constexpr int32_t kStrip = 16;
+    constexpr int32_t kStrip = 4;
     std::vector<Rect>& partial = pieces.front();
     std::vector<char> kind;  // per strip row: 'M' moved, 'U' unchanged, 'X' new
     for (size_t i = 0; i < changes.size(); ++i) {

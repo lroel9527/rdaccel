@@ -165,15 +165,59 @@ LosslessEncoder::LosslessEncoder() : impl_(std::make_unique<Impl>()) {
 
 LosslessEncoder::~LosslessEncoder() { deflateEnd(&impl_->zs); }
 
-std::vector<uint8_t> LosslessEncoder::Encode(std::span<const PaletteTile> tiles, bool reset) {
+namespace {
+
+// Rects are written relative to the previous one, which keeps the numbers
+// small and repetitive for deflate.
+void PutRectDelta(proto::ByteWriter& w, const Rect& r, Rect& prev) {
+  w.svarint(r.x - prev.x);
+  w.svarint(r.y - prev.y);
+  w.varint(static_cast<uint64_t>(r.w));
+  w.varint(static_cast<uint64_t>(r.h));
+  prev = r;
+}
+
+bool GetRectDelta(proto::ByteReader& r, Rect& out, Rect& prev, int32_t width, int32_t height) {
+  int32_t dx = 0, dy = 0;
+  uint32_t w = 0, h = 0;
+  if (!(r.svarint32(dx) && r.svarint32(dy) && r.varint32(w) && r.varint32(h))) return false;
+  const int64_t x = static_cast<int64_t>(prev.x) + dx, y = static_cast<int64_t>(prev.y) + dy;
+  if (x < 0 || y < 0 || w == 0 || h == 0 || x + w > width || y + h > height) {
+    return false;
+  }
+  out = {static_cast<int32_t>(x), static_cast<int32_t>(y), static_cast<int32_t>(w),
+         static_cast<int32_t>(h)};
+  prev = out;
+  return true;
+}
+
+}  // namespace
+
+std::vector<uint8_t> LosslessEncoder::Encode(const RegionOps& ops, bool reset) {
   if (reset) deflateReset(&impl_->zs);
   proto::ByteWriter w;
-  w.varint(tiles.size());
-  for (const auto& t : tiles) {
-    w.svarint(t.rect.x);
-    w.svarint(t.rect.y);
-    w.varint(static_cast<uint64_t>(t.rect.w));
-    w.varint(static_cast<uint64_t>(t.rect.h));
+  Rect prev;
+  w.varint(ops.stores.size());
+  for (const auto& st : ops.stores) {
+    w.varint(st.slot);
+    PutRectDelta(w, st.rect, prev);
+  }
+  w.varint(ops.moves.size());
+  for (const auto& m : ops.moves) {
+    PutRectDelta(w, m.dst, prev);
+    w.svarint(m.dx);
+    w.svarint(m.dy);
+  }
+  w.varint(ops.loads.size());
+  for (const auto& ld : ops.loads) {
+    w.varint(ld.slot);
+    PutRectDelta(w, ld.rect, prev);
+    w.varint(ld.sx);
+    w.varint(ld.sy);
+  }
+  w.varint(ops.tiles.size());
+  for (const auto& t : ops.tiles) {
+    PutRectDelta(w, t.rect, prev);
     w.u8(static_cast<uint8_t>(t.colors.size() - 1));
     for (uint32_t c : t.colors) {
       w.u8(static_cast<uint8_t>(c));
@@ -213,7 +257,7 @@ LosslessDecoder::LosslessDecoder() : impl_(std::make_unique<Impl>()) { inflateIn
 LosslessDecoder::~LosslessDecoder() { inflateEnd(&impl_->zs); }
 
 bool LosslessDecoder::Decode(std::span<const uint8_t> data, bool reset, int32_t width,
-                             int32_t height, std::vector<PaletteTile>& tiles, std::string* error) {
+                             int32_t height, uint32_t slots, RegionOps& ops, std::string* error) {
   auto fail = [&](const char* why) {
     impl_->broken = true;
     if (error) *error = why;
@@ -245,20 +289,46 @@ bool LosslessDecoder::Decode(std::span<const uint8_t> data, bool reset, int32_t 
   }
 
   proto::ByteReader r(std::span<const uint8_t>(raw.data(), produced));
+  const uint64_t max_count = static_cast<uint64_t>(width) * height;
+  Rect prev;
   uint64_t n = 0;
-  if (!r.varint(n) || n > static_cast<uint64_t>(width) * height) return fail("bad tile count");
+  auto get_slot_op = [&](SlotOp& op, bool with_offset) {
+    if (!(r.varint32(op.slot) && op.slot < slots && GetRectDelta(r, op.rect, prev, width, height) &&
+          op.rect.w <= kTileSize && op.rect.h <= kTileSize)) {
+      return false;
+    }
+    if (!with_offset) return true;
+    return r.varint32(op.sx) && r.varint32(op.sy) && op.sx + op.rect.w <= static_cast<uint32_t>(kTileSize) &&
+           op.sy + op.rect.h <= static_cast<uint32_t>(kTileSize);
+  };
+  if (!r.varint(n) || n > max_count) return fail("bad store count");
+  ops.stores.resize(static_cast<size_t>(n));
+  for (auto& st : ops.stores) {
+    if (!get_slot_op(st, false)) return fail("bad cache store");
+  }
+  if (!r.varint(n) || n > max_count) return fail("bad move count");
+  ops.moves.resize(static_cast<size_t>(n));
+  for (auto& m : ops.moves) {
+    if (!(GetRectDelta(r, m.dst, prev, width, height) && r.svarint32(m.dx) && r.svarint32(m.dy))) {
+      return fail("bad move");
+    }
+    const int64_t sx = static_cast<int64_t>(m.dst.x) - m.dx, sy = static_cast<int64_t>(m.dst.y) - m.dy;
+    if (sx < 0 || sy < 0 || sx + m.dst.w > width || sy + m.dst.h > height) {
+      return fail("move source outside the screen");
+    }
+  }
+  if (!r.varint(n) || n > max_count) return fail("bad load count");
+  ops.loads.resize(static_cast<size_t>(n));
+  for (auto& ld : ops.loads) {
+    if (!get_slot_op(ld, true)) return fail("bad cache load");
+  }
+  if (!r.varint(n) || n > max_count) return fail("bad tile count");
+  auto& tiles = ops.tiles;
   tiles.resize(static_cast<size_t>(n));
   for (auto& t : tiles) {
-    uint64_t w = 0, h = 0;
     uint8_t nc = 0;
-    if (!(r.svarint32(t.rect.x) && r.svarint32(t.rect.y) && r.varint(w) && r.varint(h) && r.u8(nc))) {
-      return fail("truncated tile header");
-    }
-    t.rect.w = static_cast<int32_t>(std::min<uint64_t>(w, 1u << 16));
-    t.rect.h = static_cast<int32_t>(std::min<uint64_t>(h, 1u << 16));
-    if (t.rect.x < 0 || t.rect.y < 0 || t.rect.w <= 0 || t.rect.h <= 0 ||
-        t.rect.right() > width || t.rect.bottom() > height) {
-      return fail("tile outside the screen");
+    if (!(GetRectDelta(r, t.rect, prev, width, height) && r.u8(nc))) {
+      return fail("bad tile header");
     }
     t.colors.resize(static_cast<size_t>(nc) + 1);
     for (auto& c : t.colors) {

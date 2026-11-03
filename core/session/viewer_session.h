@@ -58,9 +58,8 @@ class ViewerSession {
   std::optional<proto::FrameBegin> begin_;
   std::optional<proto::VideoData> video_;
   std::optional<proto::LosslessData> lossless_;
-  std::vector<tile::Move> moves_;
-  std::vector<proto::CacheStore> stores_;
-  std::vector<proto::CacheLoad> loads_;
+  codec::RegionOps ops_;           // decoded from lossless_, reused
+  std::vector<tile::Move> moves_;  // ops_.moves in the form ApplyMoves takes
   struct CacheSlot {
     int32_t w = 0, h = 0;
     std::vector<uint8_t> bgra;
@@ -74,7 +73,6 @@ class ViewerSession {
   std::vector<uint8_t> screen_;
   bool have_keyframe_ = false;  // screen_ holds a whole picture
   codec::LosslessDecoder lossless_dec_;
-  std::vector<codec::PaletteTile> tiles_;
 
   mutable std::mutex mu_;
   ViewerStats stats_;

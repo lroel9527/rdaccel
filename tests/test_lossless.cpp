@@ -67,20 +67,21 @@ TEST(Lossless, StreamAcrossFramesAndReset) {
   for (int frame = 0; frame < 3; ++frame) {
     auto px = TextTile(W, H, frame == 2 ? 0 : 1);
     const ImageView img{px.data(), W, H, W * 4};
-    std::vector<codec::PaletteTile> tiles(2);
-    ASSERT_TRUE(codec::ExtractPalette(img, {0, 0, 64, 64}, 64, tiles[0]));
-    ASSERT_TRUE(codec::ExtractPalette(img, {64, 0, 64, 64}, 64, tiles[1]));
+    codec::RegionOps ops;
+    ops.tiles.resize(2);
+    ASSERT_TRUE(codec::ExtractPalette(img, {0, 0, 64, 64}, 64, ops.tiles[0]));
+    ASSERT_TRUE(codec::ExtractPalette(img, {64, 0, 64, 64}, 64, ops.tiles[1]));
     const bool reset = frame == 0 || frame == 2;
-    const auto data = enc.Encode(tiles, reset);
+    const auto data = enc.Encode(ops, reset);
     if (frame == 0) first_size = data.size();
     if (frame == 1) repeat_size = data.size();
 
-    std::vector<codec::PaletteTile> got;
+    codec::RegionOps got;
     std::string err;
-    ASSERT_TRUE(dec.Decode(data, reset, W, H, got, &err)) << err;
-    ASSERT_EQ(got.size(), 2u);
+    ASSERT_TRUE(dec.Decode(data, reset, W, H, 16, got, &err)) << err;
+    ASSERT_EQ(got.tiles.size(), 2u);
     std::vector<uint8_t> out(px.size(), 0);
-    for (const auto& t : got) codec::PaintPalette(t, out.data(), W * 4);
+    for (const auto& t : got.tiles) codec::PaintPalette(t, out.data(), W * 4);
     EXPECT_EQ(out, px) << "frame " << frame;
   }
   // The second frame repeats the first, so the shared history makes it tiny.
@@ -90,19 +91,45 @@ TEST(Lossless, StreamAcrossFramesAndReset) {
 TEST(Lossless, CorruptOrOutOfBoundsInputIsRejected) {
   codec::LosslessEncoder enc;
   auto px = TextTile(64, 64, 0);
-  std::vector<codec::PaletteTile> tiles(1);
-  ASSERT_TRUE(codec::ExtractPalette({px.data(), 64, 64, 256}, {0, 0, 64, 64}, 64, tiles[0]));
-  const auto data = enc.Encode(tiles, true);
+  codec::RegionOps ops;
+  ops.tiles.resize(1);
+  ASSERT_TRUE(codec::ExtractPalette({px.data(), 64, 64, 256}, {0, 0, 64, 64}, 64, ops.tiles[0]));
+  const auto data = enc.Encode(ops, true);
 
-  std::vector<codec::PaletteTile> got;
+  codec::RegionOps got;
   codec::LosslessDecoder small;
-  EXPECT_FALSE(small.Decode(data, true, 32, 32, got));  // tile does not fit the screen
+  EXPECT_FALSE(small.Decode(data, true, 32, 32, 16, got));  // tile does not fit the screen
 
   codec::LosslessDecoder dec;
   std::vector<uint8_t> junk = data;
   for (size_t i = 2; i < junk.size(); i += 3) junk[i] ^= 0x5a;
-  EXPECT_FALSE(dec.Decode(junk, true, 64, 64, got));
+  EXPECT_FALSE(dec.Decode(junk, true, 64, 64, 16, got));
   // After an error only a reset frame is accepted again.
-  EXPECT_FALSE(dec.Decode(data, false, 64, 64, got));
-  EXPECT_TRUE(dec.Decode(data, true, 64, 64, got));
+  EXPECT_FALSE(dec.Decode(data, false, 64, 64, 16, got));
+  EXPECT_TRUE(dec.Decode(data, true, 64, 64, 16, got));
+}
+
+TEST(Lossless, RegionCommandsRoundTripAndAreChecked) {
+  codec::RegionOps ops;
+  ops.stores = {{3, {64, 0, 64, 64}}};
+  ops.moves = {{{0, 10, 200, 50}, 0, -3}, {{10, 70, 30, 30}, 5, 2}};
+  ops.loads = {{3, {70, 0, 4, 20}, 6, 0}};
+  codec::LosslessEncoder enc;
+  const auto data = enc.Encode(ops, true);
+  codec::LosslessDecoder dec;
+  codec::RegionOps got;
+  std::string err;
+  ASSERT_TRUE(dec.Decode(data, true, 256, 128, 16, got, &err)) << err;
+  EXPECT_EQ(got.stores, ops.stores);
+  EXPECT_EQ(got.moves, ops.moves);
+  EXPECT_EQ(got.loads, ops.loads);
+
+  // A slot beyond the cache, or a move reading outside the screen.
+  codec::LosslessDecoder d2;
+  EXPECT_FALSE(d2.Decode(data, true, 256, 128, 2, got));
+  codec::RegionOps bad;
+  bad.moves = {{{0, 0, 10, 10}, 1, 0}};
+  codec::LosslessEncoder e3;
+  codec::LosslessDecoder d3;
+  EXPECT_FALSE(d3.Decode(e3.Encode(bad, true), true, 256, 128, 16, got));
 }

@@ -115,20 +115,6 @@ MsgType Write(ByteWriter& w, const LosslessData& m) {
   return MsgType::kLosslessData;
 }
 
-MsgType Write(ByteWriter& w, const CacheStore& m) {
-  w.varint(m.frame_id);
-  w.varint(m.slot);
-  PutRect(w, m.rect);
-  return MsgType::kCacheStore;
-}
-
-MsgType Write(ByteWriter& w, const CacheLoad& m) {
-  w.varint(m.frame_id);
-  w.varint(m.slot);
-  PutRect(w, m.rect);
-  return MsgType::kCacheLoad;
-}
-
 // --- per-message payload decoders -----------------------------------------
 
 std::optional<Message> ReadHello(ByteReader& r) {
@@ -232,17 +218,6 @@ std::optional<Message> ReadLosslessData(ByteReader& r) {
   return m;
 }
 
-template <typename T>
-std::optional<Message> ReadCacheOp(ByteReader& r) {
-  T m;
-  if (!(r.varint(m.frame_id) && r.varint32(m.slot) && GetRect(r, m.rect))) return std::nullopt;
-  if (m.slot >= kTileCacheSlots || m.rect.w <= 0 || m.rect.h <= 0 || m.rect.w > kTileSize ||
-      m.rect.h > kTileSize) {
-    return std::nullopt;
-  }
-  return m;
-}
-
 std::optional<Message> DecodePayload(MsgType type, std::span<const uint8_t> payload) {
   ByteReader r(payload);
   std::optional<Message> m;
@@ -257,8 +232,6 @@ std::optional<Message> DecodePayload(MsgType type, std::span<const uint8_t> payl
     case MsgType::kInputEvent: m = ReadInputEvent(r); break;
     case MsgType::kFeedback: m = ReadFeedback(r); break;
     case MsgType::kLosslessData: m = ReadLosslessData(r); break;
-    case MsgType::kCacheStore: m = ReadCacheOp<CacheStore>(r); break;
-    case MsgType::kCacheLoad: m = ReadCacheOp<CacheLoad>(r); break;
     default: return std::nullopt;
   }
   // Trailing bytes mean the peer and we disagree about the format.

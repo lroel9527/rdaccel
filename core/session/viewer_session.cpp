@@ -107,23 +107,6 @@ void ViewerSession::Handle(proto::Message&& m) {
     begin_ = *b;
     video_.reset();
     lossless_.reset();
-    moves_.clear();
-    stores_.clear();
-    loads_.clear();
-    return;
-  }
-  if (auto* st = std::get_if<proto::CacheStore>(&m)) {
-    if (begin_ && st->frame_id == begin_->frame_id) stores_.push_back(*st);
-    return;
-  }
-  if (auto* ld = std::get_if<proto::CacheLoad>(&m)) {
-    if (begin_ && ld->frame_id == begin_->frame_id) loads_.push_back(*ld);
-    return;
-  }
-  if (auto* c = std::get_if<proto::CopyRect>(&m)) {
-    if (begin_ && c->frame_id == begin_->frame_id) {
-      moves_.push_back({{c->src.x + c->dx, c->src.y + c->dy, c->src.w, c->src.h}, c->dx, c->dy});
-    }
     return;
   }
   if (auto* v = std::get_if<proto::VideoData>(&m)) {
@@ -135,7 +118,7 @@ void ViewerSession::Handle(proto::Message&& m) {
     return;
   }
   auto* end = std::get_if<proto::FrameEnd>(&m);
-  if (!end || !begin_ || end->frame_id != begin_->frame_id || (!video_ && !lossless_ && moves_.empty() && loads_.empty() && stores_.empty())) {
+  if (!end || !begin_ || end->frame_id != begin_->frame_id || (!video_ && !lossless_)) {
     return;
   }
 
@@ -151,22 +134,22 @@ void ViewerSession::Handle(proto::Message&& m) {
   bool full = false;
   std::vector<Rect> changed;
 
-  // Order matters: moves read the screen as the previous frame left it, then
-  // video regions, then lossless tiles on top.
-  const bool needs_screen = !stores_.empty() || !moves_.empty() || !loads_.empty();
-  if (needs_screen && !have_keyframe_) ok = false;
+  // Order matters: stores and moves read the screen as the previous frame
+  // left it, then cache loads, then video regions, then lossless tiles on top.
+  ops_ = {};
+  if (lossless_) {
+    ok = width_ > 0 &&
+         lossless_dec_.Decode(lossless_->data, lossless_->reset, width_, height_,
+                              proto::kTileCacheSlots, ops_);
+  }
+  const bool needs_screen = !ops_.stores.empty() || !ops_.moves.empty() || !ops_.loads.empty();
+  if (ok && needs_screen && !have_keyframe_) ok = false;
   const size_t stride = static_cast<size_t>(width_) * 4;
-  auto inside = [&](const Rect& r) {
-    return r.x >= 0 && r.y >= 0 && r.w > 0 && r.h > 0 && r.right() <= width_ &&
-           r.bottom() <= height_;
-  };
   if (ok) {
-    for (const auto& st : stores_) {
-      if (!inside(st.rect)) {
-        ok = false;
-        break;
-      }
-      if (cache_.size() < proto::kTileCacheSlots) cache_.resize(proto::kTileCacheSlots);
+    if (!ops_.stores.empty() && cache_.size() < proto::kTileCacheSlots) {
+      cache_.resize(proto::kTileCacheSlots);
+    }
+    for (const auto& st : ops_.stores) {
       CacheSlot& slot = cache_[st.slot];
       slot.w = st.rect.w;
       slot.h = st.rect.h;
@@ -178,21 +161,24 @@ void ViewerSession::Handle(proto::Message&& m) {
       }
     }
   }
-  if (ok && !moves_.empty()) {
+  if (ok && !ops_.moves.empty()) {
+    moves_.clear();
+    for (const auto& mv : ops_.moves) moves_.push_back({mv.dst, mv.dx, mv.dy});
     tile::ApplyMoves(moves_, screen_.data(), width_, height_, scratch_);
     for (const auto& mv : moves_) changed.push_back(mv.dst);
   }
   if (ok) {
-    for (const auto& ld : loads_) {
+    for (const auto& ld : ops_.loads) {
       const CacheSlot* slot = ld.slot < cache_.size() ? &cache_[ld.slot] : nullptr;
-      if (!inside(ld.rect) || !slot || slot->w != ld.rect.w || slot->h != ld.rect.h) {
-        ok = false;
+      if (!slot || static_cast<int64_t>(ld.sx) + ld.rect.w > slot->w ||
+          static_cast<int64_t>(ld.sy) + ld.rect.h > slot->h) {
+        ok = false;  // a slot that was never filled this large
         break;
       }
-      for (int32_t y = 0; y < slot->h; ++y) {
+      for (int32_t y = 0; y < ld.rect.h; ++y) {
         std::memcpy(screen_.data() + (ld.rect.y + y) * stride + static_cast<size_t>(ld.rect.x) * 4,
-                    slot->bgra.data() + static_cast<size_t>(y) * slot->w * 4,
-                    static_cast<size_t>(slot->w) * 4);
+                    slot->bgra.data() + ((ld.sy + y) * static_cast<size_t>(slot->w) + ld.sx) * 4,
+                    static_cast<size_t>(ld.rect.w) * 4);
       }
       changed.push_back(ld.rect);
     }
@@ -217,16 +203,13 @@ void ViewerSession::Handle(proto::Message&& m) {
                             if (full) have_keyframe_ = true;
                           });
   }
-  if (ok && lossless_) {
+  if (ok && !ops_.tiles.empty()) {
     if (!have_keyframe_) {
       ok = false;  // nothing to paint on before the first keyframe
     } else {
-      ok = lossless_dec_.Decode(lossless_->data, lossless_->reset, width_, height_, tiles_);
-      if (ok) {
-        for (const auto& t : tiles_) {
-          codec::PaintPalette(t, screen_.data(), width_ * 4);
-          if (!full) changed.push_back(t.rect);
-        }
+      for (const auto& t : ops_.tiles) {
+        codec::PaintPalette(t, screen_.data(), width_ * 4);
+        if (!full) changed.push_back(t.rect);
       }
     }
   }
@@ -247,9 +230,6 @@ void ViewerSession::Handle(proto::Message&& m) {
   begin_.reset();
   video_.reset();
   lossless_.reset();
-  moves_.clear();
-  stores_.clear();
-  loads_.clear();
 }
 
 }  // namespace rdaccel::session
