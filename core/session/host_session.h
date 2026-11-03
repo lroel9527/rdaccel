@@ -90,6 +90,14 @@ class HostSession {
 
   // Makes the next encoded frame a keyframe.
   void RequestKeyframe() { force_keyframe_ = true; }
+  bool keyframe_pending() const { return force_keyframe_; }
+
+  // The screen as of the last frame passed to OnFrame (BGRA, rows of
+  // width * 4 bytes), e.g. to encode a requested keyframe when no new frame
+  // comes. Not thread-safe against OnFrame.
+  const std::vector<uint8_t>& last_frame() const { return prev_; }
+  int32_t width() const { return width_; }
+  int32_t height() const { return height_; }
 
   HostStats stats() const;
 

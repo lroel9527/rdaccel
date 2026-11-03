@@ -93,7 +93,7 @@ viewer->SendInput({rdaccel::InputKind::kMouseMove, 100, 200});
 - `Host::stats()` 和 `Viewer::stats()` 随时可以调用，返回的都是累计值，每秒取一次求差就是速率（`examples/serve.cpp` 就是这么做的）。
 - 编码器创建失败：`SubmitFrame` 返回 false，错误处理回调收到原因，之后的帧都会被拒绝。
 - 编码偶尔失败：返回 false，下一帧自动变成全屏刷新。
-- 接收端解码失败（或者从中途接入）：Viewer 自动向 Host 请求关键帧（最多每 250 ms 一次），Host 在下一帧发全屏刷新。`ViewerStats::keyframe_requests` 和 `HostStats::keyframe_requests` 记录次数。注意屏幕完全静止、`StartScreenCapture` 不产生新帧时，刷新要等到下一次画面变化。
+- 接收端解码失败（或者从中途接入）：Viewer 自动向 Host 请求关键帧（最多每 250 ms 一次），Host 在下一帧发全屏刷新。`ViewerStats::keyframe_requests` 和 `HostStats::keyframe_requests` 记录次数。屏幕完全静止、没有新帧进来时（macOS 的 ScreenCaptureKit 只在画面变化时出帧，自己喂帧的程序也可能停喂），Host 在 100 ms 后用记住的最后一帧补发；因为拥塞跳过的那一帧也是这样补上，`HostStats::frames_resubmitted` 记录次数。
 - 光标读不到（比如 Linux 上没有 XFixes）：错误回调收到一条以 `cursor` 开头的消息，画面照常传输。
 
 ## 7. 平台要求

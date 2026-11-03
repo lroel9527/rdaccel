@@ -73,7 +73,7 @@ M0 是整屏硬编基线；M1 在它上面加了按区域分类；M2 加了视�
 | 传输 | 进程内管道（回环）、TCP、UDP（M2，`ListenUdp` / `ConnectUdp`）。UDP 传输自带丢包恢复（选择性确认 + 重传，每个通道独立有序，丢一个视频包不会卡住输入）和 BBR 式拥塞控制（按测得的瓶颈带宽发包，不把路由器缓冲塞满） | — |
 | 自适应码率（M2） | 传输层报告带宽估计和发送队列（`Transport::GetStats`）。队列超过 `max_queue_ms` 时跳过这一帧（下一帧会带上所有变化），排队时码率降到估计带宽的 85%，畅通时每 250 ms 最多升 25% | `adaptive_bitrate`、`min_bitrate_bps`、`max_queue_ms`（默认 50） |
 | 光标通道（M2） | 光标不画进画面：Host 单独发指针位置（每次约 17 字节）和光标图像（每种图像只发一次，deflate 压缩，两端各记最近 64 种），Viewer 通过 `on_cursor` 拿到位置和图像自己画（可用 `DrawCursor()`，或交给系统的硬件光标）。光标走单独的高优先级通道，大帧还在路上时指针照样跟手。`StartScreenCapture()` 时库自己以 120 Hz 读系统光标（macOS：CoreGraphics + NSCursor；Linux：XFixes）；自己喂帧的程序调用 `Host::SetCursor()` / `SetCursorImage()` | `cursor_channel`、`cursor_poll_hz`（默认 120）、`capture_cursor`（改回画进画面） |
-| 关键帧请求（M2） | 接收端解码失败或中途接入时自动向发送端要一次全屏刷新（最多每 250 ms 一次），应用也可以调用 `Viewer::RequestKeyframe()` | — |
+| 关键帧请求（M2） | 接收端解码失败或中途接入时自动向发送端要一次全屏刷新（最多每 250 ms 一次），应用也可以调用 `Viewer::RequestKeyframe()`。画面静止、没有新帧时，Host 100 ms 后用记住的最后一帧补发（拥塞时跳过的帧也一样），不用等下一次画面变化 | — |
 | 示例 | `rdaccel_serve` / `rdaccel_view`（跨机器）、`rdaccel_record`、`rdaccel_play`、`rdaccel_bench`（场景评测）、`rdaccel_netsim`（模拟网络）、`rdaccel_loopback`（macOS 窗口程序，含光标层）、`minimal` | — |
 
 只支持 HEVC，没有 H.264 回退。
