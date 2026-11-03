@@ -15,6 +15,13 @@
 // by their dominant colour in that frame. Typing therefore costs the video
 // encoder nothing (often no video frame at all), and the encoder never spends
 // bits on text it would blur anyway.
+//
+// Areas that behave like video (tile/video_region.h) get their own HEVC
+// stream, cropped to the area, with its own bitrate and quality floor. Their
+// tiles skip the classification above entirely; the full-screen encoder
+// keeps seeing the area as it was when the area opened (so it spends nothing
+// there), and when the area goes quiet its tiles are sent once more through
+// the normal path, so a paused video ends up sharp.
 
 #include <atomic>
 #include <functional>
@@ -30,6 +37,7 @@
 #include "tile/motion.h"
 #include "tile/tile_cache.h"
 #include "tile/tile_diff.h"
+#include "tile/video_region.h"
 #include "transport/transport.h"
 
 namespace rdaccel::session {
@@ -50,6 +58,16 @@ struct HostOptions {
   // Re-send tiles left at first-pass video quality once they are static
   // (typically content that scrolled in or was dragged).
   bool refresh = false;
+
+  // Video region streams. Off unless an encoder factory is given.
+  using EncoderFactory = std::function<std::unique_ptr<codec::IHevcEncoder>(
+      const codec::EncoderConfig&, std::string* error)>;
+  EncoderFactory region_encoder_factory = nullptr;
+  int32_t fps = 60;
+  int64_t bitrate_bps = 8'000'000;          // the whole session's budget
+  int32_t region_min_qp = 27;               // quality floor inside video areas
+  int64_t region_bitrate_bps = 0;           // 0 = a share of bitrate_bps by area
+  tile::VideoRegionParams region_params = {};
 };
 
 class HostSession {
@@ -73,6 +91,14 @@ class HostSession {
 
  private:
   void OnReceive(transport::Channel ch, std::span<const uint8_t> bytes);
+  // Tile indices covered by `r` (tile aligned).
+  std::vector<size_t> TilesOf(const Rect& r) const;
+  // Encodes the video areas that need it into `out`; false = a region
+  // encoder failed (the areas are then dropped and a keyframe is scheduled).
+  bool EncodeRegions(const capture::CapturedFrame& frame, const std::vector<bool>& dirty,
+                     uint64_t frame_id, std::vector<uint8_t>& out, size_t& bytes, size_t& pictures,
+                     uint64_t& us);
+  void FinishRegions(const std::vector<uint8_t>& busy, const std::vector<uint8_t>& changed);
   void Send(transport::Channel ch, const proto::Message& m);
 
   transport::ITransport* transport_;
@@ -117,6 +143,15 @@ class HostSession {
   std::vector<uint8_t> slot_pixels_;  // kTileCacheSlots tiles of kTileSize^2 BGRA
   std::vector<int64_t> tile_slot_;     // per tile, -1 = none
   std::vector<uint64_t> tile_slot_hash_;
+  // Video areas and their encoders (by stream id).
+  tile::VideoRegionTracker regions_;
+  struct RegionEncoder {
+    std::unique_ptr<codec::IHevcEncoder> enc;
+    bool need_key = true;
+  };
+  std::unordered_map<uint8_t, RegionEncoder> region_enc_;
+  bool regions_disabled_ = false;      // a region encoder could not be created
+  std::vector<size_t> pending_sharpen_;  // tiles of closed areas, for the next frame
   uint64_t next_frame_id_ = 1;
   std::atomic<bool> force_keyframe_{true};
 

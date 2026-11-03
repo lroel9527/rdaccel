@@ -28,6 +28,7 @@ std::unique_ptr<Viewer> Viewer::Create(std::unique_ptr<Transport> transport,
   auto impl = std::make_unique<Impl>();
   impl->decoder_name = dec->name();
   impl->session = std::make_unique<session::ViewerSession>(nullptr, std::move(dec));
+  impl->session->SetDecoderFactory([] { return platform::CreateHevcDecoder(nullptr); });
   if (handlers.on_stream_info) {
     impl->session->SetHelloHandler([fn = std::move(handlers.on_stream_info)](const proto::Hello& h) {
       fn(static_cast<int32_t>(h.width), static_cast<int32_t>(h.height));

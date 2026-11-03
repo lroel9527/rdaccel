@@ -1,13 +1,14 @@
 // rdaccel_bench: repeatable bitrate / quality / CPU comparisons on desktop-like
 // scenes, using only the public API (rdaccel/rdaccel.h).
 //
-//   rdaccel_bench [--background=SCREEN.ppm] [--scenario=all|idle|typing|scroll|drag|video]
+//   rdaccel_bench [--background=SCREEN.ppm] [--scenario=all|idle|typing|scroll|drag|video|pause]
 //                 [--frames=300] [--fps=60] [--bitrate=8000000] [--min-qp=24]
 //                 [--lossless=1] [--max-colors=256] [--max-colors-hot=4] [--moves=1] [--refine=8] [--cache=1] [--refresh=0]
+//                 [--regions=1] [--region-min-qp=27] [--region-bitrate=0]
 //                 [--tmp=bench.rdstream] [--dump=DIR]
 //
-// --dump writes the viewer's last picture and the matching source frame of
-// each scenario as PPM files.
+// --dump writes the viewer's final picture and the last source frame of each
+// scenario as PPM files.
 //
 // Every scenario animates a still screenshot (a real one via --background,
 // e.g. a frame dumped with rdaccel_play --dump; otherwise the test pattern),
@@ -132,8 +133,12 @@ void Drag(const Scene& s, Image& img, uint64_t i) {
 
 // A "video" window: a slowly panning, zooming, colour-shifting view of the
 // screenshot, bilinearly resampled, so every pixel changes every frame.
+rdaccel::Rect VideoRect(const Scene& s) {
+  return {s.w - s.w / 3 - 24, s.h - s.h / 3 - 24, s.w / 3, s.h / 3};
+}
+
 void Video(const Scene& s, Image& img, uint64_t i) {
-  const rdaccel::Rect v{s.w - s.w / 3 - 24, s.h - s.h / 3 - 24, s.w / 3, s.h / 3};
+  const rdaccel::Rect v = VideoRect(s);
   const double zoom = 0.55 + 0.1 * std::sin(i * 0.02);
   const double ox = (s.w - v.w * zoom) * (0.5 + 0.4 * std::sin(i * 0.013));
   const double oy = (s.h - v.h * zoom) * (0.5 + 0.4 * std::cos(i * 0.017));
@@ -160,6 +165,8 @@ using SceneFn = std::function<void(const Scene&, Image&, uint64_t)>;
 struct Scenario {
   const char* name;
   SceneFn fn;
+  // Optional: an area whose quality is reported separately ("in" vs "out").
+  rdaccel::Rect (*focus)(const Scene&) = nullptr;
 };
 
 const Scenario kScenarios[] = {
@@ -170,7 +177,12 @@ const Scenario kScenarios[] = {
     {"video", [](const Scene& s, Image& img, uint64_t i) {
        Spinner(s, img, i);
        Video(s, img, i);
-     }},
+     }, VideoRect},
+    // Plays for 3 seconds, pauses for 2: the paused picture should end up
+    // sharp, not stay at motion quality.
+    {"pause", [](const Scene& s, Image& img, uint64_t i) {
+       Video(s, img, i % 300 < 180 ? i : i - i % 300 + 179);
+     }, VideoRect},
 };
 
 void Render(const Scene& s, const SceneFn& fn, uint64_t i, Image& out) {
@@ -189,6 +201,7 @@ struct Result {
   uint64_t first_frame_bytes = 0;  // the initial full refresh
   double host_cpu = 0, viewer_cpu = 0;
   double psnr_avg = 0, psnr_min = 1e9, exact = 0;
+  double psnr_in = 0, psnr_out = 0;  // inside / outside Scenario::focus
   uint64_t decode_errors = 0;
   bool ok = false;
 };
@@ -247,7 +260,8 @@ Result Run(const Scene& s, const Scenario& sc, uint64_t frames, const rdaccel::H
     std::fprintf(stderr, "%s\n", err.c_str());
     return res;
   }
-  double psnr_sum = 0;
+  Image last;  // the last picture shown, for --dump
+  double psnr_sum = 0, psnr_in_sum = 0, psnr_out_sum = 0;
   uint64_t shown = 0, exact_px = 0, total_px = 0;
   rdaccel::ViewerHandlers handlers;
   Image ref;
@@ -257,7 +271,9 @@ Result Run(const Scene& s, const Scenario& sc, uint64_t frames, const rdaccel::H
     const double c = CpuSeconds();
     const uint64_t index = FrameIndex(info.capture_time_us, cfg.fps);
     Render(s, sc.fn, index, ref);
-    double se = 0;
+    double se = 0, se_in = 0;
+    uint64_t n_in = 0;
+    const rdaccel::Rect focus = sc.focus ? sc.focus(s) : rdaccel::Rect{};
     for (int y = 0; y < img.height; ++y) {
       const uint8_t* a = img.data + static_cast<size_t>(y) * img.stride;
       const uint8_t* b = ref.data() + static_cast<size_t>(y) * s.w * 4;
@@ -266,7 +282,18 @@ Result Run(const Scene& s, const Scenario& sc, uint64_t frames, const rdaccel::H
         for (int k = 0; k < 3; ++k) px_se += (a[k] - b[k]) * (a[k] - b[k]);
         se += px_se;
         exact_px += px_se == 0;
+        if (x >= focus.x && x < focus.right() && y >= focus.y && y < focus.bottom()) {
+          se_in += px_se;
+          ++n_in;
+        }
       }
+    }
+    auto to_psnr = [](double sq, double n) {
+      return sq == 0 || n == 0 ? 99.0 : 10.0 * std::log10(255.0 * 255.0 / (sq / (n * 3)));
+    };
+    if (n_in > 0) {
+      psnr_in_sum += to_psnr(se_in, static_cast<double>(n_in));
+      psnr_out_sum += to_psnr(se - se_in, static_cast<double>(img.width) * img.height - n_in);
     }
     total_px += static_cast<uint64_t>(img.width) * img.height;
     const double mse = se / (static_cast<double>(img.width) * img.height * 3);
@@ -274,9 +301,12 @@ Result Run(const Scene& s, const Scenario& sc, uint64_t frames, const rdaccel::H
     psnr_sum += p;
     res.psnr_min = std::min(res.psnr_min, p);
     ++shown;
-    if (!dump.empty() && index + 1 == frames) {
-      WritePpm(dump + "/" + sc.name + "_viewer.ppm", img.data, img.width, img.height, img.stride);
-      WritePpm(dump + "/" + sc.name + "_source.ppm", ref.data(), s.w, s.h, s.w * 4);
+    if (!dump.empty()) {
+      last.resize(static_cast<size_t>(img.width) * img.height * 4);
+      for (int y = 0; y < img.height; ++y) {
+        std::memcpy(last.data() + static_cast<size_t>(y) * img.width * 4,
+                    img.data + static_cast<size_t>(y) * img.stride, static_cast<size_t>(img.width) * 4);
+      }
     }
     compare_cpu += CpuSeconds() - c;
   };
@@ -289,7 +319,16 @@ Result Run(const Scene& s, const Scenario& sc, uint64_t frames, const rdaccel::H
   viewer->FeedRecording(bytes);
   res.viewer_cpu = CpuSeconds() - c0 - compare_cpu;
   res.decode_errors = viewer->stats().decode_errors;
+  if (!dump.empty() && !last.empty()) {
+    // What the viewer shows at the end against the last source frame (later
+    // frames may have been skipped as unchanged).
+    Render(s, sc.fn, frames - 1, ref);
+    WritePpm(dump + "/" + sc.name + "_viewer.ppm", last.data(), s.w, s.h, s.w * 4);
+    WritePpm(dump + "/" + sc.name + "_source.ppm", ref.data(), s.w, s.h, s.w * 4);
+  }
   res.psnr_avg = shown ? psnr_sum / shown : 0;
+  res.psnr_in = shown ? psnr_in_sum / shown : 0;
+  res.psnr_out = shown ? psnr_out_sum / shown : 0;
   res.exact = total_px ? 100.0 * exact_px / total_px : 0;
   res.ok = shown > 0 && res.decode_errors == 0;
   std::remove(tmp.c_str());
@@ -330,14 +369,17 @@ int main(int argc, char** argv) {
   cfg.refine_frames = static_cast<int32_t>(args.num("refine", 8));
   cfg.tile_cache = args.num("cache", 1) != 0;
   cfg.refresh = args.num("refresh", 0) != 0;
+  cfg.video_regions = args.num("regions", 1) != 0;
+  cfg.video_region_min_qp = static_cast<int32_t>(args.num("region-min-qp", 27));
+  cfg.video_region_bitrate_bps = args.num("region-bitrate", 0);
 
   std::printf("%dx%d, %llu frames @ %d fps, %s, lossless %s (max %d/%d colours), moves %s, refine %d, cache %s\n", w,
               h, static_cast<unsigned long long>(frames), fps,
               bg_path.empty() ? "test pattern" : bg_path.c_str(), cfg.lossless ? "on" : "off",
               cfg.lossless_max_colors, cfg.lossless_max_colors_hot, cfg.detect_moves ? "on" : "off", cfg.refine_frames,
               cfg.tile_cache ? "on" : "off");
-  std::printf("%-8s %9s %9s %9s %9s %7s %7s %7s %8s %8s %7s %7s %7s %7s\n", "scenario", "kbps", "steady", "video",
-              "lossless", "vframes", "moved", "cached", "enc ms", "ll ms", "hostcpu", "PSNR", "minPSNR",
+  std::printf("%-8s %9s %9s %9s %9s %7s %7s %7s %8s %8s %9s %7s %7s %7s %7s\n", "scenario", "kbps", "steady", "video",
+              "lossless", "vframes", "moved", "cached", "enc ms", "ll ms", "regions", "hostcpu", "PSNR", "minPSNR",
               "exact%");
   bool all_ok = true;
   for (const auto& sc : kScenarios) {
@@ -345,21 +387,31 @@ int main(int argc, char** argv) {
     const Result r = Run(scene, sc, frames, cfg, tmp, args.str("dump"));
     const double secs = static_cast<double>(frames) / fps;
     const auto& st = r.host;
-    std::printf("%-8s %9.1f %9.1f %9.1f %9.1f %7llu %7llu %7llu %8.2f %8.2f %6.0f%% %7.2f %7.2f %7.2f%s\n",
+    std::printf("%-8s %9.1f %9.1f %9.1f %9.1f %7llu %7llu %7llu %8.2f %8.2f %4llu/%-4llu %6.0f%% %7.2f %7.2f %7.2f%s\n",
                 sc.name, st.bytes_sent * 8 / 1000.0 / secs,
                 // Without the first frame, and over the remaining frames' time.
                 (st.bytes_sent - r.first_frame_bytes) * 8 / 1000.0 / (secs - 1.0 / fps),
                 st.video_bytes * 8 / 1000.0 / secs,
                 st.lossless_bytes * 8 / 1000.0 / secs,
-                static_cast<unsigned long long>(st.video_frames),
+                static_cast<unsigned long long>(st.video_frames + st.region_pictures),
                 static_cast<unsigned long long>(st.moved_tiles),
                 static_cast<unsigned long long>(st.cached_tiles),
-                st.video_frames ? st.encode_us_total / 1000.0 / st.video_frames : 0.0,
+                // Encoder time per frame that needed any video encode.
+                (st.video_frames + st.region_pictures)
+                    ? (st.encode_us_total + st.region_encode_us_total) / 1000.0 /
+                          std::max(st.video_frames, st.region_pictures)
+                    : 0.0,
                 st.frames_encoded ? st.lossless_us_total / 1000.0 / st.frames_encoded : 0.0,
+                static_cast<unsigned long long>(st.regions_opened),
+                static_cast<unsigned long long>(st.regions_closed),
                 // Host CPU per second of content, in % of one core, without
                 // the time spent rendering the scene.
                 100.0 * r.host_cpu / secs, r.psnr_avg, r.psnr_min, r.exact,
                 r.ok ? "" : "  FAIL");
+    if (sc.focus) {
+      std::printf("%-8s PSNR inside the moving area %.2f dB, elsewhere %.2f dB\n", "", r.psnr_in,
+                  r.psnr_out);
+    }
     all_ok = all_ok && r.ok;
   }
   return all_ok ? 0 : 1;

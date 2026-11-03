@@ -57,6 +57,11 @@ MsgType Write(ByteWriter& w, const VideoData& m) {
   w.varint(m.regions.size());
   for (const auto& r : m.regions) PutRect(w, r);
   w.blob(m.nal_data);
+  if (m.stream != 0) {
+    w.u8(m.stream);
+    w.svarint(m.x);
+    w.svarint(m.y);
+  }
   return MsgType::kVideoData;
 }
 
@@ -152,6 +157,11 @@ std::optional<Message> ReadVideoData(ByteReader& r) {
   std::span<const uint8_t> nal;
   if (!r.blob(nal)) return std::nullopt;
   m.nal_data = ToVec(nal);
+  if (!r.at_end()) {
+    if (!(r.u8(m.stream) && m.stream != 0 && r.svarint32(m.x) && r.svarint32(m.y))) {
+      return std::nullopt;
+    }
+  }
   return m;
 }
 

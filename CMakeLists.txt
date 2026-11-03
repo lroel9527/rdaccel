@@ -47,6 +47,7 @@ set(RDACCEL_SOURCES
   core/tile/tile_diff.cpp
   core/tile/motion.cpp
   core/tile/tile_cache.cpp
+  core/tile/video_region.cpp
   core/codec/hevc_bitstream.cpp
   core/codec/lossless.cpp
   core/capture/synthetic_capturer.cpp
@@ -172,6 +173,7 @@ if(RDACCEL_BUILD_TESTS)
     tests/test_tile_diff.cpp
     tests/test_motion.cpp
     tests/test_tile_cache.cpp
+    tests/test_video_region.cpp
     tests/test_hevc_bitstream.cpp
     tests/test_lossless.cpp
     tests/test_local_pipe.cpp

@@ -25,8 +25,17 @@ std::vector<Message> SampleMessages() {
   cursor.height = 1;
   cursor.bgra = {1, 2, 3, 4, 5, 6, 7, 8};
 
+  VideoData area = video;
+  area.keyframe = false;
+  area.parameter_sets.clear();
+  area.regions.clear();
+  area.stream = 3;
+  area.x = 640;
+  area.y = -2;
+
   return {
       Hello{kProtocolVersion, 3840, 2160, VideoCodec::kHevc},
+      area,
       FrameBegin{42, 123456789},
       video,
       FrameEnd{42},
@@ -111,6 +120,25 @@ TEST(Messages, HugeCountIsRejectedWithoutAllocating) {
   // VideoData claiming 2^31 parameter sets in a 10-byte payload.
   std::vector<uint8_t> bytes = {static_cast<uint8_t>(MsgType::kVideoData), 8, 1, 0,
                                 0x80, 0x80, 0x80, 0x80, 0x08, 0};
+  StreamParser p;
+  p.Append(bytes);
+  EXPECT_FALSE(p.Next().has_value());
+  EXPECT_FALSE(p.error().empty());
+}
+
+TEST(Messages, FullScreenVideoDataKeepsTheVersion2Layout) {
+  // Recordings made before video areas existed must still parse, so a
+  // stream-0 message carries no trailing area fields.
+  VideoData v;
+  v.frame_id = 1;
+  v.nal_data = {0, 0, 0, 1, 0x26};
+  VideoData a = v;
+  a.stream = 1;
+  EXPECT_EQ(Encode(a).size(), Encode(v).size() + 3);
+  // A zero stream id written explicitly is malformed (it would be ambiguous).
+  auto bytes = Encode(v);
+  bytes[1] += 3;  // payload length (one-byte varint here)
+  bytes.insert(bytes.end(), {0, 0, 0});
   StreamParser p;
   p.Append(bytes);
   EXPECT_FALSE(p.Next().has_value());

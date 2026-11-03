@@ -51,6 +51,18 @@ struct HostConfig {
   // scrolled in) once they stop changing. Off by default: on the benchmark
   // scenes it cost more than it gained (see README).
   bool refresh = false;
+  // Give areas that behave like video (many neighbouring tiles that need the
+  // video encoder nearly every frame: a movie, a game) their own HEVC stream,
+  // cropped to the area. The full-screen encoder then only handles the rest
+  // of the screen, the area gets its own bitrate and quality, and encoding
+  // a small video costs a small encode instead of a full-screen one.
+  bool video_regions = true;
+  // Quality floor (minimum QP) inside video areas. Motion hides coarser
+  // quantisation, so this is higher than `min_qp`.
+  int32_t video_region_min_qp = 27;
+  // Bitrate of each video area's stream; 0 = a share of `bitrate_bps`
+  // proportional to the area (at least a quarter of it).
+  int64_t video_region_bitrate_bps = 0;
 };
 
 struct HostStats {
@@ -67,6 +79,11 @@ struct HostStats {
   uint64_t moved_tiles = 0;     // sent as copies of what the viewer shows
   uint64_t cached_tiles = 0;    // painted from the viewer's tile cache
   uint64_t refreshed_tiles = 0; // re-sent at better quality once static
+  uint64_t region_pictures = 0;  // pictures of video area streams
+  uint64_t region_bytes = 0;     // their HEVC payload (also in video_bytes)
+  uint64_t regions_opened = 0;   // video areas detected so far
+  uint64_t regions_closed = 0;   // ... and closed after going quiet
+  uint64_t region_encode_us_total = 0;
   uint64_t encode_us_total = 0;    // video encoder
   uint64_t lossless_us_total = 0;  // palette extraction + deflate
 };

@@ -18,7 +18,8 @@
 
 namespace rdaccel::proto {
 
-inline constexpr uint32_t kProtocolVersion = 2;  // 2: lossless, moves, tile cache
+// 2: lossless, moves, tile cache. 3: video region streams (VideoData::stream).
+inline constexpr uint32_t kProtocolVersion = 3;
 
 enum class MsgType : uint8_t {
   kHello = 1,
@@ -62,6 +63,15 @@ struct VideoData {
   // as VideoToolbox emits them (HVCC layout). The Linux encoder converts its
   // Annex B output to this layout so both ends see the same format.
   std::vector<uint8_t> nal_data;
+  // 0 = the full-screen stream. Other values are video region streams: a
+  // separate HEVC stream (own decoder, own keyframes) whose pictures cover
+  // only part of the screen; the picture's top-left goes to (x, y) and
+  // `regions` is then relative to the screen as well. A keyframe on a stream
+  // id the viewer has not seen, or with new parameter sets, starts it over.
+  // Encoded only when non-zero, so version 2 recordings still parse.
+  uint8_t stream = 0;
+  int32_t x = 0;
+  int32_t y = 0;
   friend bool operator==(const VideoData&, const VideoData&) = default;
 };
 

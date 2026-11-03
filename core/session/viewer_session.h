@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <unordered_map>
 
 #include "codec/lossless.h"
 #include "codec/video_codec.h"
@@ -37,6 +38,10 @@ class ViewerSession {
 
   void SetHelloHandler(HelloFn fn);
   void SetFrameHandler(FrameFn fn);
+  // Creates decoders for video region streams (see proto::VideoData::stream).
+  // Without one, region pictures count as decode errors.
+  using DecoderFactory = std::function<std::unique_ptr<codec::IHevcDecoder>()>;
+  void SetDecoderFactory(DecoderFactory fn) { decoder_factory_ = std::move(fn); }
   void SendInput(const proto::InputEvent& ev);
 
   ViewerStats stats() const;
@@ -51,12 +56,21 @@ class ViewerSession {
 
   transport::ITransport* transport_ = nullptr;
   std::unique_ptr<codec::IHevcDecoder> decoder_;
+  DecoderFactory decoder_factory_;
+  struct RegionDecoder {
+    std::unique_ptr<codec::IHevcDecoder> dec;
+    uint64_t last_used = 0;  // frame id
+  };
+  static constexpr size_t kMaxRegionDecoders = 4;
+  std::unordered_map<uint8_t, RegionDecoder> region_dec_;
+  bool DecodeRegion(const proto::VideoData& v, uint64_t frame_id, uint64_t capture_time,
+                    std::vector<Rect>& changed);
   proto::StreamParser video_parser_;
   proto::StreamParser control_parser_;
 
   // Frame being assembled.
   std::optional<proto::FrameBegin> begin_;
-  std::optional<proto::VideoData> video_;
+  std::vector<proto::VideoData> videos_;  // full-screen stream first, then areas
   std::optional<proto::LosslessData> lossless_;
   codec::RegionOps ops_;           // decoded from lossless_, reused
   std::vector<tile::Move> moves_;  // ops_.moves in the form ApplyMoves takes

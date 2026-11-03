@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <mutex>
 
 #include "capture/synthetic_capturer.h"
@@ -237,4 +238,85 @@ TEST(Synthetic, IncrementalRenderMatchesFullRender) {
   std::vector<uint8_t> full;
   capture::RenderSyntheticFrame(119, W, H, full);
   EXPECT_EQ(inc, full);
+}
+
+TEST(Session, BusyAreaGetsItsOwnStreamAndASharpPictureWhenItStops) {
+  auto [host_end, viewer_end] = transport::MakeLocalPipe();
+  constexpr int W = 320, H = 256;  // 5x4 tiles
+  session::HostOptions opts;
+  opts.refine_frames = 0;
+  std::vector<std::pair<int, int>> region_sizes;
+  opts.region_encoder_factory = [&](const codec::EncoderConfig& c, std::string*) {
+    region_sizes.emplace_back(c.width, c.height);
+    return std::make_unique<FakeEncoder>();
+  };
+  opts.region_params.window = 4;
+  opts.region_params.min_busy = 2;
+  opts.region_params.confirm = 1;
+  opts.region_params.linger = 3;
+  session::HostSession host(host_end.get(), std::make_unique<FakeEncoder>(), W, H, opts);
+  session::ViewerSession viewer(viewer_end.get(), std::make_unique<FakeDecoder>());
+  viewer.SetDecoderFactory([] { return std::make_unique<FakeDecoder>(); });
+
+  std::mutex mu;
+  std::condition_variable cv;
+  std::vector<std::vector<Rect>> got;
+  viewer.SetFrameHandler([&](const tile::ImageView&, const std::vector<Rect>& regions, uint64_t,
+                             uint64_t) {
+    std::lock_guard<std::mutex> lock(mu);
+    got.push_back(regions);
+    cv.notify_all();
+  });
+
+  std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 50);
+  capture::CapturedFrame f{{px.data(), W, H, W * 4}, {}, 0};
+  ASSERT_TRUE(host.OnFrame(f));  // keyframe
+  // Noise in tiles (1..3, 1..2): too many colours for the lossless layer.
+  uint32_t seed = 1;
+  auto play = [&] {
+    for (int y = 64; y < 192; ++y) {
+      for (int x = 64; x < 256; ++x) {
+        seed = seed * 1664525u + 1013904223u;
+        std::memcpy(&px[(static_cast<size_t>(y) * W + x) * 4], &seed, 3);
+      }
+    }
+  };
+  int frames = 1;
+  while (host.stats().regions_opened == 0 && frames < 10) {
+    play();
+    ASSERT_TRUE(host.OnFrame(f));
+    ++frames;
+  }
+  // The area is found at the end of the second busy frame; the frame that
+  // counts it as opened already sends its first picture.
+  for (int i = 0; i < 3; ++i, ++frames) {
+    play();
+    ASSERT_TRUE(host.OnFrame(f));
+  }
+  auto st = host.stats();
+  EXPECT_EQ(st.regions_opened, 1u);
+  EXPECT_EQ(st.region_pictures, 4u);
+  ASSERT_EQ(region_sizes.size(), 1u);
+  EXPECT_EQ(region_sizes[0], (std::pair<int, int>{192, 128}));
+  const uint64_t main_frames = st.video_frames;
+  // Still: the area closes after `linger` quiet frames, and its tiles are
+  // then sent once more through the full-screen encoder.
+  for (int i = 0; i < 4; ++i, ++frames) ASSERT_TRUE(host.OnFrame(f));
+  st = host.stats();
+  EXPECT_EQ(st.regions_closed, 1u);
+  EXPECT_EQ(st.video_frames, main_frames + 1);
+
+  PipeStopper stop{host_end, viewer_end};
+  std::unique_lock<std::mutex> lock(mu);
+  const size_t sent = static_cast<size_t>(st.frames_encoded);
+  ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(5), [&] { return got.size() == sent; }));
+  EXPECT_EQ(viewer.stats().decode_errors, 0u);
+  // An area picture covers the whole area.
+  bool area_seen = false;
+  for (const auto& g : got) {
+    for (const Rect& r : g) area_seen |= r == Rect{64, 64, 192, 128};
+  }
+  EXPECT_TRUE(area_seen);
+  // The final, sharp, picture covers the area's six tiles (merged per row).
+  EXPECT_EQ(got.back(), (std::vector<Rect>{{64, 64, 192, 64}, {64, 128, 192, 64}}));
 }
