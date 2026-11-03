@@ -8,7 +8,7 @@ find_dependency(ZLIB)
 if(NOT APPLE)
   find_dependency(PkgConfig)
   pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale)
-  pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11 xext)
+  pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11 xext xfixes)
 endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/rdaccelTargets.cmake")
