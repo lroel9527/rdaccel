@@ -5,4 +5,5 @@
 .vscode/
 .idea/
 /bench/
+/retest-*/
 /Testing/
