@@ -1,36 +1,448 @@
-#pragma once
+/*
+ * rdaccel: low-bandwidth remote desktop streaming.
+ *
+ * This C header is the library's only stable interface. C++ applications may
+ * prefer <rdaccel/rdaccel.hpp>, a header-only wrapper over these functions.
+ *
+ *   rda_host       capture (or be given) screen frames, encode, send
+ *   rda_viewer     receive, decode, hand BGRA pictures to the application
+ *   rda_transport  how the two talk: UDP, TCP, an in-process pipe, or yours
+ *
+ * Conventions
+ *   - Every function that can fail returns rda_status (RDA_OK = 0, errors < 0).
+ *     rda_last_error() gives a human-readable detail for the calling thread.
+ *   - Structs that may grow start with `struct_size`. Fill them with the
+ *     matching *_default() function, then change what you need; the library
+ *     accepts structs from older headers (shorter struct_size).
+ *   - Objects are opaque pointers created by *_create / *_connect / ... and
+ *     released by *_destroy.
+ *   - Callbacks receive the `user` pointer given with them and run on a
+ *     library thread; see docs/integration.md for which one.
+ *   - Pixels are BGRA, 8 bits per channel (byte order B, G, R, A in memory).
+ */
+#ifndef RDACCEL_RDACCEL_H_
+#define RDACCEL_RDACCEL_H_
 
-// rdaccel: low-bandwidth remote desktop streaming.
-//
-// Include this header and link rdaccel::rdaccel. Everything public lives in
-// include/rdaccel/; nothing else is part of the API.
-//
-//   Host   (host.h)    capture or receive screen frames, encode, send
-//   Viewer (viewer.h)  receive, decode, hand pictures to the application
-//   Transport (transport.h)  in-process pipe, TCP, UDP, or your own
-//   Cursor (cursor.h)  the mouse cursor, sent apart from the picture
+#include <stddef.h>
+#include <stdint.h>
 
-#include <cstdint>
+#if defined(_WIN32)
+#  define RDA_API
+#elif defined(__GNUC__) || defined(__clang__)
+#  define RDA_API __attribute__((visibility("default")))
+#else
+#  define RDA_API
+#endif
 
-#include "rdaccel/cursor.h"
-#include "rdaccel/geometry.h"
-#include "rdaccel/host.h"
-#include "rdaccel/image.h"
-#include "rdaccel/input.h"
-#include "rdaccel/recording.h"
-#include "rdaccel/test_pattern.h"
-#include "rdaccel/transport.h"
-#include "rdaccel/viewer.h"
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-namespace rdaccel {
+/* ---- version ------------------------------------------------------------ */
 
-// Library version, e.g. "0.1.0".
-const char* Version();
+#define RDA_VERSION_MAJOR 0
+#define RDA_VERSION_MINOR 2
+#define RDA_VERSION_PATCH 0
+#define RDA_MAKE_VERSION(major, minor, patch) \
+  (((uint32_t)(major) << 16) | ((uint32_t)(minor) << 8) | (uint32_t)(patch))
+#define RDA_VERSION RDA_MAKE_VERSION(RDA_VERSION_MAJOR, RDA_VERSION_MINOR, RDA_VERSION_PATCH)
 
-// "macOS" or "Linux".
-const char* PlatformName();
+/* The library's version as RDA_MAKE_VERSION() and as text ("0.2.0"). */
+RDA_API uint32_t rda_version(void);
+RDA_API const char* rda_version_string(void);
+/* "macOS" or "Linux". */
+RDA_API const char* rda_platform_name(void);
+/* Monotonic clock in microseconds, the one the library uses. */
+RDA_API uint64_t rda_now_us(void);
 
-// Monotonic clock in microseconds, the same one the library uses.
-uint64_t NowMicros();
+/* ---- errors and logging ------------------------------------------------- */
 
-}  // namespace rdaccel
+typedef enum rda_status {
+  RDA_OK = 0,
+  RDA_ERR_INVALID_ARG = -1,  /* null pointer, bad size, unknown option */
+  RDA_ERR_NO_MEMORY = -2,
+  RDA_ERR_UNSUPPORTED = -3,  /* e.g. no HEVC encoder or decoder on this machine */
+  RDA_ERR_PERMISSION = -4,   /* e.g. macOS Screen Recording not granted */
+  RDA_ERR_CODEC = -5,        /* encoder or decoder failed */
+  RDA_ERR_TRANSPORT = -6,    /* socket or connection error */
+  RDA_ERR_TIMEOUT = -7,
+  RDA_ERR_CLOSED = -8,       /* the connection or object is closed */
+  RDA_ERR_AUTH = -9,
+  RDA_ERR_PROTOCOL = -10,    /* incompatible peer or malformed data */
+  RDA_ERR_BUSY = -11,        /* already running, or called from a callback */
+  RDA_ERR_IO = -12           /* file could not be read or written */
+} rda_status;
+
+/* Constant name of a status, e.g. "RDA_ERR_TIMEOUT". */
+RDA_API const char* rda_status_str(rda_status s);
+
+/* Detail text for the last failing call on this thread ("" if none). Valid
+ * until the next failing call on the same thread. */
+RDA_API const char* rda_last_error(void);
+
+typedef enum rda_log_level {
+  RDA_LOG_ERROR = 0,
+  RDA_LOG_WARN = 1,
+  RDA_LOG_INFO = 2,
+  RDA_LOG_DEBUG = 3
+} rda_log_level;
+
+/* Process-wide log sink. The library never prints by itself; without a sink
+ * messages are dropped. Messages at most `max_level` are delivered, from any
+ * thread, possibly concurrently. They never contain picture content, key
+ * presses or message payloads. Pass fn = NULL to remove the sink. */
+typedef void (*rda_log_fn)(void* user, rda_log_level level, const char* message);
+RDA_API void rda_set_log(rda_log_fn fn, void* user, rda_log_level max_level);
+
+/* ---- basic types -------------------------------------------------------- */
+
+typedef struct rda_rect {
+  int32_t x, y, w, h; /* physical pixels, origin top-left */
+} rda_rect;
+
+typedef struct rda_image {
+  const uint8_t* data; /* BGRA */
+  int32_t width;
+  int32_t height;
+  int32_t stride; /* bytes per row */
+} rda_image;
+
+/* Side length of the library's tiles in pixels. */
+#define RDA_TILE_SIZE 64
+
+/* ---- cursor ------------------------------------------------------------- */
+
+typedef struct rda_cursor_image {
+  int32_t width, height;       /* at most 256 x 256 */
+  int32_t hotspot_x, hotspot_y; /* the pixel that sits at the pointer position */
+  const uint8_t* bgra;         /* width * height * 4 bytes, premultiplied alpha */
+} rda_cursor_image;
+
+typedef struct rda_cursor_state {
+  uint32_t struct_size;
+  int32_t x, y;      /* host pixels, where the hotspot goes */
+  int32_t visible;   /* 0 = hidden */
+  uint64_t time_us;  /* host clock */
+  uint64_t image_id; /* changes exactly when the image does; 0 = none yet */
+  int32_t image_changed;
+  const rda_cursor_image* image; /* valid during the callback; NULL if image_id == 0 */
+} rda_cursor_state;
+
+/* Alpha-blends `c` with its hotspot at (x, y) into a BGRA picture. */
+RDA_API void rda_draw_cursor(const rda_cursor_image* c, int32_t x, int32_t y, uint8_t* bgra,
+                             int32_t width, int32_t height, int32_t stride);
+
+/* ---- input -------------------------------------------------------------- */
+
+typedef enum rda_input_kind {
+  RDA_INPUT_MOUSE_MOVE = 1,
+  RDA_INPUT_MOUSE_DOWN = 2,
+  RDA_INPUT_MOUSE_UP = 3,
+  RDA_INPUT_SCROLL = 4,
+  RDA_INPUT_KEY_DOWN = 5,
+  RDA_INPUT_KEY_UP = 6
+} rda_input_kind;
+
+/* A viewer-side input event, delivered to the host. The library carries it;
+ * injecting it into the host OS is the application's job. */
+typedef struct rda_input_event {
+  uint32_t struct_size;
+  rda_input_kind kind;
+  int32_t x, y;             /* host pixels (mouse events) */
+  int32_t delta_x, delta_y; /* scroll */
+  uint32_t code;            /* mouse button, or key code */
+  uint32_t modifiers;
+} rda_input_event;
+
+RDA_API void rda_input_event_default(rda_input_event* ev);
+
+/* ---- transport ---------------------------------------------------------- */
+
+typedef struct rda_transport rda_transport;
+
+/* Logical channels. A transport may give each its own ordered stream (so a
+ * large video frame does not delay input) or multiplex them. */
+typedef enum rda_channel {
+  RDA_CHANNEL_CONTROL = 0,
+  RDA_CHANNEL_INPUT = 1,
+  RDA_CHANNEL_SURFACE = 2,
+  RDA_CHANNEL_VIDEO = 3,
+  RDA_CHANNEL_CURSOR = 4
+} rda_channel;
+
+typedef struct rda_transport_stats {
+  uint32_t struct_size;
+  int64_t bandwidth_bps;  /* estimated deliverable rate; 0 = unknown */
+  uint32_t rtt_us;        /* smoothed round trip; 0 = unknown */
+  uint64_t queued_bytes;  /* accepted but not yet on the wire */
+  uint64_t bytes_in_flight;
+  uint64_t packets_sent;
+  uint64_t packets_lost;
+} rda_transport_stats;
+
+/* Receive callback handed to a transport. `ctx` is the library's. */
+typedef void (*rda_receive_fn)(void* ctx, rda_channel ch, const uint8_t* bytes, size_t n);
+
+/* Your own transport (QUIC, WebRTC data channel, relay, ...). Requirements:
+ *   send          thread-safe; bytes on one channel arrive in order at the
+ *                 peer, possibly split or merged differently. Return RDA_OK,
+ *                 or RDA_ERR_CLOSED once the connection is gone.
+ *   set_receiver  store fn + ctx and call fn on your thread for every
+ *                 received chunk. Hold bytes that arrive before it is set.
+ *                 fn == NULL clears it.
+ *   close         stop sending and receiving.
+ *   get_stats     optional (NULL): return 1 and fill `out` if you measure the
+ *                 path; the host then adapts its bitrate.
+ *   destroy       stop your threads, wait for a running receive call to
+ *                 return, free `self`. Called exactly once. */
+typedef struct rda_transport_vtable {
+  uint32_t struct_size;
+  rda_status (*send)(void* self, rda_channel ch, const uint8_t* bytes, size_t n);
+  void (*set_receiver)(void* self, rda_receive_fn fn, void* ctx);
+  void (*close)(void* self);
+  int (*get_stats)(void* self, rda_transport_stats* out);
+  void (*destroy)(void* self);
+} rda_transport_vtable;
+
+/* Wraps your implementation. On failure `destroy(self)` has been called. */
+RDA_API rda_status rda_transport_custom(const rda_transport_vtable* vtable, void* self,
+                                        rda_transport** out);
+
+/* Two connected in-process endpoints. */
+RDA_API rda_status rda_pipe_create(rda_transport** a, rda_transport** b);
+
+/* TCP. Listen blocks until one peer connects. Fixed bitrate (no stats). */
+RDA_API rda_status rda_tcp_listen(uint16_t port, rda_transport** out);
+RDA_API rda_status rda_tcp_connect(const char* host, uint16_t port, rda_transport** out);
+
+/* UDP with loss recovery and BBR-style congestion control; reports stats, so
+ * the host adapts its bitrate. Listen blocks until the peer's first packet
+ * arrives. Use on real networks. */
+RDA_API rda_status rda_udp_listen(uint16_t port, rda_transport** out);
+RDA_API rda_status rda_udp_connect(const char* host, uint16_t port, rda_transport** out);
+
+/* A simulated network path (tests, benchmarks), running the UDP protocol. */
+typedef struct rda_bandwidth_step {
+  int64_t at_ms; /* milliseconds after creation */
+  int64_t bandwidth_bps;
+} rda_bandwidth_step;
+
+typedef struct rda_network_conditions {
+  uint32_t struct_size;
+  int64_t bandwidth_bps; /* 0 = unlimited */
+  int32_t delay_ms;      /* one way */
+  int32_t jitter_ms;     /* extra random delay; reorders packets */
+  double loss;           /* random loss probability per packet */
+  int32_t queue_ms;      /* bottleneck buffer */
+  const rda_bandwidth_step* schedule;
+  size_t schedule_len;
+  uint32_t seed;
+} rda_network_conditions;
+
+RDA_API void rda_network_conditions_default(rda_network_conditions* c);
+/* `congestion_control` = 0 sends as fast as data comes, for comparison. */
+RDA_API rda_status rda_simulated_network_create(const rda_network_conditions* host_to_viewer,
+                                                const rda_network_conditions* viewer_to_host,
+                                                int congestion_control, rda_transport** host_end,
+                                                rda_transport** viewer_end);
+
+/* A host-side transport that writes the screen stream to a .rdstream file. */
+RDA_API rda_status rda_recording_create(const char* path, rda_transport** out);
+
+/* Using a transport directly (a relay, a test). Not needed when it is handed
+ * to a host or viewer, which then owns it. */
+RDA_API rda_status rda_transport_send(rda_transport* t, rda_channel ch, const uint8_t* bytes,
+                                      size_t n);
+RDA_API void rda_transport_set_receiver(rda_transport* t, rda_receive_fn fn, void* ctx);
+RDA_API void rda_transport_close(rda_transport* t);
+/* Returns 1 and fills `out` (set out->struct_size first) if the path is measured. */
+RDA_API int rda_transport_get_stats(rda_transport* t, rda_transport_stats* out);
+/* Frees a transport that was not handed to rda_host_create / rda_viewer_create. */
+RDA_API void rda_transport_destroy(rda_transport* t);
+
+/* ---- host --------------------------------------------------------------- */
+
+typedef struct rda_host rda_host;
+
+typedef struct rda_host_config {
+  uint32_t struct_size;
+
+  int32_t fps;             /* 60 */
+  int64_t bitrate_bps;     /* 8 Mbps; the ceiling with adaptive bitrate */
+  int32_t min_qp;          /* 24; video quality ceiling, 0 = encoder decides */
+  const char* encoder;     /* NULL = automatic; Linux: "hevc_nvenc" or "libx265" */
+
+  /* rda_host_start_capture() only */
+  int32_t capture_width;   /* 0 = native; otherwise scaled (even numbers) */
+  int32_t capture_height;
+  int32_t capture_cursor;  /* 0; draw the cursor into the picture */
+
+  int32_t cursor_channel;  /* 1; send the cursor apart from the picture */
+  int32_t cursor_poll_hz;  /* 120 */
+
+  int32_t lossless;                /* 1; text and UI through the lossless layer */
+  int32_t lossless_max_colors;     /* 256 */
+  int32_t lossless_max_colors_hot; /* 4 */
+  int32_t detect_moves;            /* 1; scrolling and moved windows as copies */
+  int32_t refine_frames;           /* 8 */
+  int32_t tile_cache;              /* 1 */
+  int32_t refresh;                 /* 0 */
+  int32_t progressive;             /* 1; fast video-only first picture, then exact */
+  int32_t video_regions;           /* 1; video-like areas get their own stream */
+  int32_t video_region_min_qp;     /* 27 */
+  int64_t video_region_bitrate_bps; /* 0 = a share of bitrate_bps */
+
+  int32_t adaptive_bitrate; /* 1; follow the transport's bandwidth estimate */
+  int64_t min_bitrate_bps;  /* 300 kbps */
+  int32_t max_queue_ms;     /* 50; skip frames rather than queue longer */
+
+  /* Callbacks (all optional), each called with `user`. */
+  void* user;
+  /* Input from the viewer. Transport receive thread. */
+  void (*on_input)(void* user, const rda_input_event* ev);
+  /* Errors on a background thread (encoder creation, capture, cursor). */
+  void (*on_error)(void* user, rda_status status, const char* message);
+} rda_host_config;
+
+typedef struct rda_host_stats {
+  uint32_t struct_size;
+  uint64_t frames_captured;
+  uint64_t frames_skipped;  /* no tile changed */
+  uint64_t frames_encoded;
+  uint64_t video_frames;
+  uint64_t keyframes;
+  uint64_t keyframe_requests;
+  uint64_t encode_errors;
+  uint64_t bytes_sent;
+  uint64_t video_bytes;
+  uint64_t lossless_bytes;
+  uint64_t lossless_tiles;
+  uint64_t moved_tiles;
+  uint64_t cached_tiles;
+  uint64_t refreshed_tiles;
+  uint64_t progressive_tiles;
+  uint64_t region_pictures;
+  uint64_t region_bytes;
+  uint64_t regions_opened;
+  uint64_t regions_closed;
+  uint64_t region_encode_us_total;
+  uint64_t frames_dropped_congestion;
+  uint64_t frames_resubmitted; /* re-sent from memory on a static screen */
+  int64_t target_bitrate_bps;
+  int64_t bandwidth_estimate_bps;
+  uint32_t rtt_us;
+  uint64_t cursor_updates;
+  uint64_t cursor_images;
+  uint64_t cursor_bytes;
+  uint64_t encode_us_total;
+  uint64_t lossless_us_total;
+} rda_host_stats;
+
+RDA_API void rda_host_config_default(rda_host_config* c);
+
+/* Creates a host sending over `transport`, which it takes over in every case
+ * (also on failure). */
+RDA_API rda_status rda_host_create(rda_transport* transport, const rda_host_config* config,
+                                   rda_host** out);
+/* Stops everything. No callback runs after it returns. Must not be called
+ * from one of the host's callbacks. */
+RDA_API void rda_host_destroy(rda_host* h);
+
+/* Mode 1: the library captures the main display. RDA_ERR_PERMISSION without
+ * the macOS Screen Recording permission. */
+RDA_API rda_status rda_host_start_capture(rda_host* h);
+RDA_API void rda_host_stop_capture(rda_host* h);
+
+/* Mode 2: feed frames yourself. `dirty` (may be NULL) hints what changed.
+ * The first frame fixes the resolution. Calls must not overlap. */
+RDA_API rda_status rda_host_submit_frame(rda_host* h, const rda_image* bgra,
+                                         uint64_t capture_time_us, const rda_rect* dirty,
+                                         size_t dirty_count);
+
+/* The cursor, for applications that feed frames themselves. Thread-safe.
+ * time_us 0 = now. The image is copied; resending the same one is free. */
+RDA_API void rda_host_set_cursor(rda_host* h, int32_t x, int32_t y, int visible, uint64_t time_us);
+RDA_API rda_status rda_host_set_cursor_image(rda_host* h, const rda_cursor_image* image);
+
+/* The next encoded frame becomes a full refresh. */
+RDA_API void rda_host_request_keyframe(rda_host* h);
+
+/* Set out->struct_size first. Cumulative counters. */
+RDA_API rda_status rda_host_get_stats(const rda_host* h, rda_host_stats* out);
+
+/* Encoder in use, copied into buf (always terminated); "" before the first
+ * frame. Returns the full length. */
+RDA_API size_t rda_host_encoder_name(const rda_host* h, char* buf, size_t buf_size);
+
+/* ---- viewer ------------------------------------------------------------- */
+
+typedef struct rda_viewer rda_viewer;
+
+typedef struct rda_frame_info {
+  uint32_t struct_size;
+  uint64_t frame_id;
+  uint64_t capture_time_us; /* host clock */
+} rda_frame_info;
+
+typedef struct rda_viewer_config {
+  uint32_t struct_size;
+  /* Callbacks (all optional), each called with `user`, all on the transport
+   * receive thread, one at a time. Pointers are valid only during the call. */
+  void* user;
+  /* The host's screen size, when the stream starts. */
+  void (*on_stream_info)(void* user, int32_t width, int32_t height);
+  /* A decoded full-screen picture; `changed` lists what differs from the
+   * previous one (count 0 = everything). */
+  void (*on_frame)(void* user, const rda_image* bgra, const rda_rect* changed,
+                   size_t changed_count, const rda_frame_info* info);
+  /* The host's cursor moved, hid or changed its image. */
+  void (*on_cursor)(void* user, const rda_cursor_state* state);
+} rda_viewer_config;
+
+typedef struct rda_viewer_stats {
+  uint32_t struct_size;
+  uint64_t frames_decoded;
+  uint64_t decode_errors;
+  uint64_t bytes_received;
+  uint64_t decode_us_total;
+  uint64_t keyframe_requests;
+} rda_viewer_stats;
+
+RDA_API void rda_viewer_config_default(rda_viewer_config* c);
+
+/* Creates a viewer on `transport` (taken over in every case). `transport` may
+ * be NULL to play recordings with rda_viewer_feed_recording().
+ * RDA_ERR_UNSUPPORTED if no HEVC decoder is available. */
+RDA_API rda_status rda_viewer_create(rda_transport* transport, const rda_viewer_config* config,
+                                     rda_viewer** out);
+/* No callback runs after it returns. Not from a viewer callback. */
+RDA_API void rda_viewer_destroy(rda_viewer* v);
+
+RDA_API rda_status rda_viewer_send_input(rda_viewer* v, const rda_input_event* ev);
+/* Asks the host for a full refresh (the viewer also does it by itself after
+ * decode errors). */
+RDA_API void rda_viewer_request_keyframe(rda_viewer* v);
+/* Decodes recording bytes synchronously on this thread. */
+RDA_API rda_status rda_viewer_feed_recording(rda_viewer* v, const uint8_t* bytes, size_t n);
+RDA_API rda_status rda_viewer_get_stats(const rda_viewer* v, rda_viewer_stats* out);
+RDA_API size_t rda_viewer_decoder_name(const rda_viewer* v, char* buf, size_t buf_size);
+
+/* ---- recordings and test helpers ---------------------------------------- */
+
+/* Reads a whole .rdstream file. Free *bytes with rda_free(). */
+RDA_API rda_status rda_recording_read(const char* path, uint8_t** bytes, size_t* n);
+RDA_API void rda_free(void* p);
+
+/* Renders frame `index` of a deterministic synthetic desktop into `bgra`
+ * (width * height * 4 bytes, stride width * 4). With `incremental` != 0 the
+ * buffer must hold frame index - 1 and only the changes are drawn. Writes up
+ * to `max_rects` changed areas and their total count to `*rect_count`. */
+RDA_API rda_status rda_test_pattern_render(uint64_t index, int32_t width, int32_t height,
+                                           uint8_t* bgra, int incremental, rda_rect* rects,
+                                           size_t max_rects, size_t* rect_count);
+
+#ifdef __cplusplus
+} /* extern "C" */
+#endif
+
+#endif /* RDACCEL_RDACCEL_H_ */

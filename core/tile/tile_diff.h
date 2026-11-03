@@ -11,12 +11,12 @@
 #include <span>
 #include <vector>
 
-#include "rdaccel/geometry.h"
-#include "rdaccel/image.h"
+#include "rdacore/geometry.h"
+#include "rdacore/image.h"
 
-namespace rdaccel::tile {
+namespace rdacore::tile {
 
-using ImageView = rdaccel::ImageView;
+using ImageView = rdacore::ImageView;
 
 struct TileChange {
   int32_t col = 0;
@@ -54,4 +54,4 @@ class TileDiffer {
   std::vector<uint64_t> hashes_;  // row-major, 0 = unknown
 };
 
-}  // namespace rdaccel::tile
+}  // namespace rdacore::tile

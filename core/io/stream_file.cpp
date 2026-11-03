@@ -2,7 +2,7 @@
 
 #include <cstring>
 
-namespace rdaccel::io {
+namespace rdacore::io {
 
 bool StreamFileWriter::Open(const std::string& path, std::string* error) {
   Close();
@@ -59,4 +59,4 @@ bool ReadStreamFile(const std::string& path, std::vector<uint8_t>& out, std::str
   return true;
 }
 
-}  // namespace rdaccel::io
+}  // namespace rdacore::io

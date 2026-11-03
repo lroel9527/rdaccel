@@ -1,5 +1,5 @@
 // rdaccel_bench: repeatable bitrate / quality / CPU comparisons on desktop-like
-// scenes, using only the public API (rdaccel/rdaccel.h).
+// scenes, using only the public API (rdaccel/rdaccel.hpp).
 //
 //   rdaccel_bench [--background=SCREEN.ppm] [--scenario=all|idle|typing|scroll|drag|video|pause|pointer]
 //                 [--frames=300] [--fps=60] [--bitrate=8000000] [--min-qp=24]
@@ -21,7 +21,7 @@
 // run. Each frame is encoded by a Host into a recording, the recording is
 // decoded by a Viewer, and the composed picture is compared with the source.
 
-#include <rdaccel/rdaccel.h>
+#include <rdaccel/rdaccel.hpp>
 #include <sys/resource.h>
 
 #include <algorithm>

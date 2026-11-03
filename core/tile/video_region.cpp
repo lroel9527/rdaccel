@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <bit>
 
-namespace rdaccel::tile {
+namespace rdacore::tile {
 namespace {
 
 bool Contains(const Rect& outer, const Rect& inner) {
@@ -174,4 +174,4 @@ std::vector<VideoRegion> VideoRegionTracker::Update(const std::vector<uint8_t>& 
   return closed;
 }
 
-}  // namespace rdaccel::tile
+}  // namespace rdacore::tile

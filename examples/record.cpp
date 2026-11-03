@@ -1,5 +1,5 @@
 // rdaccel_record: capture -> encode -> .rdstream recording, using only the
-// public API (rdaccel/rdaccel.h).
+// public API (rdaccel/rdaccel.hpp).
 //
 //   rdaccel_record --out=a.rdstream [--source=synthetic|screen] [--frames=300]
 //                  [--size=1920x1080] [--fps=60] [--bitrate=8000000] [--encoder=libx265]
@@ -7,7 +7,7 @@
 // The synthetic source is deterministic and runs as fast as the encoder
 // allows, so the same command gives the same stream on every machine.
 
-#include <rdaccel/rdaccel.h>
+#include <rdaccel/rdaccel.hpp>
 
 #include <atomic>
 #include <chrono>

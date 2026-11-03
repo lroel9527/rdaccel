@@ -31,3 +31,10 @@ add_executable(rdaccel_serve serve.cpp)
 target_link_libraries(rdaccel_serve PRIVATE rdaccel::rdaccel)
 add_executable(rdaccel_view view.cpp)
 target_link_libraries(rdaccel_view PRIVATE rdaccel::rdaccel)
+
+# The same in plain C, against the C ABI alone.
+add_executable(rdaccel_minimal_c minimal_c/main.c)
+set_target_properties(rdaccel_minimal_c PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF
+  LINKER_LANGUAGE CXX)
+target_compile_options(rdaccel_minimal_c PRIVATE -pedantic)
+target_link_libraries(rdaccel_minimal_c PRIVATE rdaccel::rdaccel)

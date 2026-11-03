@@ -1,0 +1,391 @@
+// Tests of the C ABI itself (include/rdaccel/rdaccel.h): argument checking,
+// status codes, versioned structs, custom transports through the vtable, and
+// the log sink. Uses only the C header.
+
+#include <rdaccel/rdaccel.h>
+
+#include <gtest/gtest.h>
+
+#include <atomic>
+#include <chrono>
+#include <cstring>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace {
+
+constexpr int32_t kW = 640, kH = 360;
+
+bool WaitUntil(const std::function<bool()>& done, int ms = 10000) {
+  for (int i = 0; i < ms / 5; ++i) {
+    if (done()) return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return done();
+}
+
+struct Counter {
+  std::atomic<int> frames{0};
+  std::atomic<int> inputs{0};
+  std::atomic<uint32_t> last_code{0};
+};
+
+}  // namespace
+
+TEST(CApi, Version) {
+  EXPECT_EQ(rda_version(), RDA_VERSION);
+  EXPECT_EQ(rda_version(), RDA_MAKE_VERSION(0, 2, 0));
+  EXPECT_STREQ(rda_version_string(), "0.2.0");
+  EXPECT_GT(std::strlen(rda_platform_name()), 0u);
+  EXPECT_STREQ(rda_status_str(RDA_ERR_TIMEOUT), "RDA_ERR_TIMEOUT");
+  EXPECT_STREQ(rda_status_str(static_cast<rda_status>(-999)), "RDA_ERR_UNKNOWN");
+}
+
+TEST(CApi, RejectsBadArguments) {
+  rda_transport *a = nullptr, *b = nullptr;
+  EXPECT_EQ(rda_pipe_create(nullptr, &b), RDA_ERR_INVALID_ARG);
+  EXPECT_NE(std::string(rda_last_error()), "");
+  EXPECT_EQ(rda_host_create(nullptr, nullptr, nullptr), RDA_ERR_INVALID_ARG);
+  EXPECT_EQ(rda_tcp_connect(nullptr, 1, &a), RDA_ERR_INVALID_ARG);
+
+  // A bad config: the transport is still taken over (and freed).
+  ASSERT_EQ(rda_pipe_create(&a, &b), RDA_OK);
+  rda_host_config c;
+  rda_host_config_default(&c);
+  c.fps = 0;
+  rda_host* h = nullptr;
+  EXPECT_EQ(rda_host_create(a, &c, &h), RDA_ERR_INVALID_ARG);
+  EXPECT_EQ(h, nullptr);
+  EXPECT_NE(std::string(rda_last_error()).find("fps"), std::string::npos);
+
+  rda_host_config_default(&c);
+  c.capture_width = 1279;
+  c.capture_height = 720;
+  EXPECT_EQ(rda_host_create(b, &c, &h), RDA_ERR_INVALID_ARG);
+
+  // Null objects are ignored by the void functions.
+  rda_host_destroy(nullptr);
+  rda_viewer_destroy(nullptr);
+  rda_transport_destroy(nullptr);
+  rda_host_request_keyframe(nullptr);
+  char name[8] = "x";
+  EXPECT_EQ(rda_host_encoder_name(nullptr, name, sizeof(name)), 0u);
+  EXPECT_STREQ(name, "");
+}
+
+TEST(CApi, SubmitFrameChecksTheImage) {
+  rda_transport *a = nullptr, *b = nullptr;
+  ASSERT_EQ(rda_pipe_create(&a, &b), RDA_OK);
+  rda_transport_destroy(b);
+  rda_host* h = nullptr;
+  ASSERT_EQ(rda_host_create(a, nullptr, &h), RDA_OK);  // NULL config = defaults
+  std::vector<uint8_t> px(static_cast<size_t>(kW) * kH * 4);
+  rda_image img{px.data(), kW - 1, kH, kW * 4};  // odd width
+  EXPECT_EQ(rda_host_submit_frame(h, &img, 0, nullptr, 0), RDA_ERR_INVALID_ARG);
+  img = {px.data(), kW, kH, kW * 2};  // stride too small
+  EXPECT_EQ(rda_host_submit_frame(h, &img, 0, nullptr, 0), RDA_ERR_INVALID_ARG);
+  img = {px.data(), kW, kH, kW * 4};
+  EXPECT_EQ(rda_host_submit_frame(h, &img, 0, nullptr, 3), RDA_ERR_INVALID_ARG);  // null dirty
+  rda_host_destroy(h);
+}
+
+TEST(CApi, OlderShorterStructsAreAccepted) {
+  // A program built against an older header passes a shorter config; the
+  // fields it does not know keep their defaults.
+  rda_host_config full;
+  rda_host_config_default(&full);
+  full.fps = 30;
+  rda_host_config old = full;
+  old.struct_size = offsetof(rda_host_config, lossless);  // ends before `lossless`
+  old.lossless = 12345;                                    // must be ignored
+  rda_transport *a = nullptr, *b = nullptr;
+  ASSERT_EQ(rda_pipe_create(&a, &b), RDA_OK);
+  rda_transport_destroy(b);
+  rda_host* h = nullptr;
+  ASSERT_EQ(rda_host_create(a, &old, &h), RDA_OK);
+  rda_host_destroy(h);
+
+  // Stats into a shorter struct: only the known prefix is written.
+  ASSERT_EQ(rda_pipe_create(&a, &b), RDA_OK);
+  rda_transport_destroy(b);
+  ASSERT_EQ(rda_host_create(a, nullptr, &h), RDA_OK);
+  struct {
+    rda_host_stats s;
+    uint64_t guard;
+  } buf;
+  std::memset(&buf, 0xAB, sizeof(buf));
+  buf.s.struct_size = offsetof(rda_host_stats, frames_skipped);
+  ASSERT_EQ(rda_host_get_stats(h, &buf.s), RDA_OK);
+  EXPECT_EQ(buf.s.struct_size, offsetof(rda_host_stats, frames_skipped));
+  EXPECT_EQ(buf.s.frames_captured, 0u);
+  uint64_t untouched;
+  std::memset(&untouched, 0xAB, sizeof(untouched));
+  EXPECT_EQ(buf.s.frames_skipped, untouched);
+  rda_host_destroy(h);
+
+  rda_host_stats zero{};
+  ASSERT_EQ(rda_pipe_create(&a, &b), RDA_OK);
+  rda_transport_destroy(b);
+  ASSERT_EQ(rda_host_create(a, nullptr, &h), RDA_OK);
+  EXPECT_EQ(rda_host_get_stats(h, &zero), RDA_ERR_INVALID_ARG);  // struct_size 0
+  rda_host_destroy(h);
+}
+
+TEST(CApi, HostToViewerWithInput) {
+  rda_transport *a = nullptr, *b = nullptr;
+  ASSERT_EQ(rda_pipe_create(&a, &b), RDA_OK);
+  Counter got;
+
+  rda_viewer_config vc;
+  rda_viewer_config_default(&vc);
+  vc.user = &got;
+  vc.on_frame = [](void* u, const rda_image* img, const rda_rect*, size_t, const rda_frame_info* info) {
+    EXPECT_EQ(img->width, kW);
+    EXPECT_GE(img->stride, kW * 4);
+    EXPECT_GT(info->frame_id, 0u);
+    static_cast<Counter*>(u)->frames++;
+  };
+  rda_viewer* v = nullptr;
+  ASSERT_EQ(rda_viewer_create(b, &vc, &v), RDA_OK) << rda_last_error();
+
+  rda_host_config hc;
+  rda_host_config_default(&hc);
+  hc.user = &got;
+  hc.on_input = [](void* u, const rda_input_event* ev) {
+    auto* c = static_cast<Counter*>(u);
+    c->last_code = ev->code;
+    c->inputs++;
+  };
+  rda_host* h = nullptr;
+  ASSERT_EQ(rda_host_create(a, &hc, &h), RDA_OK) << rda_last_error();
+
+  std::vector<uint8_t> px(static_cast<size_t>(kW) * kH * 4);
+  for (int i = 0; i < 5; ++i) {
+    rda_rect dirty[16];
+    size_t n = 0;
+    ASSERT_EQ(rda_test_pattern_render(i, kW, kH, px.data(), i > 0, dirty, 16, &n), RDA_OK);
+    const rda_image img{px.data(), kW, kH, kW * 4};
+    ASSERT_EQ(rda_host_submit_frame(h, &img, rda_now_us(), dirty, n), RDA_OK) << rda_last_error();
+  }
+  EXPECT_TRUE(WaitUntil([&] { return got.frames == 5; }));
+
+  rda_input_event ev;
+  rda_input_event_default(&ev);
+  ev.kind = RDA_INPUT_KEY_DOWN;
+  ev.code = 4;
+  ASSERT_EQ(rda_viewer_send_input(v, &ev), RDA_OK);
+  ev.kind = static_cast<rda_input_kind>(99);
+  EXPECT_EQ(rda_viewer_send_input(v, &ev), RDA_ERR_INVALID_ARG);
+  EXPECT_TRUE(WaitUntil([&] { return got.inputs == 1; }));
+  EXPECT_EQ(got.last_code, 4u);
+
+  char enc[64];
+  EXPECT_GT(rda_host_encoder_name(h, enc, sizeof(enc)), 0u);
+  rda_viewer_stats vs{};
+  vs.struct_size = sizeof(vs);
+  ASSERT_EQ(rda_viewer_get_stats(v, &vs), RDA_OK);
+  EXPECT_EQ(vs.frames_decoded, 5u);
+
+  rda_host_destroy(h);
+  rda_viewer_destroy(v);
+}
+
+// A transport written against the C vtable: an in-memory loop between two
+// instances, delivering on a thread of its own.
+namespace {
+
+struct LoopTransport {
+  std::mutex mu;
+  LoopTransport* peer = nullptr;
+  rda_receive_fn fn = nullptr;
+  void* ctx = nullptr;
+  std::vector<std::pair<rda_channel, std::vector<uint8_t>>> pending;  // before a receiver is set
+  bool closed = false;
+  std::atomic<int>* destroyed = nullptr;
+
+  static rda_status Send(void* self, rda_channel ch, const uint8_t* p, size_t n) {
+    auto* t = static_cast<LoopTransport*>(self);
+    LoopTransport* peer = t->peer;
+    std::lock_guard<std::mutex> lock(peer->mu);
+    if (t->closed || peer->closed) return RDA_ERR_CLOSED;
+    if (peer->fn) {
+      peer->fn(peer->ctx, ch, p, n);  // synchronous delivery
+    } else {
+      peer->pending.push_back({ch, std::vector<uint8_t>(p, p + n)});
+    }
+    return RDA_OK;
+  }
+  static void SetReceiver(void* self, rda_receive_fn fn, void* ctx) {
+    auto* t = static_cast<LoopTransport*>(self);
+    std::lock_guard<std::mutex> lock(t->mu);
+    t->fn = fn;
+    t->ctx = ctx;
+    if (fn) {
+      for (auto& [ch, bytes] : t->pending) fn(ctx, ch, bytes.data(), bytes.size());
+      t->pending.clear();
+    }
+  }
+  static void Close(void* self) {
+    auto* t = static_cast<LoopTransport*>(self);
+    std::lock_guard<std::mutex> lock(t->mu);
+    t->closed = true;
+  }
+  static int Stats(void*, rda_transport_stats* out) {
+    out->bandwidth_bps = 5'000'000;
+    out->rtt_us = 1000;
+    return 1;
+  }
+  static void Destroy(void* self) {
+    auto* t = static_cast<LoopTransport*>(self);
+    (*t->destroyed)++;
+    // The peer is freed by its own destroy; just unhook.
+    delete t;
+  }
+};
+
+const rda_transport_vtable kLoopVtable = {sizeof(rda_transport_vtable), LoopTransport::Send,
+                                          LoopTransport::SetReceiver, LoopTransport::Close,
+                                          LoopTransport::Stats, LoopTransport::Destroy};
+
+}  // namespace
+
+TEST(CApi, CustomTransportThroughVtable) {
+  std::atomic<int> destroyed{0};
+  auto* x = new LoopTransport;
+  auto* y = new LoopTransport;
+  x->peer = y;
+  y->peer = x;
+  x->destroyed = y->destroyed = &destroyed;
+  rda_transport *a = nullptr, *b = nullptr;
+  ASSERT_EQ(rda_transport_custom(&kLoopVtable, x, &a), RDA_OK);
+  ASSERT_EQ(rda_transport_custom(&kLoopVtable, y, &b), RDA_OK);
+
+  rda_transport_stats st{};
+  st.struct_size = sizeof(st);
+  EXPECT_EQ(rda_transport_get_stats(a, &st), 1);
+  EXPECT_EQ(st.bandwidth_bps, 5'000'000);
+
+  Counter got;
+  rda_viewer_config vc;
+  rda_viewer_config_default(&vc);
+  vc.user = &got;
+  vc.on_frame = [](void* u, const rda_image*, const rda_rect*, size_t, const rda_frame_info*) {
+    static_cast<Counter*>(u)->frames++;
+  };
+  rda_viewer* v = nullptr;
+  ASSERT_EQ(rda_viewer_create(b, &vc, &v), RDA_OK);
+  rda_host* h = nullptr;
+  ASSERT_EQ(rda_host_create(a, nullptr, &h), RDA_OK);
+  std::vector<uint8_t> px(static_cast<size_t>(kW) * kH * 4);
+  for (int i = 0; i < 3; ++i) {
+    ASSERT_EQ(rda_test_pattern_render(i, kW, kH, px.data(), i > 0, nullptr, 0, nullptr), RDA_OK);
+    const rda_image img{px.data(), kW, kH, kW * 4};
+    ASSERT_EQ(rda_host_submit_frame(h, &img, rda_now_us(), nullptr, 0), RDA_OK) << rda_last_error();
+  }
+  EXPECT_EQ(got.frames, 3);  // delivered synchronously
+  rda_host_stats hs{};
+  hs.struct_size = sizeof(hs);
+  ASSERT_EQ(rda_host_get_stats(h, &hs), RDA_OK);
+  EXPECT_EQ(hs.bandwidth_estimate_bps, 5'000'000);  // the host read our stats
+
+  // Destroy the host first; then x is gone and y must not call into it.
+  rda_host_destroy(h);
+  y->peer = y;  // the viewer may still send keyframe requests; loop them back harmlessly
+  y->closed = true;
+  rda_viewer_destroy(v);
+  EXPECT_EQ(destroyed, 2);
+
+  // A vtable missing required functions: destroy is still called.
+  rda_transport_vtable bad = kLoopVtable;
+  bad.send = nullptr;
+  auto* z = new LoopTransport;
+  z->destroyed = &destroyed;
+  rda_transport* c = nullptr;
+  EXPECT_EQ(rda_transport_custom(&bad, z, &c), RDA_ERR_INVALID_ARG);
+  EXPECT_EQ(destroyed, 3);
+}
+
+TEST(CApi, LogSinkGetsLibraryMessages) {
+  struct Sink {
+    std::mutex mu;
+    std::vector<std::string> lines;
+  } sink;
+  rda_set_log(
+      [](void* u, rda_log_level, const char* m) {
+        auto* s = static_cast<Sink*>(u);
+        std::lock_guard<std::mutex> lock(s->mu);
+        s->lines.push_back(m);
+      },
+      &sink, RDA_LOG_DEBUG);
+
+  // An encoder that cannot exist produces an error on the host.
+  rda_transport *a = nullptr, *b = nullptr;
+  ASSERT_EQ(rda_pipe_create(&a, &b), RDA_OK);
+  rda_transport_destroy(b);
+  rda_host_config hc;
+  rda_host_config_default(&hc);
+  hc.encoder = "no_such_encoder";
+  struct Err {
+    std::atomic<int> n{0};
+    rda_status last = RDA_OK;
+  } err;
+  hc.user = &err;
+  hc.on_error = [](void* u, rda_status s, const char*) {
+    auto* e = static_cast<Err*>(u);
+    e->last = s;
+    e->n++;
+  };
+  rda_host* h = nullptr;
+  ASSERT_EQ(rda_host_create(a, &hc, &h), RDA_OK);
+  std::vector<uint8_t> px(static_cast<size_t>(kW) * kH * 4, 0);
+  const rda_image img{px.data(), kW, kH, kW * 4};
+  // Linux falls back to the other backends, macOS ignores the name: either
+  // way the frame encodes or fails cleanly with a status.
+  const rda_status s = rda_host_submit_frame(h, &img, rda_now_us(), nullptr, 0);
+  EXPECT_TRUE(s == RDA_OK || s == RDA_ERR_CODEC || s == RDA_ERR_UNSUPPORTED) << rda_status_str(s);
+  if (s != RDA_OK) {
+    EXPECT_EQ(err.n, 1);
+    std::lock_guard<std::mutex> lock(sink.mu);
+    EXPECT_FALSE(sink.lines.empty());
+  }
+  rda_host_destroy(h);
+  rda_set_log(nullptr, nullptr, RDA_LOG_ERROR);
+}
+
+TEST(CApi, RecordingRoundTripAndFree) {
+  const std::string path = ::testing::TempDir() + "rdaccel_capi.rdstream";
+  rda_transport* file = nullptr;
+  ASSERT_EQ(rda_recording_create(path.c_str(), &file), RDA_OK);
+  rda_host* h = nullptr;
+  ASSERT_EQ(rda_host_create(file, nullptr, &h), RDA_OK);
+  std::vector<uint8_t> px(static_cast<size_t>(kW) * kH * 4);
+  for (int i = 0; i < 4; ++i) {
+    ASSERT_EQ(rda_test_pattern_render(i, kW, kH, px.data(), i > 0, nullptr, 0, nullptr), RDA_OK);
+    const rda_image img{px.data(), kW, kH, kW * 4};
+    ASSERT_EQ(rda_host_submit_frame(h, &img, i * 16'000ull, nullptr, 0), RDA_OK);
+  }
+  rda_host_destroy(h);
+
+  uint8_t* bytes = nullptr;
+  size_t n = 0;
+  ASSERT_EQ(rda_recording_read(path.c_str(), &bytes, &n), RDA_OK) << rda_last_error();
+  EXPECT_GT(n, 100u);
+  Counter got;
+  rda_viewer_config vc;
+  rda_viewer_config_default(&vc);
+  vc.user = &got;
+  vc.on_frame = [](void* u, const rda_image*, const rda_rect*, size_t, const rda_frame_info*) {
+    static_cast<Counter*>(u)->frames++;
+  };
+  rda_viewer* v = nullptr;
+  ASSERT_EQ(rda_viewer_create(nullptr, &vc, &v), RDA_OK);
+  ASSERT_EQ(rda_viewer_feed_recording(v, bytes, n), RDA_OK);
+  EXPECT_EQ(got.frames, 4);
+  rda_viewer_destroy(v);
+  rda_free(bytes);
+  std::remove(path.c_str());
+  EXPECT_EQ(rda_recording_read(path.c_str(), &bytes, &n), RDA_ERR_IO);
+  EXPECT_EQ(bytes, nullptr);
+}

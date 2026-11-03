@@ -2,7 +2,7 @@
 
 #include <algorithm>
 
-namespace rdaccel::session {
+namespace rdacore::session {
 
 RateController::Decision RateController::Update(uint64_t now_us, const TransportStats& st) {
   Decision d;
@@ -46,4 +46,4 @@ RateController::Decision RateController::Update(uint64_t now_us, const Transport
   return d;
 }
 
-}  // namespace rdaccel::session
+}  // namespace rdacore::session

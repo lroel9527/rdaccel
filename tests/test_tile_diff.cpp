@@ -4,8 +4,8 @@
 
 #include "tile/tile_diff.h"
 
-using namespace rdaccel;
-using namespace rdaccel::tile;
+using namespace rdacore;
+using namespace rdacore::tile;
 
 namespace {
 

@@ -1,4 +1,4 @@
-#include "rdaccel/host.h"
+#include "rdacore/host.h"
 
 #include <algorithm>
 #include <atomic>
@@ -15,7 +15,7 @@
 #include "session/host_session.h"
 #include "session/rate_control.h"
 
-namespace rdaccel {
+namespace rdacore {
 
 struct Host::Impl {
   HostConfig config;
@@ -377,4 +377,4 @@ HostStats Host::stats() const {
   return st;
 }
 
-}  // namespace rdaccel
+}  // namespace rdacore

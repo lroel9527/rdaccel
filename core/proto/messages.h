@@ -13,10 +13,10 @@
 #include <variant>
 #include <vector>
 
-#include "rdaccel/geometry.h"
-#include "rdaccel/input.h"
+#include "rdacore/geometry.h"
+#include "rdacore/input.h"
 
-namespace rdaccel::proto {
+namespace rdacore::proto {
 
 // 2: lossless, moves, tile cache. 3: video region streams (VideoData::stream).
 inline constexpr uint32_t kProtocolVersion = 3;
@@ -131,8 +131,8 @@ struct CursorShape {
   friend bool operator==(const CursorShape&, const CursorShape&) = default;
 };
 
-using InputKind = rdaccel::InputKind;
-using InputEvent = rdaccel::InputEvent;
+using InputKind = rdacore::InputKind;
+using InputEvent = rdacore::InputEvent;
 
 // Viewer -> host: one entry per presented frame.
 struct Feedback {
@@ -179,4 +179,4 @@ class StreamParser {
   std::string error_;
 };
 
-}  // namespace rdaccel::proto
+}  // namespace rdacore::proto

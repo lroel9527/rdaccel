@@ -1,12 +1,12 @@
 #pragma once
 
-// Internal names for the public transport interface (include/rdaccel/transport.h).
+// Internal names for the public transport interface (rdacore/transport.h).
 
-#include "rdaccel/transport.h"
+#include "rdacore/transport.h"
 
-namespace rdaccel::transport {
+namespace rdacore::transport {
 
-using Channel = rdaccel::Channel;
-using ITransport = rdaccel::Transport;
+using Channel = rdacore::Channel;
+using ITransport = rdacore::Transport;
 
-}  // namespace rdaccel::transport
+}  // namespace rdacore::transport

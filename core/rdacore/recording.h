@@ -9,9 +9,9 @@
 #include <string>
 #include <vector>
 
-#include "rdaccel/transport.h"
+#include "rdacore/transport.h"
 
-namespace rdaccel {
+namespace rdacore {
 
 // A transport for Host that writes the stream to `path` instead of sending it.
 std::unique_ptr<Transport> CreateRecordingTransport(const std::string& path,
@@ -21,4 +21,4 @@ std::unique_ptr<Transport> CreateRecordingTransport(const std::string& path,
 bool ReadRecording(const std::string& path, std::vector<uint8_t>& out,
                    std::string* error = nullptr);
 
-}  // namespace rdaccel
+}  // namespace rdacore

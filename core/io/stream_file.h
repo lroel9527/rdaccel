@@ -13,7 +13,7 @@
 
 #include "transport/transport.h"
 
-namespace rdaccel::io {
+namespace rdacore::io {
 
 inline constexpr char kStreamMagic[8] = {'R', 'D', 'S', 'T', 'R', 'M', '0', '1'};
 
@@ -45,4 +45,4 @@ class StreamFileWriter final : public transport::ITransport {
 // missing or has the wrong magic.
 bool ReadStreamFile(const std::string& path, std::vector<uint8_t>& out, std::string* error);
 
-}  // namespace rdaccel::io
+}  // namespace rdacore::io

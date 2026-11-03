@@ -11,7 +11,7 @@
 #include <cstring>
 #include <vector>
 
-namespace rdaccel::transport {
+namespace rdacore::transport {
 namespace {
 
 constexpr uint32_t kMaxChunk = 64u << 20;
@@ -173,4 +173,4 @@ void TcpTransport::ReadLoop() {
   closed_ = true;
 }
 
-}  // namespace rdaccel::transport
+}  // namespace rdacore::transport

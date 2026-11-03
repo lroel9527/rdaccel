@@ -4,7 +4,7 @@
 
 #include "tile/motion.h"
 
-using namespace rdaccel;
+using namespace rdacore;
 
 namespace {
 

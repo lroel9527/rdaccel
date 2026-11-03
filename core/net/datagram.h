@@ -13,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-namespace rdaccel::net {
+namespace rdacore::net {
 
 class DatagramSocket {
  public:
@@ -59,4 +59,4 @@ std::unique_ptr<DatagramSocket> ListenUdpSocket(uint16_t port, std::string* erro
 std::unique_ptr<DatagramSocket> ConnectUdpSocket(const std::string& host, uint16_t port,
                                                  std::string* error);
 
-}  // namespace rdaccel::net
+}  // namespace rdacore::net

@@ -1,7 +1,7 @@
 // Tests of the public API, written the way an application would use it:
-// only <rdaccel/rdaccel.h>, real platform codecs.
+// only <rdaccel/rdaccel.hpp>, real platform codecs.
 
-#include <rdaccel/rdaccel.h>
+#include <rdaccel/rdaccel.hpp>
 
 #include <gtest/gtest.h>
 
@@ -70,7 +70,7 @@ struct Received {
 }  // namespace
 
 TEST(PublicApi, VersionAndPlatform) {
-  EXPECT_STREQ(rdaccel::Version(), "0.1.0");
+  EXPECT_STREQ(rdaccel::Version(), "0.2.0");
   EXPECT_NE(std::string(rdaccel::PlatformName()), "");
   const auto a = rdaccel::NowMicros();
   EXPECT_GE(rdaccel::NowMicros(), a);

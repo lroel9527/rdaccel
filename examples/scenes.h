@@ -4,7 +4,7 @@
 // animates a still screenshot (a real one, or the built-in test pattern), so
 // the pixels are real desktop pixels and the motion is the same on every run.
 
-#include <rdaccel/rdaccel.h>
+#include <rdaccel/rdaccel.hpp>
 
 #include <algorithm>
 #include <cmath>

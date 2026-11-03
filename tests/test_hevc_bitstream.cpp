@@ -4,7 +4,7 @@
 
 #include "codec/hevc_bitstream.h"
 
-using namespace rdaccel::codec;
+using namespace rdacore::codec;
 
 namespace {
 

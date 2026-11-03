@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cstring>
 
-namespace rdaccel::session {
+namespace rdacore::session {
 
 std::vector<Rect> TilesToRegions(const std::vector<tile::TileChange>& changes) {
   std::vector<tile::TileChange> sorted = changes;
@@ -838,4 +838,4 @@ void HostSession::OnReceive(transport::Channel ch, std::span<const uint8_t> byte
   }
 }
 
-}  // namespace rdaccel::session
+}  // namespace rdacore::session

@@ -13,12 +13,16 @@
 
 #include "capture/capturer.h"
 
-namespace rdaccel::capture {
+namespace rdacore::capture {
 
 // Renders frame `index` into `bgra` (resized to w*h*4). Also returns the
 // rectangles that differ from frame index-1 (everything for index 0).
 std::vector<Rect> RenderSyntheticFrame(uint64_t index, int32_t w, int32_t h,
                                        std::vector<uint8_t>& bgra);
+// The same into a caller-owned w * h * 4 buffer. `full` = render from scratch
+// (otherwise `bgra` must hold frame index - 1).
+std::vector<Rect> RenderSyntheticFrame(uint64_t index, int32_t w, int32_t h, uint8_t* bgra,
+                                       bool full);
 
 class SyntheticCapturer final : public ICapturer {
  public:
@@ -40,4 +44,4 @@ class SyntheticCapturer final : public ICapturer {
   std::string error_;
 };
 
-}  // namespace rdaccel::capture
+}  // namespace rdacore::capture

@@ -10,10 +10,10 @@
 #include <string>
 #include <vector>
 
-#include "rdaccel/geometry.h"
+#include "rdacore/geometry.h"
 #include "tile/tile_diff.h"
 
-namespace rdaccel::capture {
+namespace rdacore::capture {
 
 struct CapturedFrame {
   tile::ImageView bgra;      // valid only during the callback
@@ -44,4 +44,4 @@ class ICapturer {
 
 uint64_t MonotonicMicros();
 
-}  // namespace rdaccel::capture
+}  // namespace rdacore::capture

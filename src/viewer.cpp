@@ -1,9 +1,9 @@
-#include "rdaccel/viewer.h"
+#include "rdacore/viewer.h"
 
 #include "platform.h"
 #include "session/viewer_session.h"
 
-namespace rdaccel {
+namespace rdacore {
 
 struct Viewer::Impl {
   std::unique_ptr<session::ViewerSession> session;
@@ -60,4 +60,4 @@ std::string Viewer::decoder_name() const { return impl_->decoder_name; }
 
 ViewerStats Viewer::stats() const { return impl_->session->stats(); }
 
-}  // namespace rdaccel
+}  // namespace rdacore

@@ -6,7 +6,7 @@
 
 #include "proto/wire.h"
 
-namespace rdaccel::proto {
+namespace rdacore::proto {
 namespace {
 
 void PutRect(ByteWriter& w, const Rect& r) {
@@ -336,4 +336,4 @@ std::optional<Message> StreamParser::Next() {
   return msg;
 }
 
-}  // namespace rdaccel::proto
+}  // namespace rdacore::proto

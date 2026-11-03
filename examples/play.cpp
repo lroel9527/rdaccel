@@ -1,5 +1,5 @@
 // rdaccel_play: decode an .rdstream recording and report what came out, using
-// only the public API (rdaccel/rdaccel.h).
+// only the public API (rdaccel/rdaccel.hpp).
 //
 //   rdaccel_play IN.rdstream [--check-synthetic] [--dump=DIR] [--dump-every=60]
 //
@@ -8,7 +8,9 @@
 // correctly on the other. --dump writes decoded frames as .ppm files.
 // Exit code is non-zero if any frame failed to decode or PSNR is too low.
 
-#include <rdaccel/rdaccel.h>
+#include <rdaccel/rdaccel.hpp>
+
+#include <cstdlib>
 
 #include <algorithm>
 #include <cmath>
@@ -57,6 +59,9 @@ void WritePpm(const std::string& path, const rdaccel::ImageView& img) {
 
 int main(int argc, char** argv) {
   rdaccel::examples::Args args(argc, argv);
+  // Library messages (e.g. the decoder's colour format) with RDACCEL_DEBUG=1.
+  rdaccel::SetLogHandler([](rdaccel::LogLevel, const char* m) { std::fprintf(stderr, "rdaccel: %s\n", m); },
+                         std::getenv("RDACCEL_DEBUG") ? rdaccel::LogLevel::kInfo : rdaccel::LogLevel::kWarn);
   std::string in = args.str("in", args.positional());
   if (in.empty()) {
     std::fprintf(stderr, "usage: rdaccel_play FILE [--check-synthetic] [--dump=DIR]\n");

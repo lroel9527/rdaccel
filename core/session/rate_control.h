@@ -1,7 +1,7 @@
 #pragma once
 
 // Adaptive bitrate for the Host, driven by what the transport measures
-// (rdaccel::TransportStats):
+// (rdacore::TransportStats):
 //   * frames are skipped while the transport's send queue would take longer
 //     than `max_queue_ms` to drain, so latency stays bounded on a slow link
 //     (the next frame that is encoded carries every change since);
@@ -13,9 +13,9 @@
 
 #include <cstdint>
 
-#include "rdaccel/transport.h"
+#include "rdacore/transport.h"
 
-namespace rdaccel::session {
+namespace rdacore::session {
 
 class RateController {
  public:
@@ -44,4 +44,4 @@ class RateController {
   uint64_t last_queued_ = 0;
 };
 
-}  // namespace rdaccel::session
+}  // namespace rdacore::session

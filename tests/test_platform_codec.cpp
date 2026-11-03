@@ -10,7 +10,7 @@
 #include "capture/synthetic_capturer.h"
 #include "platform.h"
 
-using namespace rdaccel;
+using namespace rdacore;
 
 namespace {
 

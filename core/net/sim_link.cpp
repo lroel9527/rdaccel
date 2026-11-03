@@ -9,7 +9,7 @@
 #include "capture/capturer.h"
 #include "net/datagram.h"
 
-namespace rdaccel::net {
+namespace rdacore::net {
 namespace {
 
 // One direction of the link: a bottleneck that serializes datagrams at the
@@ -159,4 +159,4 @@ std::pair<std::unique_ptr<DatagramSocket>, std::unique_ptr<DatagramSocket>> Make
   return {std::make_unique<SimSocket>(s, 0), std::make_unique<SimSocket>(s, 1)};
 }
 
-}  // namespace rdaccel::net
+}  // namespace rdacore::net

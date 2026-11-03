@@ -1,7 +1,7 @@
 // rdaccel_netsim: a Host and a Viewer in one process, connected through a
 // simulated network path, in real time. Measures what a user would notice:
 // capture-to-display latency, frame rate, stalls and picture quality.
-// Uses only the public API (rdaccel/rdaccel.h).
+// Uses only the public API (rdaccel/rdaccel.hpp).
 //
 //   rdaccel_netsim [--background=SCREEN.ppm] [--scenario=video] [--seconds=10] [--fps=30]
 //                  [--bandwidth=4000000] [--delay=20] [--jitter=0] [--loss=0] [--queue-ms=200]
@@ -18,7 +18,7 @@
 // --cc=0 sends without congestion control; --abr=0 keeps the encoder at
 // --bitrate whatever the network does.
 
-#include <rdaccel/rdaccel.h>
+#include <rdaccel/rdaccel.hpp>
 
 #include <algorithm>
 #include <chrono>

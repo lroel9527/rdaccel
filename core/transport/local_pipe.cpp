@@ -2,7 +2,7 @@
 
 #include <vector>
 
-namespace rdaccel::transport {
+namespace rdacore::transport {
 
 struct LocalPipeEndpoint::Shared {
   struct Item {
@@ -77,4 +77,4 @@ void LocalPipeEndpoint::Run() {
   }
 }
 
-}  // namespace rdaccel::transport
+}  // namespace rdacore::transport

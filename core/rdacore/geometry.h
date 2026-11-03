@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace rdaccel {
+namespace rdacore {
 
 // A pixel rectangle in screen coordinates (origin top-left, physical pixels).
 struct Rect {
@@ -26,4 +26,4 @@ struct Rect {
 // 32x32 points, roughly one line of text.
 inline constexpr int32_t kTileSize = 64;
 
-}  // namespace rdaccel
+}  // namespace rdacore

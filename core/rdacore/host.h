@@ -9,13 +9,13 @@
 #include <span>
 #include <string>
 
-#include "rdaccel/cursor.h"
-#include "rdaccel/geometry.h"
-#include "rdaccel/image.h"
-#include "rdaccel/input.h"
-#include "rdaccel/transport.h"
+#include "rdacore/cursor.h"
+#include "rdacore/geometry.h"
+#include "rdacore/image.h"
+#include "rdacore/input.h"
+#include "rdacore/transport.h"
 
-namespace rdaccel {
+namespace rdacore {
 
 struct HostConfig {
   int32_t fps = 60;
@@ -182,4 +182,4 @@ class Host {
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace rdaccel
+}  // namespace rdacore

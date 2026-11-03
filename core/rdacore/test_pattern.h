@@ -7,9 +7,9 @@
 #include <cstdint>
 #include <vector>
 
-#include "rdaccel/geometry.h"
+#include "rdacore/geometry.h"
 
-namespace rdaccel {
+namespace rdacore {
 
 // Renders frame `index` into `bgra` (resized to w * h * 4, stride w * 4).
 // Returns the areas that differ from frame index - 1. If `bgra` is empty or
@@ -17,4 +17,4 @@ namespace rdaccel {
 std::vector<Rect> RenderTestPattern(uint64_t index, int32_t w, int32_t h,
                                     std::vector<uint8_t>& bgra);
 
-}  // namespace rdaccel
+}  // namespace rdacore

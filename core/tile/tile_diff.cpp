@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cstring>
 
-namespace rdaccel::tile {
+namespace rdacore::tile {
 namespace {
 
 // 64-bit FNV-1a over 8-byte words followed by a final avalanche (from
@@ -83,4 +83,4 @@ std::vector<TileChange> TileDiffer::Diff(const ImageView& img, std::span<const R
   return changes;
 }
 
-}  // namespace rdaccel::tile
+}  // namespace rdacore::tile

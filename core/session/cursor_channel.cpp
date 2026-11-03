@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
-namespace rdaccel::session {
+namespace rdacore::session {
 
 CursorImage ScaleCursorImage(const CursorImage& img, double factor) {
   if (img.width <= 0 || img.height <= 0 || !(factor > 0)) return img;
@@ -141,4 +141,4 @@ void CursorReceiver::OnPos(const proto::CursorPos& p, CursorState& out) {
   out.image = it == images_.end() ? nullptr : &it->second;
 }
 
-}  // namespace rdaccel::session
+}  // namespace rdacore::session

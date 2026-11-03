@@ -2,7 +2,7 @@
 
 #include "tile/video_region.h"
 
-using namespace rdaccel;
+using namespace rdacore;
 
 namespace {
 

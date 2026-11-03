@@ -8,7 +8,7 @@
 #include <span>
 #include <vector>
 
-namespace rdaccel::proto {
+namespace rdacore::proto {
 
 class ByteWriter {
  public:
@@ -64,4 +64,4 @@ class ByteReader {
   bool ok_ = true;
 };
 
-}  // namespace rdaccel::proto
+}  // namespace rdacore::proto

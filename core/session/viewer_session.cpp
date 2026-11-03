@@ -5,7 +5,7 @@
 
 #include "capture/capturer.h"
 
-namespace rdaccel::session {
+namespace rdacore::session {
 
 ViewerSession::ViewerSession(transport::ITransport* transport,
                              std::unique_ptr<codec::IHevcDecoder> decoder)
@@ -324,4 +324,4 @@ bool ViewerSession::DecodeRegion(const proto::VideoData& v, uint64_t frame_id,
       });
 }
 
-}  // namespace rdaccel::session
+}  // namespace rdacore::session

@@ -10,7 +10,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace rdaccel {
+namespace rdacore {
 
 struct CursorImage {
   int32_t width = 0;   // at most 256 x 256
@@ -40,4 +40,4 @@ struct CursorState {
 void DrawCursor(const CursorImage& c, int32_t x, int32_t y, uint8_t* bgra, int32_t width,
                 int32_t height, int32_t stride);
 
-}  // namespace rdaccel
+}  // namespace rdacore

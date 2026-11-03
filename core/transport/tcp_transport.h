@@ -16,7 +16,7 @@
 
 #include "transport/transport.h"
 
-namespace rdaccel::transport {
+namespace rdacore::transport {
 
 class TcpTransport final : public ITransport {
  public:
@@ -45,4 +45,4 @@ class TcpTransport final : public ITransport {
   std::thread reader_;
 };
 
-}  // namespace rdaccel::transport
+}  // namespace rdacore::transport
