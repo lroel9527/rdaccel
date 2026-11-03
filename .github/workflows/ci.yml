@@ -29,14 +29,31 @@ jobs:
           cmake --build build-minimal
           ./build-minimal/minimal
           ./build-minimal/minimal_c
+      - name: Build the C example with pkg-config against the installed static library
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          export PKG_CONFIG_PATH="$PWD/inst/lib/pkgconfig"
+          pkg-config --modversion rdaccel
+          cc -std=c99 -pedantic -fsanitize=address,undefined examples/minimal_c/main.c \
+            $(pkg-config --static --cflags --libs rdaccel) -o minimal_c_pc
+          ./minimal_c_pc
       - name: Shared library exports only the C ABI
         run: |
-          cmake -S . -B build-shared -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DRDACCEL_BUILD_TESTS=OFF
+          cmake -S . -B build-shared -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DRDACCEL_BUILD_TESTS=OFF -DRDACCEL_INSTALL_TOOLS=ON
           cmake --build build-shared -j4
           nm -D --defined-only build-shared/librdaccel.so | awk '{print $3}' | sort > exports.txt
           if grep -v '^rda_' exports.txt; then echo "unexpected exports"; exit 1; fi
           echo "$(wc -l < exports.txt) rda_* functions exported"
           ./build-shared/bin/rdaccel_minimal_c
+      - name: Release package (cpack) works on its own
+        run: |
+          (cd build-shared && cpack)
+          mkdir pkg && tar -xzf build-shared/rdaccel-*.tar.gz -C pkg --strip-components=1
+          ./pkg/bin/rdaccel_serve 2>&1 | grep -q -- --key
+          cc -std=c99 examples/minimal_c/main.c $(PKG_CONFIG_PATH="$PWD/pkg/lib/pkgconfig" pkg-config --cflags --libs rdaccel) \
+            -Wl,-rpath,"$PWD/pkg/lib" -o minimal_c_shared
+          ./minimal_c_shared
       - name: Record synthetic stream (x265)
         env:
           ASAN_OPTIONS: detect_leaks=0
@@ -94,11 +111,18 @@ jobs:
           cmake --build build-minimal
       - name: Shared library exports only the C ABI
         run: |
-          cmake -S . -B build-shared -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DRDACCEL_BUILD_TESTS=OFF
+          cmake -S . -B build-shared -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DRDACCEL_BUILD_TESTS=OFF -DRDACCEL_INSTALL_TOOLS=ON
           cmake --build build-shared -j4
           nm -gU build-shared/librdaccel.dylib | awk '{print $3}' | sort > exports.txt
           if grep -v '^_rda_' exports.txt; then echo "unexpected exports"; exit 1; fi
           echo "$(wc -l < exports.txt) rda_* functions exported"
+      - name: Release package (cpack) works on its own
+        run: |
+          (cd build-shared && cpack)
+          mkdir pkg && tar -xzf build-shared/rdaccel-*.tar.gz -C pkg --strip-components=1
+          ./pkg/bin/rdaccel_serve 2>&1 | grep -q -- --key
+          cmake -S examples/minimal -B build-minimal-pkg -DCMAKE_PREFIX_PATH="$PWD/pkg"
+          cmake --build build-minimal-pkg
       # Hosted macOS runners are VMs; the hardware HEVC encoder may be
       # missing there, so codec steps report but do not fail the build.
       - name: VideoToolbox codec + public API tests

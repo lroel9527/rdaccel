@@ -40,16 +40,23 @@ rdaccel::Host host(std::move(host_end));
 host.StartScreenCapture();  // 或者每帧调用 host.SubmitFrame(...)
 ```
 
-集成方式二选一：
+集成方式三选一：
 
 ```bash
-# 1) 安装后 find_package
+# 1) 安装后 find_package（或 pkg-config）
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 cmake --install build --prefix /opt/rdaccel
-# 你的 CMakeLists.txt：find_package(rdaccel 0.2 REQUIRED) + target_link_libraries(app PRIVATE rdaccel::rdaccel)
+# CMake：find_package(rdaccel 0.3 REQUIRED) + target_link_libraries(app PRIVATE rdaccel::rdaccel)
+# 其他构建系统：PKG_CONFIG_PATH=/opt/rdaccel/lib/pkgconfig pkg-config --cflags --libs rdaccel
+#   （静态库加 --static，会带上 FFmpeg/X11 等依赖）
 
 # 2) 作为子目录：add_subdirectory(rdaccel)，此时默认不编译测试和示例
+
+# 3) 用发布包：GitHub Releases 上的 rdaccel-<版本>-<系统>-<架构>.tar.gz，解开即用
+#    （共享库 + 头文件 + CMake/pkg-config 文件 + serve/view 等工具）
 ```
+
+版本变化见 [CHANGELOG](CHANGELOG.md)，发版步骤见 [docs/releasing.md](docs/releasing.md)。
 
 线程、生命周期、传输选择、出错处理和平台要求见 **[集成指南](docs/integration.md)**。跨两台机器试用：
 
@@ -252,10 +259,11 @@ src/               公开 API 的实现
 core/              内部：协议、分块比对、HEVC 码流格式、会话、传输（net/：UDP、可靠传输、网络模拟）、合成画面
 platform/          内部：mac/（ScreenCaptureKit、VideoToolbox、光标）、linux/（X11、XFixes 光标、FFmpeg）
 examples/          只用公开 API 的示例：serve、view、record、play、bench、netsim、loopback_mac、minimal（独立 CMake 工程）
-docs/              集成指南
+docs/              集成指南、Mac 复测、发版步骤
 tools/             开发辅助脚本（make_desktop.py：生成评测用的仿真桌面）
 tests/             GoogleTest（test_api.cpp 只用公开 API）
-cmake/             find_package 配置模板
+cmake/             find_package 配置模板、pkg-config 模板、共享库导出列表
+fuzz/              libFuzzer 目标（见 fuzz/README.md）
 ```
 
 ## 许可

@@ -1,0 +1,11 @@
+prefix=${pcfiledir}/@RDA_PC_TO_PREFIX@
+libdir=@RDA_PC_LIBDIR@
+includedir=@RDA_PC_INCLUDEDIR@
+
+Name: rdaccel
+Description: Low-latency remote desktop streaming library (HEVC)
+URL: https://github.com/lroel9527/rdaccel
+Version: @PROJECT_VERSION@
+Cflags: -I${includedir}
+Libs: -L${libdir} -lrdaccel
+Libs.private: @RDA_PC_LIBS_PRIVATE@

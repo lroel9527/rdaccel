@@ -38,3 +38,15 @@ set_target_properties(rdaccel_minimal_c PROPERTIES C_STANDARD 99 C_STANDARD_REQU
   LINKER_LANGUAGE CXX)
 target_compile_options(rdaccel_minimal_c PRIVATE -pedantic)
 target_link_libraries(rdaccel_minimal_c PRIVATE rdaccel::rdaccel)
+
+if(RDACCEL_INSTALL AND RDACCEL_INSTALL_TOOLS)
+  set(RDA_TOOLS rdaccel_serve rdaccel_view rdaccel_record rdaccel_play rdaccel_bench rdaccel_netsim)
+  # Find a shared librdaccel next to them: <prefix>/bin -> <prefix>/lib.
+  if(APPLE)
+    set(RDA_TOOL_RPATH "@loader_path/../${CMAKE_INSTALL_LIBDIR}")
+  else()
+    set(RDA_TOOL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
+  endif()
+  set_target_properties(${RDA_TOOLS} PROPERTIES INSTALL_RPATH "${RDA_TOOL_RPATH}")
+  install(TARGETS ${RDA_TOOLS} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()

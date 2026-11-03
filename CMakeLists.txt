@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(rdaccel VERSION 0.2.0 LANGUAGES C CXX)
+project(rdaccel VERSION 0.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,12 +10,23 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(RDACCEL_BUILD_TESTS "Build unit tests" ${PROJECT_IS_TOP_LEVEL})
 option(RDACCEL_BUILD_EXAMPLES "Build example programs" ${PROJECT_IS_TOP_LEVEL})
 option(RDACCEL_INSTALL "Generate install rules" ${PROJECT_IS_TOP_LEVEL})
+# Also install rdaccel_serve / rdaccel_view / rdaccel_record / rdaccel_play
+# (release packages do).
+option(RDACCEL_INSTALL_TOOLS "Install the example command-line tools" OFF)
 # libFuzzer targets for every parser of network data (clang only). Configure
 # with CMAKE_C_FLAGS/CMAKE_CXX_FLAGS="-fsanitize=fuzzer-no-link,address,undefined";
 # see fuzz/README.md.
 option(RDACCEL_BUILD_FUZZERS "Build libFuzzer targets" OFF)
 
 include(GNUInstallDirs)
+
+# One version: the header's RDA_VERSION_* must match project(VERSION).
+file(STRINGS include/rdaccel/rdaccel.h RDA_VERSION_LINES REGEX "^#define RDA_VERSION_(MAJOR|MINOR|PATCH) ")
+string(REGEX REPLACE ".*MAJOR ([0-9]+).*MINOR ([0-9]+).*PATCH ([0-9]+).*" "\\1.\\2.\\3"
+       RDA_HEADER_VERSION "${RDA_VERSION_LINES}")
+if(NOT RDA_HEADER_VERSION STREQUAL PROJECT_VERSION)
+  message(FATAL_ERROR "rdaccel.h says ${RDA_HEADER_VERSION}, CMakeLists.txt says ${PROJECT_VERSION}")
+endif()
 
 if(PROJECT_IS_TOP_LEVEL)
   set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)
@@ -91,6 +102,12 @@ else()
   message(FATAL_ERROR "rdaccel supports macOS and Linux only")
 endif()
 
+# Before 1.0 a minor version may change the ABI, so it is part of the soname.
+if(PROJECT_VERSION_MAJOR EQUAL 0)
+  set(RDACCEL_SOVERSION ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR})
+else()
+  set(RDACCEL_SOVERSION ${PROJECT_VERSION_MAJOR})
+endif()
 add_library(rdaccel ${RDACCEL_SOURCES})
 add_library(rdaccel::rdaccel ALIAS rdaccel)
 # Only the rda_* functions are exported from a shared build.
@@ -101,7 +118,7 @@ set_target_properties(rdaccel PROPERTIES
   VISIBILITY_INLINES_HIDDEN ON
   EXPORT_NAME rdaccel
   VERSION ${PROJECT_VERSION}
-  SOVERSION ${PROJECT_VERSION_MAJOR})
+  SOVERSION ${RDACCEL_SOVERSION})
 target_compile_features(rdaccel PUBLIC cxx_std_20)
 get_target_property(RDACCEL_TYPE rdaccel TYPE)
 if(RDACCEL_TYPE STREQUAL "SHARED_LIBRARY")
@@ -164,6 +181,11 @@ if(RDACCEL_INSTALL)
   install(EXPORT rdaccelTargets
     NAMESPACE rdaccel::
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/rdaccel)
+  if(RDACCEL_TYPE STREQUAL "STATIC_LIBRARY")
+    set(RDACCEL_STATIC ON)
+  else()
+    set(RDACCEL_STATIC OFF)
+  endif()
   configure_package_config_file(cmake/rdaccelConfig.cmake.in
     ${CMAKE_CURRENT_BINARY_DIR}/rdaccelConfig.cmake
     INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/rdaccel)
@@ -173,6 +195,51 @@ if(RDACCEL_INSTALL)
     ${CMAKE_CURRENT_BINARY_DIR}/rdaccelConfig.cmake
     ${CMAKE_CURRENT_BINARY_DIR}/rdaccelConfigVersion.cmake
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/rdaccel)
+
+  # pkg-config, relocatable (paths relative to the .pc file). A static
+  # library also needs its private dependencies: `pkg-config --static`.
+  file(RELATIVE_PATH RDA_PC_TO_PREFIX "${CMAKE_INSTALL_FULL_LIBDIR}/pkgconfig" "${CMAKE_INSTALL_PREFIX}")
+  string(REGEX REPLACE "/$" "" RDA_PC_TO_PREFIX "${RDA_PC_TO_PREFIX}")
+  if(IS_ABSOLUTE "${CMAKE_INSTALL_LIBDIR}")
+    set(RDA_PC_LIBDIR "${CMAKE_INSTALL_LIBDIR}")
+  else()
+    set(RDA_PC_LIBDIR "\${prefix}/${CMAKE_INSTALL_LIBDIR}")
+  endif()
+  if(IS_ABSOLUTE "${CMAKE_INSTALL_INCLUDEDIR}")
+    set(RDA_PC_INCLUDEDIR "${CMAKE_INSTALL_INCLUDEDIR}")
+  else()
+    set(RDA_PC_INCLUDEDIR "\${prefix}/${CMAKE_INSTALL_INCLUDEDIR}")
+  endif()
+  # Private dependencies are listed as plain flags (not Requires.private) so
+  # `pkg-config --static` does not expand FFmpeg's own static dependencies:
+  # rdaccel links the shared FFmpeg/X11 libraries, as the CMake package does.
+  if(APPLE)
+    set(RDA_PC_LIBS_PRIVATE "-lz -lc++ -framework Foundation -framework AppKit -framework CoreGraphics -framework CoreMedia -framework CoreVideo -framework VideoToolbox -framework ScreenCaptureKit -framework IOSurface")
+  else()
+    string(JOIN " " RDA_PC_LIBS_PRIVATE ${FFMPEG_LDFLAGS} ${X11_LDFLAGS} -lz -lstdc++ -lm -pthread)
+  endif()
+  configure_file(cmake/rdaccel.pc.in ${CMAKE_CURRENT_BINARY_DIR}/rdaccel.pc @ONLY)
+  install(FILES ${CMAKE_CURRENT_BINARY_DIR}/rdaccel.pc DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
+  install(FILES LICENSE NOTICE README.md CHANGELOG.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
+
+  # `cpack` (or `cmake --build build --target package`): a .tar.gz of the
+  # install tree, named rdaccel-<version>-<os>-<arch>.
+  string(TOLOWER "${CMAKE_SYSTEM_NAME}" RDA_OS)
+  set(RDA_ARCH "${CMAKE_SYSTEM_PROCESSOR}")
+  if(APPLE AND CMAKE_OSX_ARCHITECTURES)
+    string(REPLACE ";" "-" RDA_ARCH "${CMAKE_OSX_ARCHITECTURES}")
+  endif()
+  string(TOLOWER "${RDA_ARCH}" RDA_ARCH)
+  set(CPACK_GENERATOR TGZ)
+  set(CPACK_PACKAGE_NAME rdaccel)
+  set(CPACK_PACKAGE_VENDOR rdaccel)
+  set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Low-latency remote desktop streaming library (HEVC)")
+  set(CPACK_PACKAGE_FILE_NAME "rdaccel-${PROJECT_VERSION}-${RDA_OS}-${RDA_ARCH}")
+  set(CPACK_RESOURCE_FILE_LICENSE ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE)
+  set(CPACK_SOURCE_GENERATOR TGZ)
+  set(CPACK_SOURCE_PACKAGE_FILE_NAME "rdaccel-${PROJECT_VERSION}")
+  set(CPACK_SOURCE_IGNORE_FILES "/[.]git/" "/build[^/]*/" "/inst[^/]*/" "/corpus/" "/crashes/")
+  include(CPack)
 endif()
 
 # ---------------------------------------------------------------------------

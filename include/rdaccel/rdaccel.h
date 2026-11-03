@@ -41,7 +41,7 @@ extern "C" {
 /* ---- version ------------------------------------------------------------ */
 
 #define RDA_VERSION_MAJOR 0
-#define RDA_VERSION_MINOR 2
+#define RDA_VERSION_MINOR 3
 #define RDA_VERSION_PATCH 0
 #define RDA_MAKE_VERSION(major, minor, patch) \
   (((uint32_t)(major) << 16) | ((uint32_t)(minor) << 8) | (uint32_t)(patch))
