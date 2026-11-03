@@ -118,7 +118,7 @@ struct HostStats {
   uint64_t keyframes = 0;
   uint64_t keyframe_requests = 0;  // from the viewer (it could not decode)
   uint64_t encode_errors = 0;
-  uint64_t encoder_drops = 0;  // pictures the encoder chose not to produce
+  uint64_t encoder_drops = 0;  // pictures an encoder (full screen or area) chose not to produce
   uint64_t bytes_sent = 0;      // everything, cursor channel included
   uint64_t video_bytes = 0;     // HEVC payload only
   uint64_t lossless_bytes = 0;  // lossless payload only

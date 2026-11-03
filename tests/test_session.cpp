@@ -393,6 +393,55 @@ TEST(Session, BusyAreaGetsItsOwnStreamAndASharpPictureWhenItStops) {
   EXPECT_EQ(got.back(), (std::vector<Rect>{{64, 64, 192, 64}, {64, 128, 192, 64}}));
 }
 
+TEST(Session, ADroppedAreaPictureDoesNotForceAnAreaKeyframe) {
+  auto [host_end, viewer_end] = transport::MakeLocalPipe();
+  constexpr int W = 320, H = 256;
+  session::HostOptions opts;
+  opts.refine_frames = 0;
+  FakeEncoder* area = nullptr;
+  opts.region_encoder_factory = [&](const codec::EncoderConfig&, std::string*) {
+    auto e = std::make_unique<FakeEncoder>();
+    area = e.get();
+    return e;
+  };
+  opts.region_params.window = 4;
+  opts.region_params.min_busy = 2;
+  opts.region_params.confirm = 1;
+  opts.region_params.linger = 3;
+  session::HostSession host(host_end.get(), std::make_unique<FakeEncoder>(), W, H, opts);
+  std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 50);
+  capture::CapturedFrame f{{px.data(), W, H, W * 4}, {}, 0};
+  ASSERT_TRUE(host.OnFrame(f));
+  uint32_t seed = 1;
+  auto play = [&] {
+    for (int y = 64; y < 192; ++y) {
+      for (int x = 64; x < 256; ++x) {
+        seed = seed * 1664525u + 1013904223u;
+        std::memcpy(&px[(static_cast<size_t>(y) * W + x) * 4], &seed, 3);
+      }
+    }
+  };
+  for (int i = 0; i < 10 && !area; ++i) {
+    play();
+    ASSERT_TRUE(host.OnFrame(f));
+  }
+  ASSERT_NE(area, nullptr);
+  play();
+  ASSERT_TRUE(host.OnFrame(f));
+  area->drop_next = true;  // VideoToolbox may drop at low rates
+  play();
+  ASSERT_TRUE(host.OnFrame(f));
+  play();
+  ASSERT_TRUE(host.OnFrame(f));
+  // Only the area's first picture is a keyframe: a keyframe after each drop
+  // made VideoToolbox drop more.
+  ASSERT_GE(area->keyframe_requests.size(), 3u);
+  EXPECT_TRUE(area->keyframe_requests.front());
+  for (size_t i = 1; i < area->keyframe_requests.size(); ++i) EXPECT_FALSE(area->keyframe_requests[i]) << i;
+  EXPECT_EQ(host.stats().encoder_drops, 1u);
+  PipeStopper stop{host_end, viewer_end};
+}
+
 TEST(Session, ViewerAsksForAKeyframeAfterADecodeError) {
   auto [host_end, viewer_end] = transport::MakeLocalPipe();
   constexpr int W = 128, H = 64;

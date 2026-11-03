@@ -808,7 +808,12 @@ bool HostSession::EncodeRegions(const capture::CapturedFrame& frame, const std::
     us += capture::MonotonicMicros() - t0;
     if (!au) {
       if (!re.enc->last_error().empty()) return false;
-      re.need_key = true;  // dropped: the area restarts with the next frame
+      // Dropped by the encoder (VideoToolbox does at low rates). Its
+      // references are intact and every picture codes the whole area, so the
+      // next one catches up; a dropped keyframe is asked for again. (Asking
+      // for a keyframe after every drop made the encoder drop more.)
+      std::lock_guard<std::mutex> lock(mu_);
+      ++stats_.encoder_drops;
       continue;
     }
     re.need_key = false;

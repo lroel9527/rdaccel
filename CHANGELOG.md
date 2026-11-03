@@ -5,6 +5,7 @@
 
 ## 未发布
 
+- 区域编码器丢帧后不再强制关键帧（与全屏编码器一致），丢帧也计入 encoder_drops；netsim 的“首帧”改为从会话开始计时，--verbose 增加 area pictures 列。
 - 传输：路径排队时仍保留每 8 轮一次的 1.25 倍探测，避免线程晚醒抬高 RTT 时估计只降不升（macOS CI 上 4→1 Mbps 后估计跌到 253 kbps）。
 - **选择显示器**：新增 `rda_list_displays()` / `rdaccel::ListDisplays()` 和 `rda_host_config.display_index`（追加在结构体末尾，旧调用方不受影响）。
   Linux 用 RandR 1.5 的 monitor 列表（没有时整个 X screen 算一块），macOS 用 ScreenCaptureKit 的 SCDisplay；

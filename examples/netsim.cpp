@@ -107,7 +107,9 @@ int main(int argc, char** argv) {
       auto it = index_of.find(info.capture_time_us);
       if (it == index_of.end()) return;
       index = it->second;
-      if (first_frame_ms < 0) first_frame_ms = (now - info.capture_time_us) / 1000.0;
+      // From the first capture, like the start line (not this frame's own
+      // latency: the first frames may never be shown).
+      if (first_frame_ms < 0) first_frame_ms = (now - start_us) / 1000.0;
       if (index >= warmup_frames) {
         latency_ms.push_back((now - info.capture_time_us) / 1000.0);
         shown_at.push_back(now);
@@ -188,12 +190,13 @@ int main(int argc, char** argv) {
     const auto st = host.stats();
     if (args.has("verbose") && i % static_cast<uint64_t>(fps) == 0) {
       std::printf("t=%3.0fs target %5.0f kbps, estimate %5.0f kbps, rtt %3u ms, sent %7.0f kB, skipped %llu, "
-                  "video frames %llu, encoder drops %llu\n",
+                  "video frames %llu, encoder drops %llu, area pictures %llu\n",
                   static_cast<double>(i) / fps, st.target_bitrate_bps / 1000.0,
                   st.bandwidth_estimate_bps / 1000.0, st.rtt_us / 1000, st.bytes_sent / 1000.0,
                   static_cast<unsigned long long>(st.frames_dropped_congestion),
                   static_cast<unsigned long long>(st.video_frames),
-                  static_cast<unsigned long long>(st.encoder_drops));
+                  static_cast<unsigned long long>(st.encoder_drops),
+                  static_cast<unsigned long long>(st.region_pictures));
     }
     if (i == warmup_frames) {
       warm_bytes = st.bytes_sent;
