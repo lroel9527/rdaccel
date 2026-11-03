@@ -28,7 +28,9 @@ struct HostConfig {
   // uses VideoToolbox; Linux accepts "hevc_nvenc" or "libx265".
   std::string encoder;
 
-  // Only used by StartScreenCapture(). 0 = native resolution.
+  // Only used by StartScreenCapture(). 0 = native resolution. Otherwise the
+  // screen is captured scaled to this size (even numbers), and the cursor
+  // image is scaled to match.
   int32_t capture_width = 0;
   int32_t capture_height = 0;
   // Draw the cursor into the captured picture. Off by default: the cursor

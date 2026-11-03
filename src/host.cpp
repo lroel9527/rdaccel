@@ -39,13 +39,26 @@ struct Host::Impl {
     const auto period = std::chrono::microseconds(1'000'000 / hz);
     auto next = std::chrono::steady_clock::now();
     capture::CursorSample s;
+    CursorImage original;      // as the source reported it
+    double sent_factor = 0;    // scale of the image last sent (0 = none sent)
     while (cursor_running) {
       next += period;
       std::this_thread::sleep_until(next);
       if (!src->Poll(s)) continue;
-      if (s.image_changed) cursor->SetImage(s.image);
       const int32_t w = frame_w, h = frame_h;
+      if (s.image_changed) {
+        original = std::move(s.image);
+        sent_factor = 0;
+      }
       if (w <= 0 || s.screen_width <= 0 || s.screen_height <= 0) continue;  // no frame yet
+      // The image follows the captured frame's scale (a 4K or Retina screen
+      // captured at 1080p gets a cursor of the matching, smaller size).
+      const double factor = w / (s.screen_width * std::max(s.image_scale, 0.01));
+      if (original.width > 0 && std::abs(factor - sent_factor) > 1e-3) {
+        cursor->SetImage(std::abs(factor - 1) < 0.02 ? original
+                                                     : session::ScaleCursorImage(original, factor));
+        sent_factor = factor;
+      }
       const auto x = static_cast<int32_t>(std::lround(s.x * w / s.screen_width));
       const auto y = static_cast<int32_t>(std::lround(s.y * h / s.screen_height));
       cursor->SetPosition(x, y, s.visible, capture::MonotonicMicros());

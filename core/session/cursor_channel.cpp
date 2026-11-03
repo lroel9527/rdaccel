@@ -1,8 +1,42 @@
 #include "session/cursor_channel.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace rdaccel::session {
+
+CursorImage ScaleCursorImage(const CursorImage& img, double factor) {
+  if (img.width <= 0 || img.height <= 0 || !(factor > 0)) return img;
+  CursorImage out;
+  out.width = std::clamp(static_cast<int32_t>(std::lround(img.width * factor)), 1, 256);
+  out.height = std::clamp(static_cast<int32_t>(std::lround(img.height * factor)), 1, 256);
+  if (out.width == img.width && out.height == img.height) return img;
+  const double sx = static_cast<double>(img.width) / out.width;
+  const double sy = static_cast<double>(img.height) / out.height;
+  out.hotspot_x = std::clamp(static_cast<int32_t>(img.hotspot_x / sx), 0, out.width - 1);
+  out.hotspot_y = std::clamp(static_cast<int32_t>(img.hotspot_y / sy), 0, out.height - 1);
+  out.bgra.resize(static_cast<size_t>(out.width) * out.height * 4);
+  for (int32_t y = 0; y < out.height; ++y) {
+    // Source rows [y0, y1) cover this row (at least one).
+    const auto y0 = static_cast<int32_t>(y * sy);
+    const int32_t y1 = std::max(y0 + 1, std::min(img.height, static_cast<int32_t>((y + 1) * sy)));
+    for (int32_t x = 0; x < out.width; ++x) {
+      const auto x0 = static_cast<int32_t>(x * sx);
+      const int32_t x1 = std::max(x0 + 1, std::min(img.width, static_cast<int32_t>((x + 1) * sx)));
+      uint32_t sum[4] = {0, 0, 0, 0};
+      for (int32_t v = y0; v < y1; ++v) {
+        const uint8_t* p = &img.bgra[(static_cast<size_t>(v) * img.width + x0) * 4];
+        for (int32_t u = x0; u < x1; ++u, p += 4) {
+          for (int k = 0; k < 4; ++k) sum[k] += p[k];
+        }
+      }
+      const auto n = static_cast<uint32_t>((y1 - y0) * (x1 - x0));
+      uint8_t* d = &out.bgra[(static_cast<size_t>(y) * out.width + x) * 4];
+      for (int k = 0; k < 4; ++k) d[k] = static_cast<uint8_t>((sum[k] + n / 2) / n);
+    }
+  }
+  return out;
+}
 
 uint64_t CursorImageId(const CursorImage& img) {
   // FNV-1a over the geometry and the pixels; cursors are small.

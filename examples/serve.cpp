@@ -6,7 +6,8 @@
 //                 [--size=WxH] [--fps=60] [--bitrate=8000000]
 //
 // UDP (the default, port 7300) has congestion control and adaptive bitrate;
-// TCP sends at the configured bitrate. --seconds=0 runs until the viewer
+// TCP sends at the configured bitrate. --size is the test pattern's size, or
+// with --source=screen the size the screen is captured at (default: native). --seconds=0 runs until the viewer
 // disconnects or the process is killed. Uses only the public API.
 
 #include <rdaccel/rdaccel.h>
@@ -63,6 +64,11 @@ int main(int argc, char** argv) {
   rdaccel::HostConfig cfg;
   cfg.fps = fps;
   cfg.bitrate_bps = args.num("bitrate", 8'000'000);
+  if (source == "screen" && args.has("size")) {
+    // Capture scaled to this size (the cursor image is scaled to match).
+    cfg.capture_width = w;
+    cfg.capture_height = h;
+  }
   rdaccel::Host host(std::move(transport), cfg);
   std::atomic<bool> failed{false};
   host.SetErrorHandler([&](const std::string& e) {
