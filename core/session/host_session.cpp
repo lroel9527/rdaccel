@@ -96,6 +96,20 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     quality_.assign(n_tiles, kRough);
     tile_slot_.assign(n_tiles, -1);
     tile_slot_hash_.assign(n_tiles, 0);
+    pending_lossless_.assign(n_tiles, 0);
+    pending_lossless_count_ = 0;
+    unflattened_.assign(n_tiles, 0);
+  }
+  // A keyframe starts the progressive sequence over.
+  const bool progressive_key = key && options_.progressive && options_.lossless;
+  if (key) {
+    std::fill(pending_lossless_.begin(), pending_lossless_.end(), 0);
+    pending_lossless_count_ = 0;
+    pending_cursor_ = 0;
+    std::fill(unflattened_.begin(), unflattened_.end(), 0);
+    progressive_active_ = progressive_key;
+    sharpen_video_ = false;
+    progressive_last_us_ = frame.capture_time_us;
   }
   ++frame_no_;
 
@@ -153,6 +167,45 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       }
     }
   }
+  // Progressive keyframe: the next lossless tiles, as many as fit about
+  // half of this frame's share of the bitrate.
+  size_t progressive_sent = 0;
+  std::vector<uint8_t> progressive_now(progressive_active_ ? n_tiles : 0, 0);
+  if (!key && pending_lossless_count_ > 0) {
+    std::vector<uint8_t> listed(n_tiles, 0);
+    for (const auto& c : changes) listed[static_cast<size_t>(c.row) * differ_.cols() + c.col] = 1;
+    for (size_t idx : refresh) listed[idx] = 1;
+    // By time rather than per frame: frames the transport made us skip
+    // leave their share to the next one.
+    const double frame_us = 1e6 / std::max(1, options_.fps);
+    const double dt_us = std::clamp(
+        static_cast<double>(frame.capture_time_us - std::min(frame.capture_time_us, progressive_last_us_)),
+        frame_us, 6 * frame_us);
+    const double budget =
+        static_cast<double>(options_.bitrate_bps) / 8.0 * dt_us / 1e6 * kProgressiveShare;
+    const auto n = static_cast<size_t>(
+        std::clamp(budget / std::max(lossless_bytes_per_tile_, 64.0), 1.0,
+                   static_cast<double>(kMaxProgressivePerFrame)));
+    const size_t start = pending_cursor_;
+    for (size_t k = 0; k < n_tiles && progressive_sent < n && pending_lossless_count_ > 0; ++k) {
+      const size_t idx = (start + k) % n_tiles;
+      if (!pending_lossless_[idx]) continue;
+      if (listed[idx]) continue;  // changed anyway: coded normally below
+      const auto col = static_cast<int32_t>(idx % differ_.cols());
+      const auto row = static_cast<int32_t>(idx / differ_.cols());
+      if (regions_.RegionOf(col, row) >= 0) {
+        // Became video: it will never be lossless.
+        pending_lossless_[idx] = 0;
+        --pending_lossless_count_;
+        continue;
+      }
+      refresh.push_back(idx);
+      progressive_now[idx] = 1;
+      ++progressive_sent;
+      pending_cursor_ = idx + 1;
+    }
+    if (progressive_sent > 0) progressive_last_us_ = frame.capture_time_us;
+  }
   // Tiles of areas that just closed get one more, sharp, picture.
   if (!pending_sharpen_.empty()) {
     std::vector<uint8_t> listed(n_tiles, 0);
@@ -168,7 +221,8 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     }
     pending_sharpen_.clear();
   }
-  if (changes.empty() && !key && refining_ == 0 && refresh.empty() && !regions_to_send) {
+  if (changes.empty() && !key && refining_ == 0 && refresh.empty() && !regions_to_send &&
+      !sharpen_video_) {
     if (use_regions) FinishRegions(busy, region_changed);
     std::lock_guard<std::mutex> lock(mu_);
     ++stats_.frames_skipped;
@@ -288,7 +342,27 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     }
     codec::PaletteTile t;
     if (options_.lossless && codec::ExtractPalette(frame.bgra, r, max_colors, t)) {
-      FillRect(r, t.colors[0], enc_input_.data(), enc_stride);
+      if (progressive_key && t.colors.size() > 1) {
+        // Video now, lossless later (only whole tiles are keyframe changes).
+        // Plain tiles cost next to nothing either way and go right away.
+        const size_t idx = tile_index(c);
+        if (!pending_lossless_[idx]) {
+          pending_lossless_[idx] = 1;
+          ++pending_lossless_count_;
+        }
+        CopyRectInto(frame.bgra, r, enc_input_.data(), enc_stride);
+        tile::TileChange part = c;
+        part.rect = r;
+        video_tiles.push_back(part);
+        return true;
+      }
+      if (!progressive_now.empty() && progressive_now[tile_index(c)]) {
+        // Flattening it now would make the encoder code the change, and at a
+        // low bitrate that costs the tiles still refining around it.
+        unflattened_[tile_index(c)] = 1;
+      } else {
+        FillRect(r, t.colors[0], enc_input_.data(), enc_stride);
+      }
       lossless_tiles.push_back(std::move(t));
       return false;
     }
@@ -393,6 +467,11 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     // Whatever happens below, the viewer must not take this tile from a
     // refining video picture any more (lossless tiles are flattened in it).
     set_refine(c, 0);
+    if (!key && pending_lossless_[idx]) {
+      // Coded now (changed, or its progressive turn): nothing owed any more.
+      pending_lossless_[idx] = 0;
+      --pending_lossless_count_;
+    }
     if (i < n_changed && !moved.empty() && moved[i]) {
       ++moved_tiles;
       uint8_t q = moved_in_quality(c.rect);
@@ -456,17 +535,74 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       }
     }
   }
+  // A progressive keyframe's picture is left as it is until the text is
+  // done: refining it at the bitrate left over made it worse, not better,
+  // and the intra picture at the end replaces it anyway.
+  if (progressive_key) refine_after.clear();
   for (size_t i : refine_after) {
     set_refine(changes[i], refine_frames);
     // With no refinement planned, a refresh would not do better either.
     if (refine_frames == 0) quality_[tile_index(changes[i])] = kRefined;
+  }
+  // The end of a progressive keyframe: the text has gone out losslessly, so
+  // the encoder's picture is now mostly flat and a fresh intra picture of it
+  // spends its bits on what is left (photos, gradients), which the first
+  // picture had to share with all the text. Only tiles where the encoder's
+  // input still matches the screen (not moved ones) are taken from it.
+  const bool sharpen = sharpen_video_ && !key;
+  sharpen_video_ = false;
+  if (sharpen) {
+    // Flatten the text the progressive tiles left in the encoder's input
+    // (where it is still there), so the intra picture does not spend on it.
+    for (size_t idx = 0; idx < n_tiles; ++idx) {
+      if (!unflattened_[idx]) continue;
+      unflattened_[idx] = 0;
+      if (quality_[idx] != kExact) continue;
+      const auto col = static_cast<int32_t>(idx % differ_.cols());
+      const auto row = static_cast<int32_t>(idx / differ_.cols());
+      Rect rect{col * kTileSize, row * kTileSize, kTileSize, kTileSize};
+      rect.w = std::min(rect.w, width_ - rect.x);
+      rect.h = std::min(rect.h, height_ - rect.y);
+      bool same = true;
+      for (int32_t y = 0; y < rect.h && same; ++y) {
+        const size_t off = static_cast<size_t>(rect.y + y) * enc_stride + rect.x * 4;
+        same = std::memcmp(enc_input_.data() + off, prev_.data() + off,
+                           static_cast<size_t>(rect.w) * 4) == 0;
+      }
+      if (!same) continue;  // recoded since
+      uint32_t px;
+      std::memcpy(&px, enc_input_.data() + static_cast<size_t>(rect.y) * enc_stride + rect.x * 4, 4);
+      FillRect(rect, px & 0x00FFFFFF, enc_input_.data(), enc_stride);
+    }
+    std::vector<uint8_t> listed(n_tiles, 0);
+    for (const auto& t : region_tiles) listed[tile_index(t)] = 1;
+    for (int32_t row = 0; row < differ_.rows(); ++row) {
+      for (int32_t col = 0; col < differ_.cols(); ++col) {
+        const size_t idx = static_cast<size_t>(row) * differ_.cols() + col;
+        if (listed[idx] || quality_[idx] == kExact || regions_.RegionOf(col, row) >= 0) continue;
+        Rect rect{col * kTileSize, row * kTileSize, kTileSize, kTileSize};
+        rect.w = std::min(rect.w, width_ - rect.x);
+        rect.h = std::min(rect.h, height_ - rect.y);
+        bool same = true;
+        for (int32_t y = 0; y < rect.h && same; ++y) {
+          const size_t off = static_cast<size_t>(rect.y + y) * enc_stride + rect.x * 4;
+          same = std::memcmp(enc_input_.data() + off, prev_.data() + off,
+                             static_cast<size_t>(rect.w) * 4) == 0;
+        }
+        if (!same) continue;
+        tile::TileChange t{col, row, 0, 0, rect};
+        region_tiles.push_back(t);
+        set_refine(t, refine_frames);
+        quality_[idx] = refine_frames == 0 ? kRefined : kRough;
+      }
+    }
   }
   const uint64_t t1 = capture::MonotonicMicros();
 
   std::optional<codec::HevcAccessUnit> au;
   if (key || !region_tiles.empty()) {
     au = encoder_->Encode({enc_input_.data(), width_, height_, enc_stride}, frame.capture_time_us,
-                          key);
+                          key || sharpen);
     if (!au) {
       // The encoder dropped or failed this frame; make sure the next one fully
       // refreshes the viewer.
@@ -521,6 +657,16 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   ops.tiles = std::move(lossless_tiles);
   std::vector<uint8_t> lossless_data;
   if (!ops.empty()) lossless_data = lossless_.Encode(ops, key);
+  if (progressive_active_ && !key && pending_lossless_count_ == 0) {
+    progressive_active_ = false;
+    // Next frame, if any tile is left at the first picture's quality.
+    sharpen_video_ = std::find_if(quality_.begin(), quality_.end(),
+                                  [](uint8_t q) { return q != kExact; }) != quality_.end();
+  }
+  if (progressive_sent > 0 && n_lossless > 0) {
+    lossless_bytes_per_tile_ = 0.7 * lossless_bytes_per_tile_ +
+                               0.3 * static_cast<double>(lossless_data.size()) / static_cast<double>(n_lossless);
+  }
   const uint64_t t3 = capture::MonotonicMicros();
 
   std::vector<uint8_t> bytes;
@@ -562,7 +708,8 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   stats_.lossless_tiles += n_lossless;
   stats_.moved_tiles += moved_tiles;
   stats_.cached_tiles += n_loads;
-  stats_.refreshed_tiles += refresh.size();
+  stats_.refreshed_tiles += refresh.size() - progressive_sent;
+  stats_.progressive_tiles += progressive_sent;
   stats_.lossless_us_total += (t1 - t0) + (t3 - t2);
   return true;
 }

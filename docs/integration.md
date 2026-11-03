@@ -84,6 +84,7 @@ viewer->SendInput({rdaccel::InputKind::kMouseMove, 100, 200});
 | `capture_width` / `capture_height` | 0（原生） | 4K / Retina 屏想降分辨率传输时 |
 | `cursor_channel` | 开 | 一般不关；关掉且 `capture_cursor` 也关时接收端看不到光标 |
 | `video_regions` | 开 | 对比测试时关 |
+| `progressive` | 开 | 首帧先发视频版、随后补成无损。要求第一张画面就逐像素准确（截图、自动化测试）时关 |
 | `encoder` | 自动 | Linux 上强制 `libx265` 或 `hevc_nvenc` |
 
 每个模块的开关和评测数据见 [README](../README.md)。
