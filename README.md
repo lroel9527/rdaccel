@@ -58,6 +58,8 @@ cmake --install build --prefix /opt/rdaccel
 ./build/bin/rdaccel_view 10.0.0.2 --udp=7300 --seconds=30 --dump=last.ppm   # 控制端：解码并每秒打印统计
 ```
 
+0.2 还加了连接管理：握手和版本协商、心跳和断线检测（`on_state`）、主动关闭时通知对方、认证钩子、双向应用消息通道（剪贴板文本或你自己的消息，见[集成指南 1.1](docs/integration.md)），键盘事件统一用 USB HID 键码。
+
 0.2 把公开接口换成了 C ABI + C++ 包装层（库形态的决定见[设计文档](https://claude.ai/artifact/71hkqA9ywj4VGktXPvpPXH)）。C++ 用法和 0.1 基本一样，只是头文件换成 `rdaccel.hpp`。1.0 之前次版本之间还可能不兼容，1.0 之后同一主版本内只加不改。
 
 ## 当前进度：M2 视频区域、网络传输、光标通道

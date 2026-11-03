@@ -34,8 +34,10 @@ class ViewerSession {
   ViewerSession(transport::ITransport* transport, std::unique_ptr<codec::IHevcDecoder> decoder);
 
   // Starts receiving from `transport`. Lets callers install handlers first so
-  // the first frames are not lost.
-  void Attach(transport::ITransport* transport);
+  // the first frames are not lost. With `own_receiver` false the session only
+  // sends on it, and the owner passes received bytes to OnReceive().
+  void Attach(transport::ITransport* transport, bool own_receiver = true);
+  void OnReceive(transport::Channel ch, std::span<const uint8_t> bytes);
 
   void SetHelloHandler(HelloFn fn);
   void SetFrameHandler(FrameFn fn);
@@ -55,7 +57,6 @@ class ViewerSession {
   void FeedVideoBytes(std::span<const uint8_t> bytes);
 
  private:
-  void OnReceive(transport::Channel ch, std::span<const uint8_t> bytes);
   void Handle(proto::Message&& m);
   void EnsureScreen(int32_t w, int32_t h);
 

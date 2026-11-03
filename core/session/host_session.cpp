@@ -35,8 +35,14 @@ HostSession::HostSession(transport::ITransport* transport,
       enc_input_(static_cast<size_t>(width) * height * 4, 0),
       prev_(enc_input_.size(), 0),
       regions_(options.region_params) {
-  transport_->SetReceiver(
-      [this](transport::Channel ch, std::span<const uint8_t> bytes) { OnReceive(ch, bytes); });
+  if (options_.own_receiver) {
+    transport_->SetReceiver(
+        [this](transport::Channel ch, std::span<const uint8_t> bytes) { OnReceive(ch, bytes); });
+  }
+  SendHello();
+}
+
+void HostSession::SendHello() {
   Send(transport::Channel::kControl,
        proto::Hello{proto::kProtocolVersion, static_cast<uint32_t>(width_),
                     static_cast<uint32_t>(height_), proto::VideoCodec::kHevc});

@@ -13,6 +13,7 @@
 #include "platform.h"
 #include "session/cursor_channel.h"
 #include "session/host_session.h"
+#include "session/link.h"
 #include "session/rate_control.h"
 
 namespace rdacore {
@@ -25,8 +26,11 @@ struct Host::Impl {
   std::unique_ptr<session::HostSession> session;
   std::atomic<session::HostSession*> session_ptr{nullptr};
   std::unique_ptr<capture::ICapturer> capturer;
-  // Declared after `session`, so it is destroyed first: its destructor stops
-  // the receive thread that calls into the session.
+  // Handshake, keepalive, messages. Calls into the session; destroyed after
+  // the transport (whose receive thread calls it).
+  std::unique_ptr<session::Link> link;
+  // Declared after `session` and `link`, so it is destroyed first: its
+  // destructor stops the receive thread that calls into them.
   std::unique_ptr<Transport> transport;
   // After `transport`, so it goes first: it sends on it.
   std::unique_ptr<session::CursorSender> cursor;
@@ -100,6 +104,7 @@ struct Host::Impl {
       } else {
         continue;
       }
+      if (link->disconnected()) continue;  // nobody to send to
       capture::CapturedFrame f;
       f.bgra = {px.data(), s->width(), s->height(), s->width() * 4};
       f.capture_time_us = now;
@@ -126,6 +131,27 @@ struct Host::Impl {
   std::string encoder_name;
   InputHandler on_input;
   ErrorHandler on_error;
+  StateHandler on_state;
+  MessageHandler on_message;
+  uint64_t keyframe_requests = 0;
+
+  // From the link (transport thread): input and keyframe requests.
+  void OnPeerMessage(const proto::Message& m) {
+    if (auto* in = std::get_if<proto::InputEvent>(&m)) {
+      InputHandler fn;
+      {
+        std::lock_guard<std::mutex> l(mu);
+        fn = on_input;
+      }
+      if (fn) fn(*in);
+    } else if (std::holds_alternative<proto::KeyframeRequest>(m)) {
+      {
+        std::lock_guard<std::mutex> l(mu);
+        ++keyframe_requests;
+      }
+      if (auto* s = session_ptr.load()) s->RequestKeyframe();
+    }
+  }
 
   void ReportError(const std::string& msg) {
     ErrorHandler fn;
@@ -138,6 +164,10 @@ struct Host::Impl {
 
   bool OnFrame(const capture::CapturedFrame& f, std::string* error) {
     std::lock_guard<std::mutex> lock(submit_mu);
+    if (link->disconnected()) {
+      if (error) *error = std::string("disconnected: ") + session::LinkErrorText(link->error());
+      return false;
+    }
     return OnFrameLocked(f, error);
   }
 
@@ -185,16 +215,9 @@ struct Host::Impl {
       opts.bitrate_bps = config.bitrate_bps;
       opts.region_min_qp = config.video_region_min_qp;
       opts.region_bitrate_bps = config.video_region_bitrate_bps;
+      opts.own_receiver = false;  // the link receives and passes on
       session = std::make_unique<session::HostSession>(transport.get(), std::move(enc), width,
                                                        height, opts);
-      session->SetInputHandler([this](const InputEvent& ev) {
-        InputHandler fn;
-        {
-          std::lock_guard<std::mutex> l(mu);
-          fn = on_input;
-        }
-        if (fn) fn(ev);
-      });
       session_ptr = session.get();
     } else if (f.bgra.width != width || f.bgra.height != height) {
       const std::string err = "frame size changed from " + std::to_string(width) + "x" +
@@ -252,8 +275,44 @@ struct Host::Impl {
 Host::Host(std::unique_ptr<Transport> transport, HostConfig config)
     : impl_(std::make_unique<Impl>()) {
   impl_->config = std::move(config);
+  impl_->on_state = std::move(impl_->config.on_state);
+  impl_->on_message = std::move(impl_->config.on_message);
   impl_->transport = std::move(transport);
   impl_->cursor = std::make_unique<session::CursorSender>(impl_->transport.get());
+  Impl* impl = impl_.get();
+  session::Link::Handlers h;
+  h.on_state = [impl](ConnectionState st, ConnectionError e) {
+    // A viewer that arrives mid-stream needs the Hello and a full picture.
+    if (st == ConnectionState::kConnected) {
+      if (auto* s = impl->session_ptr.load()) {
+        s->SendHello();
+        s->RequestKeyframe();
+      }
+    }
+    StateHandler fn;
+    {
+      std::lock_guard<std::mutex> l(impl->mu);
+      fn = impl->on_state;
+    }
+    if (fn) fn(st, e);
+  };
+  h.on_message = [impl](uint32_t type, std::span<const uint8_t> payload) {
+    MessageHandler fn;
+    {
+      std::lock_guard<std::mutex> l(impl->mu);
+      fn = impl->on_message;
+    }
+    if (fn) fn(type, payload);
+  };
+  h.on_other = [impl](const proto::Message& m) { impl->OnPeerMessage(m); };
+  h.on_auth = impl_->config.auth;
+  session::LinkOptions lo;
+  lo.peer_timeout_ms = impl_->config.peer_timeout_ms;
+  impl_->link = std::make_unique<session::Link>(session::Link::Role::kHost, impl_->transport.get(), lo,
+                                                std::move(h));
+  impl_->transport->SetReceiver(
+      [impl](Channel ch, std::span<const uint8_t> bytes) { impl->link->OnReceive(ch, bytes); });
+  impl_->link->Start();
   impl_->idle_thread = std::thread([impl = impl_.get()] { impl->IdleLoop(); });
 }
 
@@ -265,9 +324,26 @@ Host::~Host() {
   }
   impl_->idle_cv.notify_all();
   impl_->idle_thread.join();
+  impl_->link->Shutdown();  // Goodbye while the transport still works
   impl_->cursor.reset();
-  // Stop the receive thread before the session goes away.
+  // Stop the receive thread before the link and session go away.
   impl_->transport.reset();
+}
+
+void Host::SetStateHandler(StateHandler fn) {
+  std::lock_guard<std::mutex> lock(impl_->mu);
+  impl_->on_state = std::move(fn);
+}
+
+ConnectionState Host::state() const { return impl_->link->state(); }
+
+void Host::SetMessageHandler(MessageHandler fn) {
+  std::lock_guard<std::mutex> lock(impl_->mu);
+  impl_->on_message = std::move(fn);
+}
+
+bool Host::SendMessage(uint32_t type, std::span<const uint8_t> payload, std::string* error) {
+  return impl_->link->SendMessage(type, payload, error);
 }
 
 void Host::SetInputHandler(InputHandler fn) {
@@ -366,6 +442,7 @@ HostStats Host::stats() const {
   std::lock_guard<std::mutex> lock(impl_->mu);
   st.frames_dropped_congestion = impl_->frames_dropped_congestion;
   st.frames_resubmitted = impl_->frames_resubmitted;
+  st.keyframe_requests = impl_->keyframe_requests;
   st.target_bitrate_bps = impl_->target_bitrate_bps;
   st.bandwidth_estimate_bps = impl_->net.bandwidth_bps;
   st.rtt_us = impl_->net.rtt_us;

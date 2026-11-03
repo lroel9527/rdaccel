@@ -78,23 +78,62 @@ TEST(Messages, ParserHandlesByteByByteDelivery) {
   EXPECT_EQ(out, msgs);
 }
 
-TEST(Messages, UnknownTypeIsAnError) {
-  StreamParser p;
-  const std::vector<uint8_t> bad = {0xee, 0x00};
-  p.Append(bad);
-  EXPECT_FALSE(p.Next().has_value());
-  EXPECT_FALSE(p.error().empty());
-}
-
-TEST(Messages, TrailingBytesInPayloadAreAnError) {
-  auto bytes = Encode(FrameEnd{1});
-  // Grow the declared payload by one byte and append garbage.
-  bytes[1] += 1;
-  bytes.push_back(0x00);
+TEST(Messages, UnknownTypesAreSkipped) {
+  // A later protocol version may add message types; this one skips them.
+  std::vector<uint8_t> bytes = {0xee, 0x02, 0xaa, 0xbb};
+  const auto end = Encode(FrameEnd{7});
+  bytes.insert(bytes.end(), end.begin(), end.end());
   StreamParser p;
   p.Append(bytes);
-  EXPECT_FALSE(p.Next().has_value());
-  EXPECT_FALSE(p.error().empty());
+  auto m = p.Next();
+  ASSERT_TRUE(m.has_value());
+  EXPECT_EQ(std::get<FrameEnd>(*m).frame_id, 7u);
+  EXPECT_TRUE(p.error().empty());
+  EXPECT_EQ(p.skipped(), 1u);
+}
+
+TEST(Messages, TrailingFieldsAreIgnored) {
+  // ... and may append fields to existing ones.
+  auto bytes = Encode(FrameEnd{1});
+  bytes[1] += 2;
+  bytes.push_back(0x05);
+  bytes.push_back(0x06);
+  StreamParser p;
+  p.Append(bytes);
+  auto m = p.Next();
+  ASSERT_TRUE(m.has_value());
+  EXPECT_EQ(std::get<FrameEnd>(*m).frame_id, 1u);
+}
+
+TEST(Messages, HandshakeAndSessionMessagesRoundTrip) {
+  ViewerHello vh;
+  vh.auth_token = {1, 2, 3};
+  AppMessage am{0x10001, std::vector<uint8_t>(100000, 7)};
+  const std::vector<Message> in = {vh, Ping{123456}, Goodbye{GoodbyeReason::kIncompatible}, am, Welcome{},
+                                   Hello{kProtocolVersion, 640, 360, VideoCodec::kHevc, 4, kCapsAll}};
+  std::vector<uint8_t> bytes;
+  for (const auto& m : in) EncodeTo(m, bytes);
+  StreamParser p;
+  p.Append(bytes);
+  for (const auto& want : in) {
+    auto got = p.Next();
+    ASSERT_TRUE(got.has_value()) << p.error();
+    EXPECT_EQ(*got, want);
+  }
+}
+
+TEST(Messages, Version3HelloStillParses) {
+  // version 3, 640x360, HEVC; no min_version / caps.
+  const std::vector<uint8_t> v3 = {static_cast<uint8_t>(MsgType::kHello), 6, 3, 0x80, 0x05, 0xe8, 0x02, 2};
+  StreamParser p;
+  p.Append(v3);
+  auto m = p.Next();
+  ASSERT_TRUE(m.has_value()) << p.error();
+  const auto& h = std::get<Hello>(*m);
+  EXPECT_EQ(h.version, 3u);
+  EXPECT_EQ(h.width, 640u);
+  EXPECT_EQ(h.min_version, 3u);
+  EXPECT_EQ(h.caps, 0u);
 }
 
 TEST(Messages, CursorShapeSizeMustMatch) {
@@ -111,7 +150,7 @@ TEST(Messages, CursorShapeSizeMustMatch) {
 TEST(Messages, H264IsRejected) {
   // Byte 1 was H.264 in early drafts; the protocol is HEVC-only now.
   auto bytes = Encode(Hello{kProtocolVersion, 1, 1, VideoCodec::kHevc});
-  bytes.back() = 1;
+  bytes[5] = 1;  // type, length, version, width, height, then the codec
   StreamParser p;
   p.Append(bytes);
   EXPECT_FALSE(p.Next().has_value());

@@ -74,6 +74,9 @@ struct HostOptions {
   int32_t region_min_qp = 27;               // quality floor inside video areas
   int64_t region_bitrate_bps = 0;           // 0 = a share of bitrate_bps by area
   tile::VideoRegionParams region_params = {};
+  // Install the transport's receive callback (input, keyframe requests).
+  // Host turns this off: its Link receives and calls in.
+  bool own_receiver = true;
 };
 
 class HostSession {
@@ -96,6 +99,9 @@ class HostSession {
 
   // Makes the next encoded frame a keyframe.
   void RequestKeyframe() { force_keyframe_ = true; }
+  // Sends the stream's Hello again (thread-safe), for a viewer that
+  // connected after the stream started.
+  void SendHello();
   bool keyframe_pending() const { return force_keyframe_; }
 
   // The screen as of the last frame passed to OnFrame (BGRA, rows of

@@ -19,7 +19,18 @@
 namespace rdacore::proto {
 
 // 2: lossless, moves, tile cache. 3: video region streams (VideoData::stream).
-inline constexpr uint32_t kProtocolVersion = 3;
+// 4: handshake (ViewerHello, Welcome, Hello::min_version), Ping, Goodbye, AppMessage,
+//    the message channel; parsers skip unknown message types and ignore
+//    trailing fields, so later versions can add both.
+inline constexpr uint32_t kProtocolVersion = 4;
+// Oldest host stream a viewer still decodes (recordings of version 3 play).
+inline constexpr uint32_t kMinHostVersion = 3;
+// Oldest viewer a host serves (it must send ViewerHello).
+inline constexpr uint32_t kMinViewerVersion = 4;
+
+// Capability bits in Hello / ViewerHello, for features a peer may lack.
+inline constexpr uint64_t kCapMessages = 1;  // AppMessage on Channel::kMessage
+inline constexpr uint64_t kCapsAll = kCapMessages;
 
 enum class MsgType : uint8_t {
   kHello = 1,
@@ -33,17 +44,68 @@ enum class MsgType : uint8_t {
   kFeedback = 9,
   kLosslessData = 10,
   kKeyframeRequest = 11,
+  kViewerHello = 12,
+  kPing = 13,
+  kGoodbye = 14,
+  kAppMessage = 15,
+  kWelcome = 16,
 };
 
 // HEVC only: the project deliberately has no H.264 fallback.
 enum class VideoCodec : uint8_t { kHevc = 2 };
 
+// Host -> viewer, first message on the control channel.
 struct Hello {
   uint32_t version = kProtocolVersion;
   uint32_t width = 0;   // physical pixels
   uint32_t height = 0;
   VideoCodec codec = VideoCodec::kHevc;
+  // Since version 4 (absent in older streams: then min_version = version).
+  uint32_t min_version = kMinViewerVersion;  // oldest viewer this host serves
+  uint64_t caps = kCapsAll;
   friend bool operator==(const Hello&, const Hello&) = default;
+};
+
+// Viewer -> host, first message on the control channel (version 4+).
+struct ViewerHello {
+  uint32_t version = kProtocolVersion;
+  uint32_t min_version = kMinHostVersion;  // oldest host this viewer decodes
+  uint64_t caps = kCapsAll;
+  std::vector<uint8_t> auth_token;  // opaque, for the host's auth hook
+  friend bool operator==(const ViewerHello&, const ViewerHello&) = default;
+};
+
+// Host -> viewer, on the control channel: the answer to an accepted
+// ViewerHello (the picture's Hello comes with the first frame, which may be
+// much later).
+struct Welcome {
+  uint32_t version = kProtocolVersion;
+  uint32_t min_version = kMinViewerVersion;
+  uint64_t caps = kCapsAll;
+  friend bool operator==(const Welcome&, const Welcome&) = default;
+};
+
+// Either direction, on the control channel, about once a second: proves the
+// peer is alive when nothing else flows (a static screen, no input).
+struct Ping {
+  uint64_t time_us = 0;  // sender clock
+  friend bool operator==(const Ping&, const Ping&) = default;
+};
+
+// Either direction, on the control channel: the sender is closing the session.
+enum class GoodbyeReason : uint8_t { kClosed = 0, kIncompatible = 1, kRejected = 2 };
+struct Goodbye {
+  GoodbyeReason reason = GoodbyeReason::kClosed;
+  friend bool operator==(const Goodbye&, const Goodbye&) = default;
+};
+
+// Either direction, on the message channel: an application message, or one
+// of the library's standard ones (clipboard text). Reliable and ordered.
+inline constexpr size_t kMaxAppMessage = 16u << 20;
+struct AppMessage {
+  uint32_t type = 0;
+  std::vector<uint8_t> payload;
+  friend bool operator==(const AppMessage&, const AppMessage&) = default;
 };
 
 struct FrameBegin {
@@ -150,7 +212,8 @@ struct KeyframeRequest {
 };
 
 using Message = std::variant<Hello, FrameBegin, VideoData, FrameEnd, CopyRect, CursorPos,
-                             CursorShape, InputEvent, Feedback, LosslessData, KeyframeRequest>;
+                             CursorShape, InputEvent, Feedback, LosslessData, KeyframeRequest,
+                             ViewerHello, Ping, Goodbye, AppMessage, Welcome>;
 
 // Serializes one message including its type and length header.
 std::vector<uint8_t> Encode(const Message& msg);
@@ -172,11 +235,14 @@ class StreamParser {
   std::optional<Message> Next();
 
   const std::string& error() const { return error_; }
+  // Messages of unknown type skipped so far.
+  uint64_t skipped() const { return skipped_; }
 
  private:
   std::vector<uint8_t> buf_;
   size_t pos_ = 0;
   std::string error_;
+  uint64_t skipped_ = 0;
 };
 
 }  // namespace rdacore::proto

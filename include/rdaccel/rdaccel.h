@@ -150,11 +150,53 @@ typedef struct rda_input_event {
   rda_input_kind kind;
   int32_t x, y;             /* host pixels (mouse events) */
   int32_t delta_x, delta_y; /* scroll */
-  uint32_t code;            /* mouse button, or key code */
-  uint32_t modifiers;
+  uint32_t code;            /* RDA_BUTTON_* for mouse events; for keys a USB
+                               HID usage (keyboard page 0x07), see below */
+  uint32_t modifiers;       /* RDA_MOD_* bits held during the event */
 } rda_input_event;
 
 RDA_API void rda_input_event_default(rda_input_event* ev);
+
+#define RDA_BUTTON_LEFT 1
+#define RDA_BUTTON_RIGHT 2
+#define RDA_BUTTON_MIDDLE 3
+#define RDA_BUTTON_BACK 4
+#define RDA_BUTTON_FORWARD 5
+
+#define RDA_MOD_SHIFT 0x01u
+#define RDA_MOD_CTRL 0x02u
+#define RDA_MOD_ALT 0x04u  /* Option on macOS */
+#define RDA_MOD_META 0x08u /* Command on macOS, Windows/Super key */
+#define RDA_MOD_CAPS 0x10u /* Caps Lock is on */
+
+/* Key codes on the wire are USB HID usages (0x04 = A, 0x28 = Enter,
+ * 0xE0 = left Control, ...), the same on every OS. These convert native
+ * codes. The from_* functions return 0 for an unknown key; the to_*
+ * functions return RDA_KEYCODE_NONE when the OS has no such key. */
+#define RDA_KEYCODE_NONE 0xFFFFFFFFu
+/* macOS virtual key codes (kVK_*, NSEvent.keyCode, CGKeyCode). */
+RDA_API uint32_t rda_keycode_from_mac(uint32_t mac_keycode);
+RDA_API uint32_t rda_keycode_to_mac(uint32_t hid_usage);
+/* Linux evdev codes (KEY_*; an X11 keycode minus 8). */
+RDA_API uint32_t rda_keycode_from_evdev(uint32_t evdev_code);
+RDA_API uint32_t rda_keycode_to_evdev(uint32_t hid_usage);
+
+/* ---- connection --------------------------------------------------------- */
+
+/* A host and a viewer shake hands (protocol version, optional auth token),
+ * keep the connection alive and notice when the other side is gone. */
+typedef enum rda_state {
+  RDA_STATE_CONNECTING = 0,  /* waiting for the peer's handshake */
+  RDA_STATE_CONNECTED = 1,
+  RDA_STATE_DISCONNECTED = 2 /* final; create a new host or viewer to retry */
+} rda_state;
+
+/* Application messages: reliable, ordered, up to 16 MiB each, sent apart
+ * from the picture so they do not hold it up. Types below
+ * RDA_MSG_USER_FIRST are reserved for the library. */
+#define RDA_MSG_CLIPBOARD_TEXT 1u /* UTF-8 text, no terminating NUL */
+#define RDA_MSG_USER_FIRST 0x10000u
+#define RDA_MSG_MAX_SIZE (16u * 1024u * 1024u)
 
 /* ---- transport ---------------------------------------------------------- */
 
@@ -167,8 +209,10 @@ typedef enum rda_channel {
   RDA_CHANNEL_INPUT = 1,
   RDA_CHANNEL_SURFACE = 2,
   RDA_CHANNEL_VIDEO = 3,
-  RDA_CHANNEL_CURSOR = 4
+  RDA_CHANNEL_CURSOR = 4,
+  RDA_CHANNEL_MESSAGE = 5 /* application messages; reliable like control */
 } rda_channel;
+#define RDA_CHANNEL_COUNT 6
 
 typedef struct rda_transport_stats {
   uint32_t struct_size;
@@ -186,7 +230,9 @@ typedef void (*rda_receive_fn)(void* ctx, rda_channel ch, const uint8_t* bytes, 
 /* Your own transport (QUIC, WebRTC data channel, relay, ...). Requirements:
  *   send          thread-safe; bytes on one channel arrive in order at the
  *                 peer, possibly split or merged differently. Return RDA_OK,
- *                 or RDA_ERR_CLOSED once the connection is gone.
+ *                 or RDA_ERR_CLOSED once the connection is gone. Carry every
+ *                 channel number below 256 as is: later versions may add
+ *                 channels after RDA_CHANNEL_COUNT.
  *   set_receiver  store fn + ctx and call fn on your thread for every
  *                 received chunk. Hold bytes that arrive before it is set.
  *                 fn == NULL clears it.
@@ -302,6 +348,19 @@ typedef struct rda_host_config {
   void (*on_input)(void* user, const rda_input_event* ev);
   /* Errors on a background thread (encoder creation, capture, cursor). */
   void (*on_error)(void* user, rda_status status, const char* message);
+
+  /* Connection. */
+  int32_t peer_timeout_ms; /* 10000; silence from a connected viewer = gone; 0 = never */
+  /* Connection changes. `reason` is RDA_OK, or why it disconnected:
+   * RDA_ERR_CLOSED (goodbye or transport closed), RDA_ERR_TIMEOUT,
+   * RDA_ERR_PROTOCOL (incompatible version), RDA_ERR_AUTH (on_auth refused).
+   * Transport thread or the library's timer thread. */
+  void (*on_state)(void* user, rda_state state, rda_status reason);
+  /* An application message from the viewer. Transport receive thread. */
+  void (*on_message)(void* user, uint32_t type, const uint8_t* payload, size_t n);
+  /* Decides whether a viewer may connect, from the token in its config;
+   * nonzero = accept. NULL = accept everyone. Transport receive thread. */
+  int (*on_auth)(void* user, const uint8_t* token, size_t n);
 } rda_host_config;
 
 typedef struct rda_host_stats {
@@ -367,6 +426,13 @@ RDA_API rda_status rda_host_set_cursor_image(rda_host* h, const rda_cursor_image
 /* The next encoded frame becomes a full refresh. */
 RDA_API void rda_host_request_keyframe(rda_host* h);
 
+RDA_API rda_state rda_host_get_state(const rda_host* h);
+/* Sends an application message to the viewer. Thread-safe. RDA_ERR_CLOSED
+ * once disconnected, RDA_ERR_INVALID_ARG for a reserved type or n above
+ * RDA_MSG_MAX_SIZE. Messages sent before the viewer connects may be lost. */
+RDA_API rda_status rda_host_send_message(rda_host* h, uint32_t type, const uint8_t* payload,
+                                         size_t n);
+
 /* Set out->struct_size first. Cumulative counters. */
 RDA_API rda_status rda_host_get_stats(const rda_host* h, rda_host_stats* out);
 
@@ -386,8 +452,9 @@ typedef struct rda_frame_info {
 
 typedef struct rda_viewer_config {
   uint32_t struct_size;
-  /* Callbacks (all optional), each called with `user`, all on the transport
-   * receive thread, one at a time. Pointers are valid only during the call. */
+  /* Callbacks (all optional), each called with `user`, on the transport
+   * receive thread, one at a time (on_state: see below). Pointers are valid
+   * only during the call. */
   void* user;
   /* The host's screen size, when the stream starts. */
   void (*on_stream_info)(void* user, int32_t width, int32_t height);
@@ -397,6 +464,17 @@ typedef struct rda_viewer_config {
                    size_t changed_count, const rda_frame_info* info);
   /* The host's cursor moved, hid or changed its image. */
   void (*on_cursor)(void* user, const rda_cursor_state* state);
+
+  /* Connection. */
+  int32_t peer_timeout_ms;   /* 10000; silence from the host = gone; 0 = never */
+  const uint8_t* auth_token; /* sent to the host's on_auth (copied); may be NULL */
+  size_t auth_token_len;     /* at most 4096 */
+  /* Connection changes, as for the host. May also run on the library's
+   * timer thread (a timeout), so not necessarily one at a time with the
+   * callbacks above. */
+  void (*on_state)(void* user, rda_state state, rda_status reason);
+  /* An application message from the host. Transport receive thread. */
+  void (*on_message)(void* user, uint32_t type, const uint8_t* payload, size_t n);
 } rda_viewer_config;
 
 typedef struct rda_viewer_stats {
@@ -418,7 +496,13 @@ RDA_API rda_status rda_viewer_create(rda_transport* transport, const rda_viewer_
 /* No callback runs after it returns. Not from a viewer callback. */
 RDA_API void rda_viewer_destroy(rda_viewer* v);
 
+/* Input to the host; dropped once disconnected. */
 RDA_API rda_status rda_viewer_send_input(rda_viewer* v, const rda_input_event* ev);
+/* RDA_STATE_CONNECTING for a viewer without transport. */
+RDA_API rda_state rda_viewer_get_state(const rda_viewer* v);
+/* Sends an application message to the host; as rda_host_send_message(). */
+RDA_API rda_status rda_viewer_send_message(rda_viewer* v, uint32_t type, const uint8_t* payload,
+                                           size_t n);
 /* Asks the host for a full refresh (the viewer also does it by itself after
  * decode errors). */
 RDA_API void rda_viewer_request_keyframe(rda_viewer* v);

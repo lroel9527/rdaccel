@@ -10,11 +10,13 @@
 
 #include <cstdint>
 
+#include "rdacore/connection.h"
 #include "rdacore/cursor.h"
 #include "rdacore/geometry.h"
 #include "rdacore/host.h"
 #include "rdacore/image.h"
 #include "rdacore/input.h"
+#include "rdacore/keycodes.h"
 #include "rdacore/recording.h"
 #include "rdacore/test_pattern.h"
 #include "rdacore/transport.h"

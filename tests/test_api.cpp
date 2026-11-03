@@ -5,7 +5,9 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
+#include <functional>
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
@@ -437,4 +439,57 @@ TEST(PublicApi, KeyframeComesEvenWhenTheScreenIsStatic) {
   std::this_thread::sleep_for(std::chrono::milliseconds(300));
   EXPECT_EQ(host.stats().frames_resubmitted, 1u);
   EXPECT_EQ(host.stats().frames_encoded, st.frames_encoded);
+}
+
+TEST(PublicApi, ConnectionAndMessages) {
+  auto [host_t, viewer_t] = rdaccel::CreateLocalPipe();
+  rdaccel::HostConfig cfg;
+  cfg.auth = [](std::span<const uint8_t> token) { return token.size() == 2; };
+  rdaccel::Host host(std::move(host_t), cfg);
+  ASSERT_TRUE(host.ok());
+  std::mutex mu;
+  std::vector<std::string> host_got, viewer_got;
+  host.SetMessageHandler([&](uint32_t type, std::span<const uint8_t> p) {
+    std::lock_guard<std::mutex> lock(mu);
+    host_got.push_back(std::to_string(type) + ":" + std::string(p.begin(), p.end()));
+  });
+  std::atomic<int> viewer_state{-1};
+  rdaccel::ViewerHandlers h;
+  h.on_state = [&](rdaccel::ConnectionState s, rda_status) { viewer_state = static_cast<int>(s); };
+  h.on_message = [&](uint32_t type, std::span<const uint8_t> p) {
+    std::lock_guard<std::mutex> lock(mu);
+    viewer_got.push_back(std::to_string(type) + ":" + std::string(p.begin(), p.end()));
+  };
+  rdaccel::ViewerOptions opts;
+  opts.auth_token = {1, 2};
+  std::string err;
+  auto viewer = rdaccel::Viewer::Create(std::move(viewer_t), std::move(h), opts, &err);
+  ASSERT_NE(viewer, nullptr) << err;
+  auto wait = [](const std::function<bool()>& f) {
+    for (int i = 0; i < 2000 && !f(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    return f();
+  };
+  ASSERT_TRUE(wait([&] { return viewer->state() == rdaccel::ConnectionState::kConnected; }));
+  EXPECT_EQ(viewer_state.load(), static_cast<int>(rdaccel::ConnectionState::kConnected));
+  EXPECT_EQ(host.state(), rdaccel::ConnectionState::kConnected);
+  ASSERT_TRUE(viewer->SendMessage(rdaccel::kClipboardTextMessage, std::string_view("copy"), &err)) << err;
+  ASSERT_TRUE(host.SendMessage(rdaccel::kFirstUserMessage, std::string_view("ping"), &err)) << err;
+  EXPECT_FALSE(host.SendMessage(5, std::string_view("x"), &err));
+  ASSERT_TRUE(wait([&] {
+    std::lock_guard<std::mutex> lock(mu);
+    return host_got.size() == 1 && viewer_got.size() == 1;
+  }));
+  EXPECT_EQ(host_got[0], "1:copy");
+  EXPECT_EQ(viewer_got[0], "65536:ping");
+
+  // Frames still flow alongside messages.
+  std::vector<uint8_t> px;
+  rdaccel::RenderTestPattern(0, kW, kH, px);
+  EXPECT_TRUE(host.SubmitFrame({px.data(), kW, kH, kW * 4}, rdaccel::NowMicros(), {}, &err)) << err;
+  ASSERT_TRUE(wait([&] { return viewer->stats().frames_decoded >= 1; }));
+
+  viewer.reset();
+  ASSERT_TRUE(wait([&] { return host.state() == rdaccel::ConnectionState::kDisconnected; }));
+  EXPECT_FALSE(host.SubmitFrame({px.data(), kW, kH, kW * 4}, rdaccel::NowMicros(), {}, &err));
+  EXPECT_NE(err.find("disconnected"), std::string::npos) << err;
 }
