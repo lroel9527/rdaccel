@@ -6,6 +6,7 @@
 #include <cstring>
 #include <condition_variable>
 #include <mutex>
+#include <string>
 #include <thread>
 
 #include "capture/capturer.h"
@@ -265,15 +266,22 @@ TEST(ReliableTransport, EstimateFollowsABandwidthDrop) {
   const uint64_t t0 = capture::MonotonicMicros();
   TransportStats st;
   uint64_t caught_up = 0;  // when the estimate first came down after the drop
+  std::string trace;       // the estimate and round trip every 250 ms
+  uint64_t next_trace = 0;
   while (capture::MonotonicMicros() - t0 < 5'000'000) {
     host.GetStats(&st);
     const uint64_t t = capture::MonotonicMicros() - t0;
+    if (t >= next_trace) {
+      next_trace += 250'000;
+      trace += std::to_string(st.bandwidth_bps / 1000) + "k/" + std::to_string(st.rtt_us / 1000) + "ms ";
+    }
     if (!caught_up && t > 2'000'000 && st.bandwidth_bps > 0 && st.bandwidth_bps < 1'300'000) caught_up = t;
     if (st.queued_bytes < 20'000) host.Send(Channel::kVideo, chunk);
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
   }
   std::printf("estimate caught up %.2f s after the drop, ends at %lld kbps\n",
               caught_up ? (caught_up - 2'000'000) / 1e6 : -1.0, static_cast<long long>(st.bandwidth_bps / 1000));
+  std::printf("estimate/rtt every 250 ms: %s\n", trace.c_str());
   // Before the time window it took ~2.7 s after the drop; now ~0.4 s here
   // and ~1.3 s on a macOS laptop (coarser timers).
   ASSERT_NE(caught_up, 0u);

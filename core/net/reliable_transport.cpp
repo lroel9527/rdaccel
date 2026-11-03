@@ -172,8 +172,12 @@ void ReliableTransport::UpdatePacingRate() {
       // The max filter tends to sit a little above the true rate (acks
       // arrive in bunches), which would keep the queue as long as the
       // window allows. While the round trip shows a queue, send a little
-      // slower than the estimate (and skip probing up) until it drains.
-      if (gain >= 1 && PathQueued()) gain = kQueueDrainGain;
+      // slower than the estimate until it drains. The probe up (one round
+      // in eight) still runs: samples can only show what we send, so a
+      // round trip inflated by late threads rather than a queue (macOS CI)
+      // would otherwise hold the rate below the estimate for good, and every
+      // late acknowledgement would ratchet the estimate further down.
+      if (cycle_ >= 2 && PathQueued()) gain = kQueueDrainGain;
       break;
   }
   const double rate = gain * bw_;
