@@ -4,6 +4,7 @@
 #include <rdaccel/rdaccel.hpp>
 
 #include <gtest/gtest.h>
+#include <sys/socket.h>
 
 #include <atomic>
 #include <chrono>
@@ -134,7 +135,7 @@ TEST(PublicApi, StaticScreenIsSkipped) {
   EXPECT_EQ(host.stats().bytes_sent, sent);
 }
 
-TEST(PublicApi, RejectsSizeChangeAndBadImages) {
+TEST(PublicApi, RejectsBadImages) {
   auto [host_end, viewer_end] = rdaccel::CreateLocalPipe();
   rdaccel::Host host(std::move(host_end));
   std::vector<uint8_t> px;
@@ -142,13 +143,61 @@ TEST(PublicApi, RejectsSizeChangeAndBadImages) {
   std::string err;
   EXPECT_FALSE(host.SubmitFrame({nullptr, kW, kH, kW * 4}, 0, {}, &err));
   EXPECT_FALSE(host.SubmitFrame({px.data(), kW, kH, kW}, 0, {}, &err));  // stride too small
-  ASSERT_TRUE(host.SubmitFrame({px.data(), kW, kH, kW * 4}, 0, {}, &err)) << err;
-  int errors = 0;
-  host.SetErrorHandler([&](const std::string&) { ++errors; });
-  EXPECT_FALSE(host.SubmitFrame({px.data(), kW / 2, kH / 2, kW * 4}, 1, {}, &err));
-  EXPECT_NE(err.find("size changed"), std::string::npos);
-  EXPECT_FALSE(host.SubmitFrame({px.data(), kW / 2, kH / 2, kW * 4}, 2, {}, &err));
-  EXPECT_EQ(errors, 1);  // reported once, not per frame
+  EXPECT_FALSE(host.SubmitFrame({px.data(), kW + 1, kH, kW * 4 + 4}, 0, {}, &err));  // odd size
+  EXPECT_TRUE(host.SubmitFrame({px.data(), kW, kH, kW * 4}, 0, {}, &err)) << err;
+}
+
+TEST(PublicApi, ResolutionChangesMidStream) {
+  auto [host_end, viewer_end] = rdaccel::CreateLocalPipe();
+  std::mutex mu;
+  std::vector<std::pair<int32_t, int32_t>> infos, frame_sizes;
+  double min_psnr = 1e9;
+  std::vector<uint8_t> ref;
+  rdaccel::ViewerHandlers h;
+  h.on_stream_info = [&](int32_t w, int32_t ht) {
+    std::lock_guard<std::mutex> lock(mu);
+    infos.emplace_back(w, ht);
+  };
+  h.on_frame = [&](const rdaccel::ImageView& img, std::span<const rdaccel::Rect>, const rdaccel::FrameInfo& info) {
+    std::lock_guard<std::mutex> lock(mu);
+    frame_sizes.emplace_back(img.width, img.height);
+    ref.clear();
+    rdaccel::RenderTestPattern(info.frame_id - 1, img.width, img.height, ref);
+    (void)info;
+    min_psnr = std::min(min_psnr, Psnr(img, ref));
+  };
+  std::string err;
+  auto viewer = rdaccel::Viewer::Create(std::move(viewer_end), std::move(h), &err);
+  ASSERT_NE(viewer, nullptr) << err;
+  rdaccel::HostConfig cfg;
+  cfg.progressive = false;
+  rdaccel::Host host(std::move(host_end), cfg);
+  // 640x360, then 320x180, then back: frame i shows test pattern i at the
+  // current size, rendered from scratch.
+  const std::pair<int32_t, int32_t> sizes[] = {{kW, kH}, {kW / 2, kH / 2}, {kW, kH}};
+  uint64_t index = 0;
+  for (const auto& [w, ht] : sizes) {
+    for (int k = 0; k < 6; ++k, ++index) {
+      std::vector<uint8_t> px;
+      rdaccel::RenderTestPattern(index, w, ht, px);
+      ASSERT_TRUE(host.SubmitFrame({px.data(), w, ht, w * 4}, rdaccel::NowMicros(), {}, &err)) << err;
+    }
+  }
+  for (int i = 0; i < 2000; ++i) {
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      if (frame_sizes.size() >= 18) break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  std::lock_guard<std::mutex> lock(mu);
+  ASSERT_EQ(frame_sizes.size(), 18u);
+  for (size_t i = 0; i < 18; ++i) EXPECT_EQ(frame_sizes[i], sizes[i / 6]) << i;
+  ASSERT_EQ(infos.size(), 3u);
+  EXPECT_EQ(infos[1], sizes[1]);
+  EXPECT_GT(min_psnr, 30.0);
+  EXPECT_EQ(host.stats().resolution_changes, 2u);
+  EXPECT_EQ(viewer->stats().decode_errors, 0u);
 }
 
 TEST(PublicApi, RecordingRoundTrip) {
@@ -492,4 +541,75 @@ TEST(PublicApi, ConnectionAndMessages) {
   ASSERT_TRUE(wait([&] { return host.state() == rdaccel::ConnectionState::kDisconnected; }));
   EXPECT_FALSE(host.SubmitFrame({px.data(), kW, kH, kW * 4}, rdaccel::NowMicros(), {}, &err));
   EXPECT_NE(err.find("disconnected"), std::string::npos) << err;
+}
+
+namespace {
+
+// Submits frames until `viewer` has decoded `n` or time runs out.
+bool StreamUntil(rdaccel::Host& host, rdaccel::Viewer& viewer, uint64_t n, int max_frames = 600) {
+  std::vector<uint8_t> px;
+  for (int i = 0; i < max_frames; ++i) {
+    const auto dirty = rdaccel::RenderTestPattern(static_cast<uint64_t>(i), kW, kH, px);
+    host.SubmitFrame({px.data(), kW, kH, kW * 4}, rdaccel::NowMicros(), dirty);
+    if (viewer.stats().frames_decoded >= n) return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return false;
+}
+
+}  // namespace
+
+TEST(PublicApi, UdpBindDoesNotBlockAndHoldsFramesUntilTheViewerComes) {
+  std::string err;
+  auto host_t = rdaccel::BindUdp(47311, &err);
+  ASSERT_NE(host_t, nullptr) << err;
+  rdaccel::Host host(std::move(host_t));
+  // Frames before any viewer: accepted, held, not queued.
+  std::vector<uint8_t> px;
+  for (int i = 0; i < 30; ++i) {
+    const auto dirty = rdaccel::RenderTestPattern(static_cast<uint64_t>(i), kW, kH, px);
+    ASSERT_TRUE(host.SubmitFrame({px.data(), kW, kH, kW * 4}, rdaccel::NowMicros(), dirty, &err)) << err;
+  }
+  EXPECT_EQ(host.stats().frames_encoded, 0u);
+  EXPECT_EQ(host.state(), rdaccel::ConnectionState::kConnecting);
+
+  auto viewer = rdaccel::Viewer::Create(rdaccel::ConnectUdp("127.0.0.1", 47311, &err), {}, &err);
+  ASSERT_NE(viewer, nullptr) << err;
+  ASSERT_TRUE(StreamUntil(host, *viewer, 5));
+  EXPECT_EQ(host.state(), rdaccel::ConnectionState::kConnected);
+  EXPECT_EQ(viewer->stats().decode_errors, 0u);
+}
+
+TEST(PublicApi, UdpFromYourOwnSockets) {
+  int fds[2];
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_DGRAM, 0, fds), 0);
+  std::string err;
+  EXPECT_EQ(rdaccel::UdpFromFd(-1, false, &err), nullptr);
+  auto host_t = rdaccel::UdpFromFd(fds[0], false, &err);
+  ASSERT_NE(host_t, nullptr) << err;
+  auto viewer_t = rdaccel::UdpFromFd(fds[1], true, &err);
+  ASSERT_NE(viewer_t, nullptr) << err;
+  rdaccel::Host host(std::move(host_t));
+  auto viewer = rdaccel::Viewer::Create(std::move(viewer_t), {}, &err);
+  ASSERT_NE(viewer, nullptr) << err;
+  ASSERT_TRUE(StreamUntil(host, *viewer, 5));
+  EXPECT_EQ(viewer->state(), rdaccel::ConnectionState::kConnected);
+}
+
+TEST(PublicApi, ViewerGivesUpWhenNoHostAnswers) {
+  rdaccel::ViewerOptions opts;
+  opts.peer_timeout_ms = 300;
+  std::atomic<int> reason{0};
+  rdaccel::ViewerHandlers h;
+  h.on_state = [&](rdaccel::ConnectionState s, rda_status r) {
+    if (s == rdaccel::ConnectionState::kDisconnected) reason = r;
+  };
+  std::string err;
+  auto viewer = rdaccel::Viewer::Create(rdaccel::ConnectUdp("127.0.0.1", 47312, &err), std::move(h), opts, &err);
+  ASSERT_NE(viewer, nullptr) << err;
+  for (int i = 0; i < 400 && viewer->state() != rdaccel::ConnectionState::kDisconnected; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  EXPECT_EQ(viewer->state(), rdaccel::ConnectionState::kDisconnected);
+  EXPECT_EQ(reason.load(), RDA_ERR_TIMEOUT);
 }

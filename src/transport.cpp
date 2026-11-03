@@ -25,6 +25,19 @@ std::unique_ptr<Transport> ListenUdp(uint16_t port, std::string* error) {
   return std::make_unique<net::ReliableTransport>(std::move(sock));
 }
 
+std::unique_ptr<Transport> BindUdp(uint16_t port, std::string* error) {
+  auto sock = net::BindUdpSocket(port, error);
+  if (!sock) return nullptr;
+  return std::make_unique<net::ReliableTransport>(std::move(sock));
+}
+
+std::unique_ptr<Transport> UdpFromFd(int fd, bool viewer_side, std::string* error) {
+  auto sock = net::UdpSocketFromFd(fd, error);
+  if (!sock) return nullptr;
+  return std::make_unique<net::ReliableTransport>(std::move(sock),
+                                                  net::ReliableOptions{.client = viewer_side});
+}
+
 std::unique_ptr<Transport> ConnectUdp(const std::string& host, uint16_t port, std::string* error) {
   auto sock = net::ConnectUdpSocket(host, port, error);
   if (!sock) return nullptr;

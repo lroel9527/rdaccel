@@ -34,7 +34,8 @@ HostSession::HostSession(transport::ITransport* transport,
       options_(options),
       enc_input_(static_cast<size_t>(width) * height * 4, 0),
       prev_(enc_input_.size(), 0),
-      regions_(options.region_params) {
+      regions_(options.region_params),
+      next_frame_id_(options.first_frame_id) {
   if (options_.own_receiver) {
     transport_->SetReceiver(
         [this](transport::Channel ch, std::span<const uint8_t> bytes) { OnReceive(ch, bytes); });
@@ -43,7 +44,7 @@ HostSession::HostSession(transport::ITransport* transport,
 }
 
 void HostSession::SendHello() {
-  Send(transport::Channel::kControl,
+  Send(options_.hello_on_video ? transport::Channel::kVideo : transport::Channel::kControl,
        proto::Hello{proto::kProtocolVersion, static_cast<uint32_t>(width_),
                     static_cast<uint32_t>(height_), proto::VideoCodec::kHevc});
 }
@@ -56,6 +57,11 @@ void HostSession::SetInputHandler(InputFn fn) {
 HostStats HostSession::stats() const {
   std::lock_guard<std::mutex> lock(mu_);
   return stats_;
+}
+
+void HostSession::AdoptStats(const HostStats& s) {
+  std::lock_guard<std::mutex> lock(mu_);
+  stats_ = s;
 }
 
 void HostSession::Send(transport::Channel ch, const proto::Message& m) {

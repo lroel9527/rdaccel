@@ -85,6 +85,17 @@ void ViewerSession::FeedVideoBytes(std::span<const uint8_t> bytes) {
 
 void ViewerSession::EnsureScreen(int32_t w, int32_t h) {
   if (w == width_ && h == height_ && !screen_.empty()) return;
+  if (width_ > 0 && (w != width_ || h != height_)) {
+    // A new stream at another size: everything decoded so far is stale.
+    if (decoder_factory_) {
+      if (auto dec = decoder_factory_()) decoder_ = std::move(dec);
+    }
+    region_dec_.clear();
+    cache_.clear();
+    begin_.reset();
+    videos_.clear();
+    lossless_.reset();
+  }
   width_ = w;
   height_ = h;
   screen_.assign(static_cast<size_t>(w) * h * 4, 0);

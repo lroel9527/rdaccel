@@ -66,6 +66,10 @@ class Transport {
   // Fills `out` and returns true if this transport measures the path. The
   // default (and the in-process pipe and TCP) returns false; the Host then
   // sends at the configured bitrate.
+  // False while a listening transport does not know its peer yet (nothing
+  // sent would arrive); the Host then holds frames instead of encoding them.
+  virtual bool PeerKnown() const { return true; }
+
   virtual bool GetStats(TransportStats* out) const {
     (void)out;
     return false;
@@ -89,6 +93,15 @@ std::unique_ptr<Transport> ConnectTcp(const std::string& host, uint16_t port,
 std::unique_ptr<Transport> ListenUdp(uint16_t port, std::string* error = nullptr);
 std::unique_ptr<Transport> ConnectUdp(const std::string& host, uint16_t port,
                                       std::string* error = nullptr);
+// Host side without blocking: binds `port` (IPv4 and IPv6) and returns at
+// once; the first viewer that sends becomes the peer. The Host's state
+// handler tells when it has connected.
+std::unique_ptr<Transport> BindUdp(uint16_t port, std::string* error = nullptr);
+// An application's UDP socket (after NAT traversal, a socket passed in by a
+// launcher, ...). Taken over only on success. A connected socket talks to
+// its peer; an unconnected one to the first sender (host side only).
+// `viewer_side` = the end that creates the Viewer (it must be connected).
+std::unique_ptr<Transport> UdpFromFd(int fd, bool viewer_side, std::string* error = nullptr);
 
 // A network path for tests and benchmarks.
 struct NetworkConditions {

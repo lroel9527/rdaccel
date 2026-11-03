@@ -115,6 +115,11 @@ bool ReliableTransport::GetStats(TransportStats* out) const {
   return true;
 }
 
+bool ReliableTransport::PeerKnown() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return opt_.client || heard_peer_;
+}
+
 uint64_t ReliableTransport::QueuedBytes() const {
   uint64_t n = 0;
   for (const auto& s : out_) {
@@ -185,8 +190,10 @@ void ReliableTransport::Run() {
       }
     }
 
-    // Send while the window and the pacer allow.
-    for (;;) {
+    // Send while the window and the pacer allow. A listening side has no
+    // peer address before the peer's first packet: hold the data until then.
+    const bool can_send = opt_.client || heard_peer_;
+    for (; can_send;) {
       const uint64_t t = Now();
       if (bytes_in_flight_ + kMaxDatagram > Cwnd()) break;
       if (opt_.congestion_control && t < next_send_time_) break;
@@ -201,7 +208,7 @@ void ReliableTransport::Run() {
       wake = std::min(wake, since + (Pto() << std::min(pto_count_, 6)));
     }
     if (opt_.client && !heard_peer_) wake = std::min(wake, next_hello_);
-    const bool have_data = QueuedBytes() > 0;
+    const bool have_data = can_send && QueuedBytes() > 0;
     if (have_data && opt_.congestion_control && bytes_in_flight_ + kMaxDatagram <= Cwnd()) {
       wake = std::min(wake, next_send_time_);
     }
@@ -481,7 +488,10 @@ void ReliableTransport::OnDatagram(std::span<const uint8_t> d) {
   {
     std::lock_guard<std::mutex> lock(mu_);
     if (closed_) return;
-    heard_peer_ = true;
+    if (!heard_peer_) {
+      heard_peer_ = true;
+      cv_.notify_all();  // data held for the peer can go now
+    }
     proto::ByteReader r(d.subspan(1));
     if (d[0] == kAck) {
       HandleAck(d.subspan(1), now);

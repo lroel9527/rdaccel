@@ -10,6 +10,7 @@
 #include <thread>
 
 #include "capture/capturer.h"
+#include "log/log.h"
 #include "platform.h"
 #include "session/cursor_channel.h"
 #include "session/host_session.h"
@@ -21,10 +22,16 @@ namespace rdacore {
 struct Host::Impl {
   HostConfig config;
 
-  // Created on the first frame, when the resolution is known. Never replaced,
-  // so readers only need the atomic pointer.
+  // Created on the first frame, when the resolution is known, and replaced
+  // when it changes. Replaced under both submit_mu and session_mu: the frame
+  // path (under submit_mu) uses it directly, other threads via WithSession.
   std::unique_ptr<session::HostSession> session;
-  std::atomic<session::HostSession*> session_ptr{nullptr};
+  std::mutex session_mu;
+  template <class F>
+  void WithSession(F&& f) {
+    std::lock_guard<std::mutex> l(session_mu);
+    if (session) f(*session);
+  }
   std::unique_ptr<capture::ICapturer> capturer;
   // Handshake, keepalive, messages. Calls into the session; destroyed after
   // the transport (whose receive thread calls it).
@@ -85,16 +92,19 @@ struct Host::Impl {
   // A copy of the newest frame skipped for congestion (under submit_mu).
   std::vector<uint8_t> skipped_px;
   uint64_t frames_resubmitted = 0;  // under mu
+  uint64_t resolution_changes = 0;  // under mu
 
   void IdleLoop() {
     std::unique_lock<std::mutex> lock(idle_mu);
     while (!idle_cv.wait_for(lock, std::chrono::milliseconds(25), [&] { return idle_stop; })) {
-      auto* s = session_ptr.load();
-      if (!s || failed) continue;
+      if (failed) continue;
       const uint64_t now = capture::MonotonicMicros();
       if (now - last_frame_us.load() < kIdleResubmitUs) continue;
-      // Under submit_mu throughout, so no newer frame can go in between.
+      // Under submit_mu throughout, so no newer frame (or new session) can
+      // go in between.
       std::lock_guard<std::mutex> l(submit_mu);
+      session::HostSession* s = session.get();
+      if (!s) continue;
       std::vector<uint8_t> px;
       if (!skipped_px.empty()) {
         px = std::move(skipped_px);
@@ -118,7 +128,6 @@ struct Host::Impl {
 
   std::mutex submit_mu;  // serializes frames (screen capture vs SubmitFrame)
   std::atomic<bool> failed{false};  // encoder creation failed; drop further frames
-  bool size_error_reported = false;
   uint64_t encode_errors_reported = 0;
   int32_t width = 0, height = 0;
 
@@ -149,7 +158,7 @@ struct Host::Impl {
         std::lock_guard<std::mutex> l(mu);
         ++keyframe_requests;
       }
-      if (auto* s = session_ptr.load()) s->RequestKeyframe();
+      WithSession([](session::HostSession& s) { s.RequestKeyframe(); });
     }
   }
 
@@ -171,13 +180,22 @@ struct Host::Impl {
     return OnFrameLocked(f, error);
   }
 
+  void KeepSkipped(const capture::CapturedFrame& f) {
+    skipped_px.resize(static_cast<size_t>(width) * height * 4);
+    for (int32_t y = 0; y < height; ++y) {
+      std::memcpy(skipped_px.data() + static_cast<size_t>(y) * width * 4,
+                  f.bgra.data + static_cast<size_t>(y) * f.bgra.stride, static_cast<size_t>(width) * 4);
+    }
+  }
+
   bool OnFrameLocked(const capture::CapturedFrame& f, std::string* error) {
     last_frame_us = capture::MonotonicMicros();
     if (failed) {
       if (error) *error = "host stopped after an earlier encoder error";
       return false;
     }
-    if (!session) {
+    const bool resized = session && (f.bgra.width != width || f.bgra.height != height);
+    if (!session || resized) {
       codec::EncoderConfig cfg{f.bgra.width, f.bgra.height, config.fps, config.bitrate_bps,
                                config.min_qp};
       std::string err;
@@ -192,10 +210,15 @@ struct Host::Impl {
         std::lock_guard<std::mutex> l(mu);
         encoder_name = enc->name();
       }
+      if (resized) {
+        log::Info("resolution " + std::to_string(width) + "x" + std::to_string(height) + " -> " +
+                  std::to_string(f.bgra.width) + "x" + std::to_string(f.bgra.height));
+      }
       width = f.bgra.width;
       height = f.bgra.height;
       frame_w = width;
       frame_h = height;
+      skipped_px.clear();
       session::HostOptions opts;
       opts.lossless = config.lossless;
       opts.lossless_max_colors = config.lossless_max_colors;
@@ -216,19 +239,33 @@ struct Host::Impl {
       opts.region_min_qp = config.video_region_min_qp;
       opts.region_bitrate_bps = config.video_region_bitrate_bps;
       opts.own_receiver = false;  // the link receives and passes on
-      session = std::make_unique<session::HostSession>(transport.get(), std::move(enc), width,
-                                                       height, opts);
-      session_ptr = session.get();
-    } else if (f.bgra.width != width || f.bgra.height != height) {
-      const std::string err = "frame size changed from " + std::to_string(width) + "x" +
-                              std::to_string(height) + " to " + std::to_string(f.bgra.width) +
-                              "x" + std::to_string(f.bgra.height) + " (not supported yet)";
-      if (error) *error = err;
-      if (!size_error_reported) {
-        size_error_reported = true;
-        ReportError(err);
+      // After a resolution change the new Hello travels with the frames, so
+      // the viewer switches sizes exactly between the old and new pictures.
+      opts.hello_on_video = resized;
+      HostStats carried;
+      if (resized) {
+        carried = session->stats();
+        opts.first_frame_id = session->next_frame_id();
+        std::lock_guard<std::mutex> l(mu);
+        ++resolution_changes;
       }
-      return false;
+      auto next = std::make_unique<session::HostSession>(transport.get(), std::move(enc), width,
+                                                         height, opts);
+      if (resized) next->AdoptStats(carried);
+      if (rate && resized) next->SetBitrate(rate->target_bps());
+      std::unique_ptr<session::HostSession> old;
+      {
+        std::lock_guard<std::mutex> l(session_mu);
+        old = std::move(session);
+        session = std::move(next);
+      }
+    }
+    // A listening transport without a peer yet: keep the newest frame
+    // (re-submitted once the viewer is there) instead of queueing pictures
+    // nobody receives.
+    if (!transport->PeerKnown()) {
+      KeepSkipped(f);
+      return true;
     }
     // Adaptive bitrate: follow what the transport measures.
     TransportStats st;
@@ -248,12 +285,7 @@ struct Host::Impl {
       // The next frame that goes through carries all changes since; keep
       // this one in case no next frame comes.
       if (d.skip_frame) {
-        skipped_px.resize(static_cast<size_t>(width) * height * 4);
-        for (int32_t y = 0; y < height; ++y) {
-          std::memcpy(skipped_px.data() + static_cast<size_t>(y) * width * 4,
-                      f.bgra.data + static_cast<size_t>(y) * f.bgra.stride,
-                      static_cast<size_t>(width) * 4);
-        }
+        KeepSkipped(f);
         return true;
       }
       skipped_px.clear();
@@ -284,10 +316,10 @@ Host::Host(std::unique_ptr<Transport> transport, HostConfig config)
   h.on_state = [impl](ConnectionState st, ConnectionError e) {
     // A viewer that arrives mid-stream needs the Hello and a full picture.
     if (st == ConnectionState::kConnected) {
-      if (auto* s = impl->session_ptr.load()) {
-        s->SendHello();
-        s->RequestKeyframe();
-      }
+      impl->WithSession([](session::HostSession& s) {
+        s.SendHello();
+        s.RequestKeyframe();
+      });
     }
     StateHandler fn;
     {
@@ -426,7 +458,7 @@ bool Host::SubmitFrame(const ImageView& bgra, uint64_t capture_time_us, std::spa
 }
 
 void Host::RequestKeyframe() {
-  if (auto* s = impl_->session_ptr.load()) s->RequestKeyframe();
+  impl_->WithSession([](session::HostSession& s) { s.RequestKeyframe(); });
   // Before the first frame there is nothing to do: the first frame is always
   // a keyframe.
 }
@@ -437,11 +469,12 @@ std::string Host::encoder_name() const {
 }
 
 HostStats Host::stats() const {
-  auto* s = impl_->session_ptr.load();
-  HostStats st = s ? s->stats() : HostStats{};
+  HostStats st;
+  impl_->WithSession([&](session::HostSession& s) { st = s.stats(); });
   std::lock_guard<std::mutex> lock(impl_->mu);
   st.frames_dropped_congestion = impl_->frames_dropped_congestion;
   st.frames_resubmitted = impl_->frames_resubmitted;
+  st.resolution_changes = impl_->resolution_changes;
   st.keyframe_requests = impl_->keyframe_requests;
   st.target_bitrate_bps = impl_->target_bitrate_bps;
   st.bandwidth_estimate_bps = impl_->net.bandwidth_bps;

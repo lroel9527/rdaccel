@@ -58,5 +58,11 @@ std::pair<std::unique_ptr<DatagramSocket>, std::unique_ptr<DatagramSocket>> Make
 std::unique_ptr<DatagramSocket> ListenUdpSocket(uint16_t port, std::string* error);
 std::unique_ptr<DatagramSocket> ConnectUdpSocket(const std::string& host, uint16_t port,
                                                  std::string* error);
+// Binds and returns at once (IPv6 dual-stack where available); the first
+// datagram's sender becomes the peer.
+std::unique_ptr<DatagramSocket> BindUdpSocket(uint16_t port, std::string* error);
+// Takes ownership of an application's UDP socket (closed with the result).
+// Connected = that peer; unconnected = the first sender, as BindUdpSocket.
+std::unique_ptr<DatagramSocket> UdpSocketFromFd(int fd, std::string* error);
 
 }  // namespace rdacore::net
