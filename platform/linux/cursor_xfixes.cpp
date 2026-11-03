@@ -5,6 +5,7 @@
 #include <memory>
 
 #include "platform.h"
+#include "linux/displays_x11.h"
 
 // After our headers: Xlib defines macros such as None and Status.
 #include <X11/Xlib.h>
@@ -15,7 +16,8 @@ namespace {
 
 class XFixesCursorSource final : public capture::ICursorSource {
  public:
-  XFixesCursorSource(Display* dpy, int event_base) : dpy_(dpy), event_base_(event_base) {
+  XFixesCursorSource(Display* dpy, int event_base, capture::DisplayInfo display)
+      : dpy_(dpy), event_base_(event_base), display_(std::move(display)) {
     root_ = DefaultRootWindow(dpy_);
     XFixesSelectCursorInput(dpy_, root_, XFixesDisplayCursorNotifyMask);
   }
@@ -33,11 +35,13 @@ class XFixesCursorSource final : public capture::ICursorSource {
     int rx = 0, ry = 0, wx = 0, wy = 0;
     unsigned int mask = 0;
     if (!XQueryPointer(dpy_, root_, &root_ret, &child, &rx, &ry, &wx, &wy, &mask)) return false;
-    out.x = rx;
-    out.y = ry;
-    out.screen_width = DisplayWidth(dpy_, DefaultScreen(dpy_));
-    out.screen_height = DisplayHeight(dpy_, DefaultScreen(dpy_));
-    out.visible = true;  // X has no portable "hidden" flag; hidden cursors are transparent images
+    // Relative to the captured display; hidden while on another one. (X has
+    // no portable "hidden" flag otherwise: hidden cursors are transparent.)
+    out.x = rx - display_.x;
+    out.y = ry - display_.y;
+    out.screen_width = display_.width;
+    out.screen_height = display_.height;
+    out.visible = out.x >= 0 && out.y >= 0 && out.x < display_.width && out.y < display_.height;
     out.image_changed = false;
     if (changed) {
       XFixesCursorImage* ci = XFixesGetCursorImage(dpy_);
@@ -70,12 +74,13 @@ class XFixesCursorSource final : public capture::ICursorSource {
   Display* dpy_;
   int event_base_;
   Window root_;
+  capture::DisplayInfo display_;
   bool first_ = true;
 };
 
 }  // namespace
 
-std::unique_ptr<capture::ICursorSource> CreateCursorSource(std::string* error) {
+std::unique_ptr<capture::ICursorSource> CreateCursorSource(int32_t display_index, std::string* error) {
   Display* dpy = XOpenDisplay(nullptr);
   if (!dpy) {
     if (error) *error = "cannot open X display";
@@ -87,7 +92,12 @@ std::unique_ptr<capture::ICursorSource> CreateCursorSource(std::string* error) {
     if (error) *error = "X server has no XFixes extension";
     return nullptr;
   }
-  return std::make_unique<XFixesCursorSource>(dpy, event_base);
+  capture::DisplayInfo display;
+  if (!X11Display(dpy, display_index, display, error)) {
+    XCloseDisplay(dpy);
+    return nullptr;
+  }
+  return std::make_unique<XFixesCursorSource>(dpy, event_base, std::move(display));
 }
 
 }  // namespace rdacore::platform

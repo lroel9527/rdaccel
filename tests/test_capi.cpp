@@ -551,3 +551,41 @@ TEST(CApi, NetworkTransportsNeedAKeyOrExplicitPlaintext) {
   rda_host_destroy(h);
   EXPECT_EQ(rda_udp_from_fd(-1, 0, &t), RDA_ERR_INVALID_ARG);
 }
+
+TEST(CApi, ListDisplaysAndPickOne) {
+  size_t n = 0;
+  EXPECT_EQ(rda_list_displays(nullptr, 1, &n), RDA_ERR_INVALID_ARG);
+  const rda_status s = rda_list_displays(nullptr, 0, &n);
+  if (s == RDA_ERR_UNSUPPORTED) GTEST_SKIP() << rda_last_error();  // no display here
+  ASSERT_EQ(s, RDA_OK) << rda_last_error();
+  ASSERT_GE(n, 1u);
+  // An older, shorter struct: entries are written at its stride.
+  struct Old {
+    uint32_t struct_size;
+    int32_t index, x, y, width, height;
+  };
+  std::vector<Old> old(n + 1, Old{0, -1, 0, 0, 0, 0});
+  old[0].struct_size = sizeof(Old);
+  size_t m = 0;
+  ASSERT_EQ(rda_list_displays(reinterpret_cast<rda_display_info*>(old.data()), n, &m), RDA_OK);
+  EXPECT_EQ(m, n);
+  for (size_t i = 0; i < n; ++i) {
+    EXPECT_EQ(old[i].index, static_cast<int32_t>(i));
+    EXPECT_GT(old[i].width, 0);
+  }
+  EXPECT_EQ(old[n].index, -1);  // untouched past capacity
+
+  // A display that does not exist fails at capture start.
+  rda_transport *a = nullptr, *b = nullptr;
+  ASSERT_EQ(rda_pipe_create(&a, &b), RDA_OK);
+  rda_transport_destroy(b);
+  rda_host_config c;
+  rda_host_config_default(&c);
+  EXPECT_EQ(c.display_index, 0);
+  c.display_index = static_cast<int32_t>(n);
+  rda_host* h = nullptr;
+  ASSERT_EQ(rda_host_create(a, &c, &h), RDA_OK) << rda_last_error();
+  EXPECT_NE(rda_host_start_capture(h), RDA_OK);
+  EXPECT_NE(std::string(rda_last_error()).find("no display"), std::string::npos) << rda_last_error();
+  rda_host_destroy(h);
+}

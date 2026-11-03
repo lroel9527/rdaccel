@@ -4,7 +4,8 @@
 //
 //   rdaccel_serve [--udp=PORT | --tcp=PORT] [--source=screen|synthetic] [--seconds=0]
 //                 (--key=<64 hex digits> | --plaintext)
-//                 [--size=WxH] [--fps=60] [--bitrate=8000000]
+//                 [--size=WxH] [--fps=60] [--bitrate=8000000] [--display=0]
+//   rdaccel_serve --list-displays
 //
 // UDP (the default, port 7300) has congestion control and adaptive bitrate;
 // TCP sends at the configured bitrate. --size is the test pattern's size, or
@@ -42,6 +43,19 @@ void PrintLine(const rdaccel::HostStats& now, const rdaccel::HostStats& before, 
 
 int main(int argc, char** argv) {
   rdaccel::examples::Args args(argc, argv);
+  if (args.has("list-displays")) {
+    std::string err;
+    const auto displays = rdaccel::ListDisplays(&err);
+    if (displays.empty()) {
+      std::fprintf(stderr, "no displays: %s\n", err.c_str());
+      return 1;
+    }
+    for (const auto& d : displays) {
+      std::printf("%d: %dx%d at %d,%d%s %s\n", d.index, d.width, d.height, d.x, d.y,
+                  d.primary ? " (primary)" : "", d.name.c_str());
+    }
+    return 0;
+  }
   const bool tcp = args.has("tcp");
   const auto port = static_cast<uint16_t>(args.num(tcp ? "tcp" : "udp", 7300));
   const std::string source = args.str("source", "screen");
@@ -72,6 +86,7 @@ int main(int argc, char** argv) {
   }
   cfg.fps = fps;
   cfg.bitrate_bps = args.num("bitrate", 8'000'000);
+  cfg.display_index = static_cast<int32_t>(args.num("display", 0));
   if (source == "screen" && args.has("size")) {
     // Capture scaled to this size (the cursor image is scaled to match).
     cfg.capture_width = w;

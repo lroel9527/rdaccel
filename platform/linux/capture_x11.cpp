@@ -1,5 +1,7 @@
 #include "linux/capture_x11.h"
 
+#include "linux/displays_x11.h"
+
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/extensions/XShm.h>
@@ -32,8 +34,34 @@ bool X11Capturer::Start(const capture::CaptureConfig& cfg, capture::FrameFn on_f
   }
   const int screen = DefaultScreen(dpy);
   const Window root = RootWindow(dpy, screen);
-  const int w = DisplayWidth(dpy, screen);
-  const int h = DisplayHeight(dpy, screen);
+  // The part of the X screen to read: one monitor (or an explicit area).
+  int ox = 0, oy = 0, w = 0, h = 0;
+  if (area_) {
+    const int sw = DisplayWidth(dpy, screen), sh = DisplayHeight(dpy, screen);
+    if (area_->x < 0 || area_->y < 0 || area_->w < 2 || area_->h < 2 || area_->x + area_->w > sw ||
+        area_->y + area_->h > sh) {
+      error_ = "capture area outside the X screen";
+      XCloseDisplay(dpy);
+      return false;
+    }
+    ox = area_->x;
+    oy = area_->y;
+    w = area_->w;
+    h = area_->h;
+  } else {
+    capture::DisplayInfo d;
+    if (!X11Display(dpy, cfg.display_index, d, &error_)) {
+      XCloseDisplay(dpy);
+      return false;
+    }
+    ox = d.x;
+    oy = d.y;
+    w = d.width;
+    h = d.height;
+  }
+  // Even sizes, as the encoder needs.
+  w &= ~1;
+  h &= ~1;
   Visual* visual = DefaultVisual(dpy, screen);
   const int depth = DefaultDepth(dpy, screen);
   if (depth != 24 && depth != 32) {
@@ -89,13 +117,13 @@ bool X11Capturer::Start(const capture::CaptureConfig& cfg, capture::FrameFn on_f
 
   running_ = true;
   const int fps = cfg.fps > 0 ? cfg.fps : 60;
-  thread_ = std::thread([this, dpy, root, img, shm, w, h, out_w, out_h, sws, fps,
+  thread_ = std::thread([this, dpy, root, img, shm, ox, oy, w, h, out_w, out_h, sws, fps,
                          on_frame = std::move(on_frame)] {
     const auto period = std::chrono::microseconds(1'000'000 / fps);
     auto next = std::chrono::steady_clock::now();
     std::vector<uint8_t> scaled(sws ? static_cast<size_t>(out_w) * out_h * 4 : 0);
     while (running_) {
-      if (XShmGetImage(dpy, root, img, 0, 0, AllPlanes)) {
+      if (XShmGetImage(dpy, root, img, ox, oy, AllPlanes)) {
         // 24/32-bit TrueColor ZPixmap on little-endian is B, G, R, X in
         // memory, which is the BGRA layout the pipeline uses (alpha ignored).
         capture::CapturedFrame f;

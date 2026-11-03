@@ -259,6 +259,34 @@ const char* rda_version_string(void) { return RDACCEL_VERSION_STRING; }
 const char* rda_platform_name(void) { return rdacore::PlatformName(); }
 uint64_t rda_now_us(void) { return rdacore::NowMicros(); }
 
+rda_status rda_list_displays(rda_display_info* out, size_t capacity, size_t* count) {
+  RDA_GUARD_BEGIN
+  if (!count || (capacity > 0 && !out)) return Fail(RDA_ERR_INVALID_ARG, "count (and out with a capacity) required");
+  const size_t stride = capacity > 0 ? out[0].struct_size : 0;
+  if (capacity > 0 && stride < sizeof(uint32_t)) return Fail(RDA_ERR_INVALID_ARG, "out[0].struct_size is required");
+  std::vector<rdacore::DisplayInfo> all;
+  std::string err;
+  if (!rdacore::ListDisplays(all, &err)) return Fail(RDA_ERR_UNSUPPORTED, err);
+  *count = all.size();
+  auto* base = reinterpret_cast<uint8_t*>(out);
+  for (size_t i = 0; i < all.size() && i < capacity; ++i) {
+    rda_display_info d{};
+    d.struct_size = static_cast<uint32_t>(std::min(stride, sizeof(d)));
+    d.index = all[i].index;
+    d.x = all[i].x;
+    d.y = all[i].y;
+    d.width = all[i].width;
+    d.height = all[i].height;
+    d.primary = all[i].primary ? 1 : 0;
+    CopyName(all[i].name, d.name, sizeof(d.name));
+    auto* entry = base + i * stride;
+    std::memset(entry, 0, stride);
+    std::memcpy(entry, &d, std::min(stride, sizeof(d)));
+  }
+  return RDA_OK;
+  RDA_GUARD_END
+}
+
 const char* rda_status_str(rda_status s) {
   switch (s) {
     case RDA_OK: return "RDA_OK";
@@ -548,6 +576,7 @@ rdacore::HostConfig ToHostConfig(const rda_host_config& c) {
   o.min_bitrate_bps = c.min_bitrate_bps;
   o.max_queue_ms = c.max_queue_ms;
   o.peer_timeout_ms = c.peer_timeout_ms;
+  o.display_index = c.display_index;
   return o;
 }
 
@@ -585,6 +614,7 @@ std::string CheckHostConfig(const rda_host_config& c) {
     return "refine_frames, max_queue_ms or video_region_bitrate_bps out of range";
   }
   if (c.peer_timeout_ms < 0) return "peer_timeout_ms must not be negative";
+  if (c.display_index < 0) return "display_index must not be negative";
   return {};
 }
 
@@ -621,6 +651,7 @@ void rda_host_config_default(rda_host_config* c) {
   c->min_bitrate_bps = d.min_bitrate_bps;
   c->max_queue_ms = d.max_queue_ms;
   c->peer_timeout_ms = d.peer_timeout_ms;
+  c->display_index = d.display_index;
 }
 
 rda_status rda_host_create(rda_transport* transport, const rda_host_config* config, rda_host** out) {

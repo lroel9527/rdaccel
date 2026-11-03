@@ -132,6 +132,25 @@ typedef struct rda_cursor_state {
 RDA_API void rda_draw_cursor(const rda_cursor_image* c, int32_t x, int32_t y, uint8_t* bgra,
                              int32_t width, int32_t height, int32_t stride);
 
+/* ---- displays ----------------------------------------------------------- */
+
+typedef struct rda_display_info {
+  uint32_t struct_size;
+  int32_t index;         /* for rda_host_config.display_index; 0 = primary */
+  int32_t x, y;          /* origin on the desktop: points on macOS, pixels on X11 */
+  int32_t width, height; /* pixels */
+  int32_t primary;       /* nonzero for index 0 */
+  char name[64];         /* UTF-8, NUL-terminated, may be empty */
+} rda_display_info;
+
+/* The displays rda_host_start_capture() can capture, primary first. Set
+ * out[0].struct_size (e.g. to sizeof(rda_display_info)): entries are written
+ * that far apart, up to `capacity` of them. `*count` gets the number of
+ * displays, also when it exceeds `capacity` (call with capacity 0 and
+ * out NULL to ask). RDA_ERR_UNSUPPORTED when there is no display (no X
+ * server, ...). */
+RDA_API rda_status rda_list_displays(rda_display_info* out, size_t capacity, size_t* count);
+
 /* ---- input -------------------------------------------------------------- */
 
 typedef enum rda_input_kind {
@@ -384,6 +403,9 @@ typedef struct rda_host_config {
    * transports never need it). */
   const uint8_t* encryption_key;
   int32_t allow_plaintext; /* 0 */
+
+  /* rda_host_start_capture() only */
+  int32_t display_index; /* 0 = primary display; see rda_list_displays() */
 } rda_host_config;
 
 typedef struct rda_host_stats {

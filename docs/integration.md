@@ -162,6 +162,7 @@ host.SetMessageHandler([](uint32_t type, std::span<const uint8_t> p) { ... });
 | `fps` | 60 | 链路很慢或想省 CPU 时降到 30 |
 | `bitrate_bps` | 8 Mbps | 码率上限。UDP 下实际码率跟着带宽估计走，不会超过它 |
 | `min_bitrate_bps` | 300 kbps | 自适应码率的下限 |
+| `display_index` | 0（主显示器） | 多显示器时选要采集的那块屏。`ListDisplays()`（C：`rda_list_displays`）列出可选的显示器，0 永远是主显示器 |
 | `capture_width` / `capture_height` | 0（原生） | 4K / Retina 屏想降分辨率传输时（macOS 和 Linux 都支持，光标图像跟着缩放） |
 | `cursor_channel` | 开 | 一般不关；关掉且 `capture_cursor` 也关时接收端看不到光标 |
 | `video_regions` | 开 | 对比测试时关 |

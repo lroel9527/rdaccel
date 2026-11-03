@@ -15,6 +15,14 @@ const char* PlatformName() { return platform::PlatformName(); }
 
 uint64_t NowMicros() { return capture::MonotonicMicros(); }
 
+bool ListDisplays(std::vector<DisplayInfo>& out, std::string* error) {
+  std::vector<capture::DisplayInfo> all;
+  if (!platform::ListDisplays(all, error)) return false;
+  out.clear();
+  for (const auto& d : all) out.push_back({d.index, d.x, d.y, d.width, d.height, d.primary, d.name});
+  return true;
+}
+
 std::vector<Rect> RenderTestPattern(uint64_t index, int32_t w, int32_t h,
                                     std::vector<uint8_t>& bgra) {
   return capture::RenderSyntheticFrame(index, w, h, bgra);

@@ -9,6 +9,8 @@
 //   Cursor (cursor.h)  the mouse cursor, sent apart from the picture
 
 #include <cstdint>
+#include <string>
+#include <vector>
 
 #include "rdacore/connection.h"
 #include "rdacore/cursor.h"
@@ -24,6 +26,16 @@
 
 namespace rdacore {
 
+// One display (monitor). Origin in desktop units (points on macOS, pixels
+// on X11), size in pixels.
+struct DisplayInfo {
+  int32_t index = 0;
+  int32_t x = 0, y = 0;
+  int32_t width = 0, height = 0;
+  bool primary = false;
+  std::string name;
+};
+
 // Library version, e.g. "0.1.0".
 const char* Version();
 
@@ -32,5 +44,9 @@ const char* PlatformName();
 
 // Monotonic clock in microseconds, the same one the library uses.
 uint64_t NowMicros();
+
+// The displays StartScreenCapture() can capture, primary first (index 0).
+// False with `error` set when there is none (no X server, ...).
+bool ListDisplays(std::vector<DisplayInfo>& out, std::string* error = nullptr);
 
 }  // namespace rdacore

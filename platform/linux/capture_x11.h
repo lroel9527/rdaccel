@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -17,6 +18,8 @@ namespace rdacore::platform {
 class X11Capturer final : public capture::ICapturer {
  public:
   X11Capturer() = default;
+  // Captures exactly `area` of the X screen instead of a display (tests).
+  explicit X11Capturer(Rect area) : area_(area) {}
   ~X11Capturer() override { Stop(); }
 
   bool Start(const capture::CaptureConfig& cfg, capture::FrameFn on_frame) override;
@@ -27,6 +30,7 @@ class X11Capturer final : public capture::ICapturer {
   std::atomic<bool> running_{false};
   std::thread thread_;
   std::string error_;
+  std::optional<Rect> area_;
 };
 
 }  // namespace rdacore::platform

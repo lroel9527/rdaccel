@@ -88,6 +88,7 @@ if(APPLE)
   list(APPEND RDACCEL_SOURCES
     platform/mac/platform_mac.mm
     platform/mac/capture_sck.mm
+    platform/mac/displays_mac.mm
     platform/mac/cursor_mac.mm
     platform/mac/video_vt.mm
   )
@@ -96,6 +97,7 @@ elseif(UNIX)
     platform/linux/platform_linux.cpp
     platform/linux/capture_x11.cpp
     platform/linux/cursor_xfixes.cpp
+    platform/linux/displays_x11.cpp
     platform/linux/video_ffmpeg.cpp
   )
 else()
@@ -156,7 +158,7 @@ if(APPLE)
 else()
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale)
-  pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11 xext xfixes)
+  pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11 xext xfixes xrandr)
   target_link_libraries(rdaccel PRIVATE PkgConfig::FFMPEG PkgConfig::X11)
 endif()
 
@@ -297,6 +299,10 @@ if(RDACCEL_BUILD_TESTS)
   add_executable(rdaccel_platform_tests tests/test_platform_codec.cpp tests/test_api.cpp
     tests/test_capi.cpp)
   target_link_libraries(rdaccel_platform_tests PRIVATE rdaccel_internal GTest::gtest_main)
+  if(NOT APPLE)
+    target_sources(rdaccel_platform_tests PRIVATE tests/test_platform_x11.cpp)
+    target_link_libraries(rdaccel_platform_tests PRIVATE PkgConfig::X11)
+  endif()
   gtest_discover_tests(rdaccel_platform_tests DISCOVERY_TIMEOUT 30
     PROPERTIES ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan.supp")
 
