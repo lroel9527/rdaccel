@@ -137,15 +137,10 @@ uint64_t ReliableTransport::QueuedBytes() const {
 uint64_t ReliableTransport::Cwnd() const {
   if (!opt_.congestion_control) return UINT64_MAX;
   if (bw_ <= 0 || min_rtt_ == 0) return kInitialCwnd;
-  // While a queue stands in the network the window shrinks to about one
-  // path's worth: with coarse timers (macOS wakes threads several ms late)
-  // pacing alone does not hold the rate down, and a 2x window would keep a
-  // full round trip of video queued ahead of every cursor update.
-  const bool queued = mode_ == Mode::kProbeBw && PathQueued();
-  const double gain = mode_ == Mode::kStartup ? kStartupGain : queued ? 1.25 : 2.0;
+  const double gain = mode_ == Mode::kStartup ? kStartupGain : 2.0;
   // A few packets on top absorb delayed and stretched acknowledgements.
   const auto bdp = static_cast<uint64_t>(gain * bw_ * static_cast<double>(min_rtt_));
-  const uint64_t cwnd = std::max(bdp + (queued ? 3 : 4) * kMaxDatagram, kMinCwnd);
+  const uint64_t cwnd = std::max(bdp + 4 * kMaxDatagram, kMinCwnd);
   // Like the pacing rate, the window does not shrink below its initial
   // size before the path has been measured under load.
   return mode_ == Mode::kStartup ? std::max(cwnd, kInitialCwnd) : cwnd;
@@ -368,7 +363,13 @@ void ReliableTransport::OnRateSample(const SentPacket& p, uint64_t now) {
   first_sent_time_ = p.time;
   if (interval > 0 && (min_rtt_ == 0 || interval >= min_rtt_ / 2)) {
     const double rate = static_cast<double>(delivered_ - p.delivered) / static_cast<double>(interval);
-    if (!p.app_limited || rate >= bw_) bw_samples_.push_back({round_, now, rate});
+    // A sample may lower the estimate only when the path set its pace (the
+    // acknowledgements came back slower than the packets went out). When
+    // they came back as fast, the sample measured our own sending: below
+    // the estimate while draining a queue, or while threads woke late
+    // (macOS CI), and taking it would spiral the estimate down.
+    const bool path_paced = ack_elapsed > send_elapsed + send_elapsed / 8;
+    if ((!p.app_limited && path_paced) || rate >= bw_) bw_samples_.push_back({round_, now, rate});
   }
   // A standing queue at the bottleneck (the round trip well above its
   // minimum while we are backlogged) means we send faster than the path
