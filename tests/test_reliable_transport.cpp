@@ -253,6 +253,8 @@ TEST(ReliableTransport, EstimateFollowsABandwidthDrop) {
     if (st.queued_bytes < 20'000) host.Send(Channel::kVideo, chunk);
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
   }
+  std::printf("estimate caught up %.2f s after the drop, ends at %lld kbps\n",
+              caught_up ? (caught_up - 2'000'000) / 1e6 : -1.0, static_cast<long long>(st.bandwidth_bps / 1000));
   // Before the time window it took ~2.7 s after the drop; now ~0.4 s here
   // and ~1.3 s on a macOS laptop (coarser timers).
   ASSERT_NE(caught_up, 0u);

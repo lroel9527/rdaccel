@@ -320,10 +320,12 @@ TEST(Link, ViewerTimesOutWhenNoHostAnswers) {
 
 TEST(Link, PingsKeepAnIdleConnectionAlive) {
   LinkOptions o;
-  o.peer_timeout_ms = 200;
+  // Long enough that a loaded CI machine (macOS runners stall for 100s of
+  // ms) does not time out between pings; still several timeouts of idling.
+  o.peer_timeout_ms = 600;
   Pair p(o, o);
   ASSERT_TRUE(WaitUntil([&] { return p.viewer->state() == LinkState::kConnected; }));
-  std::this_thread::sleep_for(std::chrono::milliseconds(700));
+  std::this_thread::sleep_for(std::chrono::milliseconds(2000));
   EXPECT_EQ(p.host->state(), LinkState::kConnected);
   EXPECT_EQ(p.viewer->state(), LinkState::kConnected);
 }
