@@ -66,7 +66,11 @@ int main(int argc, char** argv) {
     std::lock_guard<std::mutex> lock(mu);
     ++cursor_updates;
     cursor = c;
-    if (c.image_changed && c.image) cursor_image = *c.image;
+    if (c.image_changed && c.image) {
+      cursor_image = *c.image;
+      std::printf("cursor image %dx%d, hotspot %d,%d\n", cursor_image.width, cursor_image.height,
+                  cursor_image.hotspot_x, cursor_image.hotspot_y);
+    }
     cursor.image = nullptr;  // only valid during the call
   };
   auto viewer = rdaccel::Viewer::Create(std::move(transport), std::move(handlers), &err);

@@ -58,6 +58,12 @@ struct HostOptions {
   // Re-send tiles left at first-pass video quality once they are static
   // (typically content that scrolled in or was dragged).
   bool refresh = false;
+  // Progressive keyframes: a keyframe (the first picture, or a refresh the
+  // viewer asked for) goes out as video only, which is several times smaller
+  // than the lossless tiles and shows up quickly on a slow link. The tiles
+  // that qualify for the lossless layer then follow over the next frames,
+  // within about half the bitrate budget.
+  bool progressive = true;
 
   // Video region streams. Off unless an encoder factory is given.
   using EncoderFactory = std::function<std::unique_ptr<codec::IHevcEncoder>(
@@ -165,6 +171,22 @@ class HostSession {
   int64_t RegionBitrate(const Rect& r) const;
   bool regions_disabled_ = false;      // a region encoder could not be created
   std::vector<size_t> pending_sharpen_;  // tiles of closed areas, for the next frame
+  // Progressive keyframes: tiles still owed their lossless version.
+  std::vector<uint8_t> pending_lossless_;
+  size_t pending_lossless_count_ = 0;
+  size_t pending_cursor_ = 0;              // where the next frame continues
+  double lossless_bytes_per_tile_ = 1500;  // running estimate, for the budget
+  uint64_t progressive_last_us_ = 0;       // capture time of the last frame that sent some
+  bool progressive_active_ = false;        // a progressive keyframe is being completed
+  bool sharpen_video_ = false;             // ... and was: re-send the video tiles sharp
+  // Tiles sent losslessly by a progressive keyframe whose text is still in
+  // the encoder's input (flattened in one go, at the end).
+  std::vector<uint8_t> unflattened_;
+  // Share of the bitrate the owed tiles may use. The screen is usually static
+  // meanwhile; changes still go first, and the transport's queue limit holds
+  // latency down if the estimate is off.
+  static constexpr double kProgressiveShare = 0.8;
+  static constexpr size_t kMaxProgressivePerFrame = 64;
   uint64_t next_frame_id_ = 1;
   std::atomic<bool> force_keyframe_{true};
 

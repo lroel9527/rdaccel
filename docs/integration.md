@@ -81,9 +81,10 @@ viewer->SendInput({rdaccel::InputKind::kMouseMove, 100, 200});
 | `fps` | 60 | 链路很慢或想省 CPU 时降到 30 |
 | `bitrate_bps` | 8 Mbps | 码率上限。UDP 下实际码率跟着带宽估计走，不会超过它 |
 | `min_bitrate_bps` | 300 kbps | 自适应码率的下限 |
-| `capture_width` / `capture_height` | 0（原生） | 4K / Retina 屏想降分辨率传输时 |
+| `capture_width` / `capture_height` | 0（原生） | 4K / Retina 屏想降分辨率传输时（macOS 和 Linux 都支持，光标图像跟着缩放） |
 | `cursor_channel` | 开 | 一般不关；关掉且 `capture_cursor` 也关时接收端看不到光标 |
 | `video_regions` | 开 | 对比测试时关 |
+| `progressive` | 开 | 首帧先发视频版、随后补成无损。要求第一张画面就逐像素准确（截图、自动化测试）时关 |
 | `encoder` | 自动 | Linux 上强制 `libx265` 或 `hevc_nvenc` |
 
 每个模块的开关和评测数据见 [README](../README.md)。

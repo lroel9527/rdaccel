@@ -114,15 +114,16 @@ TEST(PublicApi, StaticScreenIsSkipped) {
   rdaccel::Host host(std::move(host_end), cfg);
   std::vector<uint8_t> px;
   rdaccel::RenderTestPattern(0, kW, kH, px);
-  // After the first frame the encoder may refine the static picture for
-  // `refine_frames` frames; after that, nothing more is sent.
-  const int n = cfg.refine_frames + 20;
+  // After the first frame come the progressive tiles, one sharper picture of
+  // what stays video, and `refine_frames` refinements of it; after that,
+  // nothing more is sent.
+  const int n = cfg.refine_frames + 40;
   for (int i = 0; i < n; ++i) {
     ASSERT_TRUE(host.SubmitFrame({px.data(), kW, kH, kW * 4}, rdaccel::NowMicros()));
   }
   ASSERT_TRUE(got.WaitFor(1));
   const auto st = host.stats();
-  EXPECT_LE(st.frames_encoded, 1u + static_cast<uint64_t>(cfg.refine_frames));
+  EXPECT_LE(st.frames_encoded, 2u + static_cast<uint64_t>(cfg.refine_frames) + st.progressive_tiles);
   EXPECT_EQ(st.frames_encoded + st.frames_skipped, static_cast<uint64_t>(n));
   const uint64_t sent = st.bytes_sent;
   for (int i = 0; i < 10; ++i) {

@@ -26,6 +26,12 @@ inline constexpr size_t kCursorCacheSize = 64;
 // 64-bit content id of an image, never 0.
 uint64_t CursorImageId(const CursorImage& img);
 
+// `img` resized by `factor` (e.g. 0.5 when the screen is captured at half
+// its size), hotspot included, at most 256 x 256 and at least 1 x 1.
+// Shrinking averages the covered pixels (premultiplied alpha, so edges stay
+// clean); enlarging repeats them.
+CursorImage ScaleCursorImage(const CursorImage& img, double factor);
+
 class CursorSender {
  public:
   explicit CursorSender(transport::ITransport* transport) : transport_(transport) {}

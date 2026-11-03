@@ -64,6 +64,8 @@ class MacCursorSource final : public capture::ICursorSource {
     out.y = p.y - b.origin.y;
     out.screen_width = b.size.width;
     out.screen_height = b.size.height;
+    // RenderCursor draws at this scale.
+    out.image_scale = NSScreen.mainScreen ? NSScreen.mainScreen.backingScaleFactor : 1.0;
     out.visible = true;
     out.image_changed = false;
     if (polls_++ % kImageEvery == 0) {
