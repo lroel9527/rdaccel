@@ -54,11 +54,12 @@ cmake --install build --prefix /opt/rdaccel
 线程、生命周期、传输选择、出错处理和平台要求见 **[集成指南](docs/integration.md)**。跨两台机器试用：
 
 ```bash
-./build/bin/rdaccel_serve --udp=7300                     # 被控机：采集主屏，等一个接收端
-./build/bin/rdaccel_view 10.0.0.2 --udp=7300 --seconds=30 --dump=last.ppm   # 控制端：解码并每秒打印统计
+KEY=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')         # 32 字节密钥，两边相同（或两边都用 --plaintext）
+./build/bin/rdaccel_serve --udp=7300 --key=$KEY           # 被控机：采集主屏，等一个接收端
+./build/bin/rdaccel_view 10.0.0.2 --udp=7300 --key=$KEY --seconds=30 --dump=last.ppm   # 控制端：解码并每秒打印统计
 ```
 
-0.2 还加了连接管理：握手和版本协商、心跳和断线检测（`on_state`）、主动关闭时通知对方、认证钩子、双向应用消息通道（剪贴板文本或你自己的消息，见[集成指南 1.1](docs/integration.md)），键盘事件统一用 USB HID 键码。
+0.2 还加了连接管理：握手和版本协商、心跳和断线检测（`on_state`）、主动关闭时通知对方、认证钩子、双向应用消息通道（剪贴板文本或你自己的消息，见[集成指南 1.1](docs/integration.md)），键盘事件统一用 USB HID 键码。TCP / UDP 上的数据用应用提供的 32 字节密钥做 XChaCha20-Poly1305 加密认证（不加密必须显式 `allow_plaintext`）；分辨率可以中途改变；`rda_udp_bind` 不阻塞，`rda_udp_from_fd` 可接管你自己的 socket。
 
 0.2 把公开接口换成了 C ABI + C++ 包装层（库形态的决定见[设计文档](https://claude.ai/artifact/71hkqA9ywj4VGktXPvpPXH)）。C++ 用法和 0.1 基本一样，只是头文件换成 `rdaccel.hpp`。1.0 之前次版本之间还可能不兼容，1.0 之后同一主版本内只加不改。
 

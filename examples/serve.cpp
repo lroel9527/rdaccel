@@ -3,6 +3,7 @@
 // it. Prints one line of statistics per second.
 //
 //   rdaccel_serve [--udp=PORT | --tcp=PORT] [--source=screen|synthetic] [--seconds=0]
+//                 (--key=<64 hex digits> | --plaintext)
 //                 [--size=WxH] [--fps=60] [--bitrate=8000000]
 //
 // UDP (the default, port 7300) has congestion control and adaptive bitrate;
@@ -63,6 +64,12 @@ int main(int argc, char** argv) {
   }
 
   rdaccel::HostConfig cfg;
+  if (!args.key("key", cfg.encryption_key)) return 2;
+  cfg.allow_plaintext = args.has("plaintext");
+  if (cfg.encryption_key.empty() && !cfg.allow_plaintext) {
+    std::fprintf(stderr, "pass --key=<64 hex digits> (the same on both sides) or --plaintext\n");
+    return 2;
+  }
   cfg.fps = fps;
   cfg.bitrate_bps = args.num("bitrate", 8'000'000);
   if (source == "screen" && args.has("size")) {

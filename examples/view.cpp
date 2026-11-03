@@ -4,6 +4,7 @@
 // drawn on it) as a PPM file at the end.
 //
 //   rdaccel_view HOST [--udp=PORT | --tcp=PORT] [--seconds=10] [--dump=last.ppm] [--keyframe-at=S]
+//                (--key=<64 hex digits> | --plaintext)   (as on the serving side)
 //
 // The protocol of both ends must match: --udp with --udp, --tcp with --tcp.
 // Uses only the public API; a GUI application would draw the picture from
@@ -32,6 +33,14 @@ int main(int argc, char** argv) {
   // Ask the host for a keyframe after this many seconds (0 = never), e.g. to
   // check that one comes while the host's screen is static.
   const auto keyframe_at = static_cast<int>(args.num("keyframe-at", 0));
+
+  rdaccel::ViewerOptions options;
+  if (!args.key("key", options.encryption_key)) return 2;
+  options.allow_plaintext = args.has("plaintext");
+  if (options.encryption_key.empty() && !options.allow_plaintext) {
+    std::fprintf(stderr, "pass --key=<64 hex digits> (the same on both sides) or --plaintext\n");
+    return 2;
+  }
 
   std::string err;
   auto transport = tcp ? rdaccel::ConnectTcp(host_name, port, &err) : rdaccel::ConnectUdp(host_name, port, &err);
@@ -81,7 +90,7 @@ int main(int argc, char** argv) {
     if (st == rdaccel::ConnectionState::kDisconnected) std::printf("disconnected: %s\n", rda_status_str(reason));
     std::fflush(stdout);
   };
-  auto viewer = rdaccel::Viewer::Create(std::move(transport), std::move(handlers), &err);
+  auto viewer = rdaccel::Viewer::Create(std::move(transport), std::move(handlers), options, &err);
   if (!viewer) {
     std::fprintf(stderr, "%s\n", err.c_str());
     return 1;

@@ -488,6 +488,10 @@ struct HostConfig {
   // Whether a viewer may connect, from its auth token (transport thread).
   // Empty = everyone may.
   std::function<bool(std::span<const uint8_t> token)> auth;
+  // 32 bytes shared with the viewer (see rda_host_config). Empty = none,
+  // which TCP / UDP refuse unless allow_plaintext.
+  std::vector<uint8_t> encryption_key;
+  bool allow_plaintext = false;
 };
 
 struct HostStats {
@@ -559,6 +563,12 @@ class Host {
     c.min_bitrate_bps = config.min_bitrate_bps;
     c.max_queue_ms = config.max_queue_ms;
     c.peer_timeout_ms = config.peer_timeout_ms;
+    if (!config.encryption_key.empty() && config.encryption_key.size() != 32) {
+      create_error_ = "encryption_key must be 32 bytes";
+      return;
+    }
+    c.encryption_key = config.encryption_key.empty() ? nullptr : config.encryption_key.data();
+    c.allow_plaintext = config.allow_plaintext;
     c.user = state_.get();
     state_->auth = std::move(config.auth);
     if (state_->auth) {
@@ -781,6 +791,8 @@ struct ViewerHandlers {
 struct ViewerOptions {
   int32_t peer_timeout_ms = 10'000;  // 0 = never time out
   std::vector<uint8_t> auth_token;   // for the host's auth hook, at most 4096 bytes
+  std::vector<uint8_t> encryption_key;  // 32 bytes, the host's; empty = none
+  bool allow_plaintext = false;         // needed for TCP / UDP without a key
 };
 
 class Viewer {
@@ -801,6 +813,12 @@ class Viewer {
     c.peer_timeout_ms = options.peer_timeout_ms;
     c.auth_token = options.auth_token.data();
     c.auth_token_len = options.auth_token.size();
+    if (!options.encryption_key.empty() && options.encryption_key.size() != 32) {
+      if (error) *error = "encryption_key must be 32 bytes";
+      return nullptr;
+    }
+    c.encryption_key = options.encryption_key.empty() ? nullptr : options.encryption_key.data();
+    c.allow_plaintext = options.allow_plaintext;
     if (v->state_->h.on_state) {
       c.on_state = [](void* u, rda_state st, rda_status reason) {
         static_cast<State*>(u)->h.on_state(static_cast<ConnectionState>(st), reason);

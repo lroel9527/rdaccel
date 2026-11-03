@@ -88,7 +88,7 @@ host.SetStateHandler([](rdaccel::ConnectionState s, rda_status reason) {
 
 连接建立之前 `SendMessage` 返回失败（C：`RDA_ERR_BUSY`），`SendInput` 被丢弃，Host 也不接受对方的输入和消息（认证钩子不能被绕过）；所以要发东西请等 `kConnected`。断开后 `SubmitFrame` 和 `SendMessage` 返回失败（C：`RDA_ERR_CLOSED`），`SendInput` 被丢弃，库自己的屏幕采集不再编码。
 
-**认证钩子。** 接收端在 `ViewerOptions::auth_token`（C：`rda_viewer_config.auth_token`，最多 4096 字节）里放一段令牌，发送端在 `HostConfig::auth`（C：`on_auth`）里决定是否接受，拒绝时两边都以 `RDA_ERR_AUTH` 断开。令牌目前是明文传输的，真正的身份验证要等加密上线（0.3）后再依赖它；现在跨公网仍请放在 VPN 或自己的加密传输里。
+**认证钩子。** 接收端在 `ViewerOptions::auth_token`（C：`rda_viewer_config.auth_token`，最多 4096 字节）里放一段令牌，发送端在 `HostConfig::auth`（C：`on_auth`）里决定是否接受，拒绝时两边都以 `RDA_ERR_AUTH` 断开。配上加密（见第 4 节）后令牌也是加密传输的；不加密时令牌是明文，只能当作区分用户的标签。
 
 **版本协商。** 握手里双方各报“我说的版本”和“我最低能服务的对方版本”，新版本只要还支持旧版本就能互通；不兼容时以 `RDA_ERR_PROTOCOL` 断开，日志里写明双方版本。解析器会跳过不认识的消息类型、忽略消息末尾新增的字段，所以以后加功能不必升最低版本。
 
@@ -139,7 +139,18 @@ host.SetMessageHandler([](uint32_t type, std::span<const uint8_t> p) { ... });
 
 自己实现 `Transport` 的要求（C 接口见 `rdaccel.h` 里的 `rda_transport_vtable`，C++ 里继承 `rdaccel::Transport`）：`Send` 线程安全；同一通道内字节有序，可以拆分或合并；接收回调设置之前到达的数据要先存着；析构时停掉自己的线程并等正在执行的回调返回。通道之间最好互相独立（光标、输入不排在视频后面）。通道号要原样传递：现在有 6 个（`RDA_CHANNEL_COUNT`，第 6 个是应用消息），以后可能增加，256 以下的通道号都应该能传。如果能测出带宽和排队量，实现 `GetStats`，`Host` 会自动做自适应码率。
 
-两端必须用同一种传输。UDP 和 TCP 目前都没有加密和认证，跨公网使用时请放在 VPN、SSH 隧道或自己的加密传输里面。
+两端必须用同一种传输。
+
+### 加密
+
+两端在配置里放同一个 32 字节密钥（C：`encryption_key`；C++：`HostConfig::encryption_key` / `ViewerOptions::encryption_key`），之后所有通道上的数据都用 XChaCha20-Poly1305 加密并认证：
+
+- 每次连接双方各出 32 字节随机数，用 BLAKE2b 从应用密钥派生出两个方向各自的会话密钥，所以同一个密钥长期使用也不会重复用 nonce。
+- 每条记录带通道号和递增计数，篡改、重放、乱序、跨通道搬运都会被发现；发现后这条连接以 `RDA_ERR_AUTH` 断开，对方也会立刻收到（不用等超时）。
+- 一端有密钥、另一端没有时以 `RDA_ERR_PROTOCOL` 断开；密钥不同时两端都是 `RDA_ERR_AUTH`。
+- TCP 和 UDP 传输上不给密钥会直接创建失败，除非显式设置 `allow_plaintext`。管道、录制、模拟网络和自定义传输不受此限制（自定义传输可能自带加密，比如 QUIC、WebRTC）。
+- 密钥怎么生成、怎么交给两端是应用的事（比如扫码配对、账号服务器下发）。用 `od -An -tx1 -N32 /dev/urandom` 就能生成一个；示例程序用 `--key=<64 位十六进制>`。
+- 加密用的是仓库里自带的 [Monocypher](../third_party/monocypher/README.md) 4.0.2（BSD-2 / CC0），已经和 libsodium 逐字节对照过。
 
 ## 5. 常用配置
 

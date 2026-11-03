@@ -63,6 +63,8 @@ struct ViewerOptions {
   int32_t peer_timeout_ms = 10'000;
   // Sent to the host's auth hook in the handshake.
   std::vector<uint8_t> auth_token;
+  // 32 bytes, the host's key. Empty = plaintext.
+  std::vector<uint8_t> encryption_key;
 };
 
 class Viewer {

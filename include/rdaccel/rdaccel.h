@@ -370,6 +370,16 @@ typedef struct rda_host_config {
   /* Decides whether a viewer may connect, from the token in its config;
    * nonzero = accept. NULL = accept everyone. Transport receive thread. */
   int (*on_auth)(void* user, const uint8_t* token, size_t n);
+
+  /* Encryption. */
+  /* 32 bytes both sides share (copied): everything is encrypted and
+   * authenticated with XChaCha20-Poly1305 under fresh per-connection keys.
+   * A peer with another key, or none, disconnects with RDA_ERR_AUTH or
+   * RDA_ERR_PROTOCOL. NULL = plaintext, which TCP and UDP transports refuse
+   * unless allow_plaintext is set (pipes, recordings, simulated and custom
+   * transports never need it). */
+  const uint8_t* encryption_key;
+  int32_t allow_plaintext; /* 0 */
 } rda_host_config;
 
 typedef struct rda_host_stats {
@@ -488,6 +498,10 @@ typedef struct rda_viewer_config {
   void (*on_state)(void* user, rda_state state, rda_status reason);
   /* An application message from the host. Transport receive thread. */
   void (*on_message)(void* user, uint32_t type, const uint8_t* payload, size_t n);
+
+  /* Encryption, as for the host: the same 32-byte key, or NULL. */
+  const uint8_t* encryption_key;
+  int32_t allow_plaintext; /* 0 */
 } rda_viewer_config;
 
 typedef struct rda_viewer_stats {

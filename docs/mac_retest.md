@@ -39,7 +39,7 @@ tools/mac_retest.sh --skip-screen   # 不采集真实屏幕（不需要屏幕录
 
 1. **回环窗口里的光标**：`open build-retest/bin/rdaccel_loopback.app`。确认窗口里的光标位置对、大小和真实光标一致（Retina），窗口缩放后还对得上。看完关掉窗口。
 2. **多显示器**（如果有外接屏）：现在只按主屏算光标坐标。把鼠标移到副屏，回环窗口里的光标应该消失或停在边上，不能跳到奇怪的位置。
-3. **两台机器**：一台跑 `build-retest/bin/rdaccel_serve`，另一台（Mac 或 Linux）跑 `rdaccel_view <ip> --seconds=20`。看每秒的 fps 和码率，`errors` 应该是 0。
+3. **两台机器**：先生成一个密钥 `KEY=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')`，一台跑 `build-retest/bin/rdaccel_serve --key=$KEY`，另一台（Mac 或 Linux）跑 `rdaccel_view <ip> --seconds=20 --key=$KEY`（两边同一个密钥；不想加密就两边都加 `--plaintext`）。看每秒的 fps 和码率，`errors` 应该是 0。
 
 ## 记录结果
 

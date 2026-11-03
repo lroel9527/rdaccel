@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <map>
 #include <string>
+#include <vector>
 
 namespace rdaccel::examples {
 
@@ -44,6 +45,30 @@ class Args {
     auto it = kv_.find(k);
     return it == kv_.end() ? def : std::atof(it->second.c_str());
   }
+  // --key=<64 hex digits>: a 32-byte encryption key. Returns false (and
+  // prints why) if it is present but malformed; `out` stays empty without it.
+  bool key(const std::string& k, std::vector<uint8_t>& out) const {
+    out.clear();
+    auto it = kv_.find(k);
+    if (it == kv_.end()) return true;
+    const std::string& h = it->second;
+    if (h.size() != 64) {
+      std::fprintf(stderr, "--%s needs 64 hex digits (32 bytes)\n", k.c_str());
+      return false;
+    }
+    for (size_t i = 0; i < 64; i += 2) {
+      char* end = nullptr;
+      const std::string byte = h.substr(i, 2);
+      const long v = std::strtol(byte.c_str(), &end, 16);
+      if (*end != '\0') {
+        std::fprintf(stderr, "--%s: not hex\n", k.c_str());
+        return false;
+      }
+      out.push_back(static_cast<uint8_t>(v));
+    }
+    return true;
+  }
+
   // Parses "WxH". Returns false if the key is absent or malformed.
   bool size(const std::string& k, int& w, int& h) const {
     auto it = kv_.find(k);
