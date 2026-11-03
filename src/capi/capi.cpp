@@ -131,7 +131,8 @@ rda_input_event ToC(const rdacore::InputEvent& e) {
 }
 
 bool FromC(const rda_input_event& e, rdacore::InputEvent& o) {
-  if (e.kind < RDA_INPUT_MOUSE_MOVE || e.kind > RDA_INPUT_KEY_UP) return false;
+  if (e.kind < RDA_INPUT_MOUSE_MOVE || e.kind > RDA_INPUT_TEXT) return false;
+  if (e.kind == RDA_INPUT_TEXT && !rdacore::IsUnicodeScalar(e.code)) return false;
   o.kind = static_cast<rdacore::InputKind>(e.kind);
   o.x = e.x;
   o.y = e.y;
@@ -947,7 +948,8 @@ rda_status rda_viewer_send_input(rda_viewer* v, const rda_input_event* ev) {
   rda_input_event_default(&e);
   rdacore::InputEvent ie;
   if (!ReadStruct(ev, e) || !FromC(e, ie)) return Fail(RDA_ERR_INVALID_ARG, "bad input event");
-  v->viewer->SendInput(ie);
+  std::string err;
+  if (!v->viewer->SendInput(ie, &err)) return Fail(RDA_ERR_UNSUPPORTED, err);
   return RDA_OK;
   RDA_GUARD_END
 }

@@ -44,6 +44,7 @@ std::vector<Message> SampleMessages() {
       CursorPos{-5, 1080, false, 9, 123456},
       cursor,
       InputEvent{InputKind::kScroll, 100, 200, 0, -3, 0, 0x100000},
+      InputEvent{InputKind::kText, 0, 0, 0, 0, 0x1F600, 0},
       Feedback{42, 1000, 2000},
       LosslessData{8, true, {1, 2, 3}},
       KeyframeRequest{77},
@@ -91,6 +92,31 @@ TEST(Messages, UnknownTypesAreSkipped) {
   EXPECT_EQ(std::get<FrameEnd>(*m).frame_id, 7u);
   EXPECT_TRUE(p.error().empty());
   EXPECT_EQ(p.skipped(), 1u);
+}
+
+TEST(Messages, InputKindsFromALaterVersionAreSkipped) {
+  // An InputEvent of a kind this version does not know: skipped, the stream
+  // goes on (a 0.3 host disconnected here, hence the text-input capability).
+  InputEvent future{InputKind::kKeyDown, 1, 2, 0, 0, 4, 0};
+  auto bytes = Encode(future);
+  bytes[2] = 42;  // the kind byte, after the type and length
+  const auto end = Encode(FrameEnd{7});
+  bytes.insert(bytes.end(), end.begin(), end.end());
+  StreamParser p;
+  p.Append(bytes);
+  auto m = p.Next();
+  ASSERT_TRUE(m.has_value()) << p.error();
+  EXPECT_EQ(std::get<FrameEnd>(*m).frame_id, 7u);
+  EXPECT_EQ(p.skipped(), 1u);
+}
+
+TEST(Messages, TextMustBeAUnicodeScalar) {
+  for (uint32_t bad : {0u, 0xD800u, 0xDFFFu, 0x110000u}) {
+    StreamParser p;
+    p.Append(Encode(InputEvent{InputKind::kText, 0, 0, 0, 0, bad, 0}));
+    EXPECT_FALSE(p.Next().has_value()) << bad;
+    EXPECT_FALSE(p.error().empty()) << bad;
+  }
 }
 
 TEST(Messages, TrailingFieldsAreIgnored) {

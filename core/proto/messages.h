@@ -30,7 +30,8 @@ inline constexpr uint32_t kMinViewerVersion = 4;
 
 // Capability bits in Hello / ViewerHello, for features a peer may lack.
 inline constexpr uint64_t kCapMessages = 1;  // AppMessage on Channel::kMessage
-inline constexpr uint64_t kCapsAll = kCapMessages;
+inline constexpr uint64_t kCapTextInput = 2;  // InputEvent kind kText
+inline constexpr uint64_t kCapsAll = kCapMessages | kCapTextInput;
 
 enum class MsgType : uint8_t {
   kHello = 1,

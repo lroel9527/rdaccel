@@ -181,6 +181,13 @@ TEST(CApi, HostToViewerWithInput) {
   EXPECT_EQ(rda_viewer_send_input(v, &ev), RDA_ERR_INVALID_ARG);
   EXPECT_TRUE(WaitUntil([&] { return got.inputs == 1; }));
   EXPECT_EQ(got.last_code, 4u);
+  ev.kind = RDA_INPUT_TEXT;
+  ev.code = 0xD800;  // a surrogate is not a character
+  EXPECT_EQ(rda_viewer_send_input(v, &ev), RDA_ERR_INVALID_ARG);
+  ev.code = 0x4E2D;
+  ASSERT_EQ(rda_viewer_send_input(v, &ev), RDA_OK) << rda_last_error();
+  EXPECT_TRUE(WaitUntil([&] { return got.inputs == 2; }));
+  EXPECT_EQ(got.last_code, 0x4E2Du);
 
   char enc[64];
   EXPECT_GT(rda_host_encoder_name(h, enc, sizeof(enc)), 0u);

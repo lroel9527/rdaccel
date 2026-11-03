@@ -97,10 +97,16 @@ std::unique_ptr<Viewer> Viewer::Create(std::unique_ptr<Transport> transport,
   return std::unique_ptr<Viewer>(new Viewer(std::move(impl)));
 }
 
-void Viewer::SendInput(const InputEvent& ev) {
+bool Viewer::SendInput(const InputEvent& ev, std::string* error) {
   // The host ignores input from a viewer it has not accepted yet.
-  if (impl_->link && impl_->link->state() != ConnectionState::kConnected) return;
+  if (impl_->link && impl_->link->state() != ConnectionState::kConnected) return true;
+  if (ev.kind == InputKind::kText && impl_->link &&
+      !(impl_->link->peer_caps() & proto::kCapTextInput)) {
+    if (error) *error = "the host does not take text input (older version)";
+    return false;
+  }
   impl_->session->SendInput(ev);
+  return true;
 }
 
 bool Viewer::SendMessage(uint32_t type, std::span<const uint8_t> payload, std::string* error) {

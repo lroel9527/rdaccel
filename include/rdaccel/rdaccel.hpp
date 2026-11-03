@@ -150,6 +150,7 @@ enum class InputKind : uint8_t {
   kScroll = RDA_INPUT_SCROLL,
   kKeyDown = RDA_INPUT_KEY_DOWN,
   kKeyUp = RDA_INPUT_KEY_UP,
+  kText = RDA_INPUT_TEXT,  // code = a Unicode scalar value
 };
 
 struct InputEvent {
@@ -218,6 +219,37 @@ inline rda_input_event ToC(const InputEvent& e) {
 
 inline InputEvent FromC(const rda_input_event& c) {
   return {static_cast<InputKind>(c.kind), c.x, c.y, c.delta_x, c.delta_y, c.code, c.modifiers};
+}
+
+// Strict UTF-8 (no overlongs, surrogates or values past 0x10FFFF).
+inline bool DecodeUtf8(std::string_view s, std::vector<uint32_t>& out) {
+  out.clear();
+  for (size_t i = 0; i < s.size();) {
+    const auto b0 = static_cast<uint8_t>(s[i]);
+    int n = 0;
+    uint32_t c = 0, min = 0;
+    if (b0 < 0x80) {
+      c = b0;
+    } else if ((b0 & 0xE0) == 0xC0) {
+      n = 1, c = b0 & 0x1Fu, min = 0x80;
+    } else if ((b0 & 0xF0) == 0xE0) {
+      n = 2, c = b0 & 0x0Fu, min = 0x800;
+    } else if ((b0 & 0xF8) == 0xF0) {
+      n = 3, c = b0 & 0x07u, min = 0x10000;
+    } else {
+      return false;
+    }
+    if (n > 0 && i + static_cast<size_t>(n) >= s.size()) return false;  // cut short
+    for (int k = 1; k <= n; ++k) {
+      const auto b = static_cast<uint8_t>(s[i + k]);
+      if ((b & 0xC0) != 0x80) return false;
+      c = (c << 6) | (b & 0x3F);
+    }
+    if (c < min || c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF) || c == 0) return false;
+    out.push_back(c);
+    i += static_cast<size_t>(n) + 1;
+  }
+  return true;
 }
 
 inline bool SetError(std::string* error) {
@@ -913,9 +945,26 @@ class Viewer {
   Viewer(const Viewer&) = delete;
   Viewer& operator=(const Viewer&) = delete;
 
-  void SendInput(const InputEvent& ev) {
+  // False (with `error`) for a bad event, or kText to a host too old for it.
+  bool SendInput(const InputEvent& ev, std::string* error = nullptr) {
     const rda_input_event c = detail::ToC(ev);
-    rda_viewer_send_input(v_, &c);
+    return rda_viewer_send_input(v_, &c) == RDA_OK || detail::SetError(error);
+  }
+  // Types `utf8` on the host as kText events, one per character. False
+  // (with `error`) for invalid UTF-8 (nothing is sent) or an old host.
+  bool SendText(std::string_view utf8, std::string* error = nullptr) {
+    std::vector<uint32_t> chars;
+    if (!detail::DecodeUtf8(utf8, chars)) {
+      if (error) *error = "invalid UTF-8";
+      return false;
+    }
+    for (uint32_t ch : chars) {
+      InputEvent ev;
+      ev.kind = InputKind::kText;
+      ev.code = ch;
+      if (!SendInput(ev, error)) return false;
+    }
+    return true;
   }
   void RequestKeyframe() { rda_viewer_request_keyframe(v_); }
 

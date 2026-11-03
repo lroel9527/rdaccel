@@ -104,6 +104,8 @@ host.SetMessageHandler([](uint32_t type, std::span<const uint8_t> p) { ... });
 
 **输入事件。** 键盘事件的 `code` 是 USB HID 用法码（键盘页 0x07：0x04 = A，0x28 = 回车，0xE0 = 左 Ctrl……），跟操作系统无关，所以 Mac 控制端和 Linux 被控端对得上。和本机键码互转：`KeyCodeFromMac` / `KeyCodeToMac`（macOS `kVK_*`、`NSEvent.keyCode`）、`KeyCodeFromEvdev` / `KeyCodeToEvdev`（Linux `KEY_*`，X11 键码减 8）；C 里是 `rda_keycode_from_mac()` 等。鼠标按键是 `kButtonLeft = 1`、`kButtonRight = 2`、`kButtonMiddle = 3`、`kButtonBack = 4`、`kButtonForward = 5`；`modifiers` 是 `kModShift | kModCtrl | kModAlt | kModMeta | kModCaps` 的组合（Mac 的 Command 是 `kModMeta`，Option 是 `kModAlt`）。把事件注入系统仍由应用自己做。
 
+**文字输入。** 按键码只描述“按了哪个物理键”，两边键盘布局不同、或者用输入法打中文时就不够了。这时发 `kText`（C：`RDA_INPUT_TEXT`）事件，`code` 是一个 Unicode 字符（码点 1..0x10FFFF，不含代理区），被控端照字面输入，与它自己的布局无关。C++ 里 `viewer->SendText("你好")` 会把 UTF-8 字符串拆成一个字符一个事件；无效的 UTF-8 整串不发。对方是 0.3 及更早的版本、不支持文字输入时（握手里没有这个能力位），发送返回失败（C：`RDA_ERR_UNSUPPORTED`），什么也不发。被控端遇到以后版本新增的输入类型会跳过而不是断开。
+
 ## 2. 线程
 
 | 回调 / 调用 | 在哪个线程 | 注意 |

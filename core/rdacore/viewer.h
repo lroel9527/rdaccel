@@ -82,7 +82,9 @@ class Viewer {
   Viewer& operator=(const Viewer&) = delete;
 
   // Dropped unless connected (the host ignores a viewer it has not accepted).
-  void SendInput(const InputEvent& ev);
+  // False (with `error`) for a kText event when the host is too old to
+  // take text input; nothing is sent then.
+  bool SendInput(const InputEvent& ev, std::string* error = nullptr);
 
   // Reliable, ordered application message to the host (see Host::SendMessage).
   bool SendMessage(uint32_t type, std::span<const uint8_t> payload, std::string* error = nullptr);
