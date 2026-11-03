@@ -1,6 +1,7 @@
 #include "rdacore/host.h"
 
 #include <algorithm>
+#include <stdexcept>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -15,6 +16,7 @@
 #include "session/cursor_channel.h"
 #include "session/host_session.h"
 #include "session/link.h"
+#include "transport/secure_transport.h"
 #include "session/rate_control.h"
 
 namespace rdacore {
@@ -309,6 +311,18 @@ Host::Host(std::unique_ptr<Transport> transport, HostConfig config)
   impl_->config = std::move(config);
   impl_->on_state = std::move(impl_->config.on_state);
   impl_->on_message = std::move(impl_->config.on_message);
+  transport::SecureTransport* secure = nullptr;
+  if (!impl_->config.encryption_key.empty()) {
+    if (impl_->config.encryption_key.size() != transport::kSecureKeySize) {
+      throw std::invalid_argument("encryption_key must be 32 bytes");
+    }
+    auto s = std::make_unique<transport::SecureTransport>(
+        std::move(transport), /*is_host=*/true,
+        std::span<const uint8_t, transport::kSecureKeySize>(impl_->config.encryption_key.data(),
+                                                            transport::kSecureKeySize));
+    secure = s.get();
+    transport = std::move(s);
+  }
   impl_->transport = std::move(transport);
   impl_->cursor = std::make_unique<session::CursorSender>(impl_->transport.get());
   Impl* impl = impl_.get();
@@ -342,6 +356,12 @@ Host::Host(std::unique_ptr<Transport> transport, HostConfig config)
   lo.peer_timeout_ms = impl_->config.peer_timeout_ms;
   impl_->link = std::make_unique<session::Link>(session::Link::Role::kHost, impl_->transport.get(), lo,
                                                 std::move(h));
+  if (secure) {
+    secure->SetErrorHandler([impl](ConnectionError e, const std::string& msg) {
+      log::Warn("host: " + msg);
+      impl->link->Abort(e);
+    });
+  }
   impl_->transport->SetReceiver(
       [impl](Channel ch, std::span<const uint8_t> bytes) { impl->link->OnReceive(ch, bytes); });
   impl_->link->Start();

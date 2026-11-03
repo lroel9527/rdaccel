@@ -8,6 +8,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <vector>
 
 #include "rdacore/connection.h"
 #include "rdacore/cursor.h"
@@ -96,6 +97,9 @@ struct HostConfig {
   // Decides whether a viewer may connect, from the token it sent (on the
   // transport thread). Empty = everyone may.
   std::function<bool(std::span<const uint8_t> token)> auth;
+  // 32 bytes shared with the viewer: encrypts and authenticates everything
+  // (see transport/secure_transport.h). Empty = plaintext.
+  std::vector<uint8_t> encryption_key;
   // Initial state and message handlers (see Host::SetStateHandler), set
   // before the connection can change.
   std::function<void(ConnectionState, ConnectionError)> on_state;

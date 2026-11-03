@@ -56,6 +56,8 @@ set(RDACCEL_SOURCES
   core/capture/synthetic_capturer.cpp
   core/transport/local_pipe.cpp
   core/transport/tcp_transport.cpp
+  core/transport/secure_transport.cpp
+  third_party/monocypher/monocypher.c
   core/net/sim_link.cpp
   core/net/udp_socket.cpp
   core/net/reliable_transport.cpp
@@ -111,7 +113,8 @@ target_include_directories(rdaccel
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
   PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/core
-    ${CMAKE_CURRENT_SOURCE_DIR}/platform)
+    ${CMAKE_CURRENT_SOURCE_DIR}/platform
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/monocypher)
 target_compile_definitions(rdaccel PRIVATE RDACCEL_VERSION_STRING="${PROJECT_VERSION}")
 find_package(Threads REQUIRED)
 find_package(ZLIB REQUIRED)
@@ -141,7 +144,8 @@ endif()
 add_library(rdaccel_internal INTERFACE)
 target_link_libraries(rdaccel_internal INTERFACE rdaccel Threads::Threads)
 target_include_directories(rdaccel_internal INTERFACE
-  ${CMAKE_CURRENT_SOURCE_DIR}/core ${CMAKE_CURRENT_SOURCE_DIR}/platform)
+  ${CMAKE_CURRENT_SOURCE_DIR}/core ${CMAKE_CURRENT_SOURCE_DIR}/platform
+  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/monocypher)
 
 # ---------------------------------------------------------------------------
 # install + find_package(rdaccel)
@@ -209,6 +213,7 @@ if(RDACCEL_BUILD_TESTS)
     tests/test_cursor.cpp
     tests/test_link.cpp
     tests/test_keycodes.cpp
+    tests/test_secure_transport.cpp
   )
   target_link_libraries(rdaccel_tests PRIVATE rdaccel_internal GTest::gtest_main)
   include(GoogleTest)

@@ -521,3 +521,33 @@ TEST(CApi, KeyCodes) {
   EXPECT_EQ(rda_keycode_to_mac(0xE3), 0x37u);
   EXPECT_EQ(rda_keycode_to_mac(0x46), RDA_KEYCODE_NONE);
 }
+
+TEST(CApi, NetworkTransportsNeedAKeyOrExplicitPlaintext) {
+  rda_transport* t = nullptr;
+  ASSERT_EQ(rda_udp_bind(47321, &t), RDA_OK) << rda_last_error();
+  rda_host* h = nullptr;
+  EXPECT_EQ(rda_host_create(t, nullptr, &h), RDA_ERR_INVALID_ARG);  // t is taken over and freed
+  EXPECT_NE(std::string(rda_last_error()).find("allow_plaintext"), std::string::npos);
+
+  const uint8_t key[32] = {7};
+  rda_host_config c;
+  rda_host_config_default(&c);
+  c.encryption_key = key;
+  ASSERT_EQ(rda_udp_bind(47322, &t), RDA_OK);
+  ASSERT_EQ(rda_host_create(t, &c, &h), RDA_OK) << rda_last_error();
+  rda_host_destroy(h);
+
+  rda_host_config_default(&c);
+  c.allow_plaintext = 1;
+  ASSERT_EQ(rda_udp_bind(47323, &t), RDA_OK);
+  ASSERT_EQ(rda_host_create(t, &c, &h), RDA_OK) << rda_last_error();
+  rda_host_destroy(h);
+
+  // A pipe never needs either.
+  rda_transport *a = nullptr, *b = nullptr;
+  ASSERT_EQ(rda_pipe_create(&a, &b), RDA_OK);
+  rda_transport_destroy(b);
+  ASSERT_EQ(rda_host_create(a, nullptr, &h), RDA_OK);
+  rda_host_destroy(h);
+  EXPECT_EQ(rda_udp_from_fd(-1, 0, &t), RDA_ERR_INVALID_ARG);
+}

@@ -6,3 +6,7 @@ This product is licensed under the Apache License, Version 2.0.
 On Linux, rdaccel links FFmpeg and may use libx265, which is licensed under
 the GNU GPL. Binaries that include libx265 must be distributed under the
 terms of the GPL.
+
+third_party/monocypher: Monocypher 4.0.2, Copyright (c) 2017-2023 Loup
+Vaillant, Michael Savage, Fabio Scotoni; BSD-2-Clause or CC0 (see
+third_party/monocypher/LICENCE.md).

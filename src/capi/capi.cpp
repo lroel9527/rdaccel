@@ -236,14 +236,15 @@ class VtableTransport final : public rdacore::Transport {
 
 struct rda_transport {
   std::unique_ptr<rdacore::Transport> t;
+  bool network = false;  // TCP / UDP: plaintext only when allowed
 };
 
 namespace {
 
 rda_status Wrap(std::unique_ptr<rdacore::Transport> t, rda_transport** out, const std::string& err,
-                rda_status fail) {
+                rda_status fail, bool network = false) {
   if (!t) return Fail(fail, err.empty() ? "transport could not be created" : err);
-  *out = new rda_transport{std::move(t)};
+  *out = new rda_transport{std::move(t), network};
   return RDA_OK;
 }
 
@@ -367,7 +368,7 @@ rda_status rda_tcp_listen(uint16_t port, rda_transport** out) {
   if (!out) return Fail(RDA_ERR_INVALID_ARG, "out is required");
   std::string err;
   auto t = rdacore::ListenTcp(port, &err);
-  return Wrap(std::move(t), out, err, RDA_ERR_TRANSPORT);
+  return Wrap(std::move(t), out, err, RDA_ERR_TRANSPORT, /*network=*/true);
   RDA_GUARD_END
 }
 
@@ -376,7 +377,7 @@ rda_status rda_tcp_connect(const char* host, uint16_t port, rda_transport** out)
   if (!host || !out) return Fail(RDA_ERR_INVALID_ARG, "host and out are required");
   std::string err;
   auto t = rdacore::ConnectTcp(host, port, &err);
-  return Wrap(std::move(t), out, err, RDA_ERR_TRANSPORT);
+  return Wrap(std::move(t), out, err, RDA_ERR_TRANSPORT, /*network=*/true);
   RDA_GUARD_END
 }
 
@@ -385,7 +386,7 @@ rda_status rda_udp_listen(uint16_t port, rda_transport** out) {
   if (!out) return Fail(RDA_ERR_INVALID_ARG, "out is required");
   std::string err;
   auto t = rdacore::ListenUdp(port, &err);
-  return Wrap(std::move(t), out, err, RDA_ERR_TRANSPORT);
+  return Wrap(std::move(t), out, err, RDA_ERR_TRANSPORT, /*network=*/true);
   RDA_GUARD_END
 }
 
@@ -394,7 +395,7 @@ rda_status rda_udp_connect(const char* host, uint16_t port, rda_transport** out)
   if (!host || !out) return Fail(RDA_ERR_INVALID_ARG, "host and out are required");
   std::string err;
   auto t = rdacore::ConnectUdp(host, port, &err);
-  return Wrap(std::move(t), out, err, RDA_ERR_TRANSPORT);
+  return Wrap(std::move(t), out, err, RDA_ERR_TRANSPORT, /*network=*/true);
   RDA_GUARD_END
 }
 
@@ -403,7 +404,7 @@ rda_status rda_udp_bind(uint16_t port, rda_transport** out) {
   if (!out) return Fail(RDA_ERR_INVALID_ARG, "out is required");
   std::string err;
   auto t = rdacore::BindUdp(port, &err);
-  return Wrap(std::move(t), out, err, RDA_ERR_TRANSPORT);
+  return Wrap(std::move(t), out, err, RDA_ERR_TRANSPORT, /*network=*/true);
   RDA_GUARD_END
 }
 
@@ -413,7 +414,7 @@ rda_status rda_udp_from_fd(int fd, int viewer_side, rda_transport** out) {
   std::string err;
   auto t = rdacore::UdpFromFd(fd, viewer_side != 0, &err);
   if (!t) return Fail(RDA_ERR_INVALID_ARG, err);
-  return Wrap(std::move(t), out, err, RDA_ERR_TRANSPORT);
+  return Wrap(std::move(t), out, err, RDA_ERR_TRANSPORT, /*network=*/true);
   RDA_GUARD_END
 }
 
@@ -541,6 +542,20 @@ rdacore::HostConfig ToHostConfig(const rda_host_config& c) {
   return o;
 }
 
+// Copies the key, or checks that plaintext is acceptable on this transport.
+std::string TakeKey(const uint8_t* key, int32_t allow_plaintext, const rda_transport* t,
+                    std::vector<uint8_t>& out) {
+  if (key) {
+    out.assign(key, key + 32);
+    return {};
+  }
+  if (t && t->network && !allow_plaintext) {
+    return "TCP/UDP without encryption: set encryption_key (32 bytes, the same on both sides) "
+           "or allow_plaintext = 1";
+  }
+  return {};
+}
+
 std::string CheckHostConfig(const rda_host_config& c) {
   if (c.fps < 1 || c.fps > 240) return "fps must be 1..240";
   if (c.bitrate_bps < 50'000) return "bitrate_bps must be at least 50000";
@@ -612,6 +627,11 @@ rda_status rda_host_create(rda_transport* transport, const rda_host_config* conf
 
   rda_host* raw = h.get();
   rdacore::HostConfig hc = ToHostConfig(h->config);
+  if (auto err = TakeKey(h->config.encryption_key, h->config.allow_plaintext, owned.get(), hc.encryption_key);
+      !err.empty()) {
+    return Fail(RDA_ERR_INVALID_ARG, err);
+  }
+  h->config.encryption_key = nullptr;  // not kept: the caller's memory
   if (raw->config.on_auth) {
     hc.auth = [raw](std::span<const uint8_t> token) {
       return raw->config.on_auth(raw->config.user, token.data(), token.size()) != 0;
@@ -813,6 +833,10 @@ rda_status rda_viewer_create(rda_transport* transport, const rda_viewer_config* 
   }
   rdacore::ViewerOptions opts;
   opts.peer_timeout_ms = c.peer_timeout_ms;
+  if (auto err = TakeKey(c.encryption_key, c.allow_plaintext, owned.get(), opts.encryption_key); !err.empty()) {
+    return Fail(RDA_ERR_INVALID_ARG, err);
+  }
+  raw->config.encryption_key = nullptr;
   if (c.auth_token_len) opts.auth_token.assign(c.auth_token, c.auth_token + c.auth_token_len);
   raw->config.auth_token = nullptr;  // not kept: the caller's memory
   raw->config.auth_token_len = 0;

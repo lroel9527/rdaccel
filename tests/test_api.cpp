@@ -563,7 +563,12 @@ TEST(PublicApi, UdpBindDoesNotBlockAndHoldsFramesUntilTheViewerComes) {
   std::string err;
   auto host_t = rdaccel::BindUdp(47311, &err);
   ASSERT_NE(host_t, nullptr) << err;
-  rdaccel::Host host(std::move(host_t));
+  // Encrypted, as real UDP use should be.
+  const std::vector<uint8_t> key(32, 0x5a);
+  rdaccel::HostConfig cfg;
+  cfg.encryption_key = key;
+  rdaccel::Host host(std::move(host_t), cfg);
+  ASSERT_TRUE(host.ok());
   // Frames before any viewer: accepted, held, not queued.
   std::vector<uint8_t> px;
   for (int i = 0; i < 30; ++i) {
@@ -573,7 +578,9 @@ TEST(PublicApi, UdpBindDoesNotBlockAndHoldsFramesUntilTheViewerComes) {
   EXPECT_EQ(host.stats().frames_encoded, 0u);
   EXPECT_EQ(host.state(), rdaccel::ConnectionState::kConnecting);
 
-  auto viewer = rdaccel::Viewer::Create(rdaccel::ConnectUdp("127.0.0.1", 47311, &err), {}, &err);
+  rdaccel::ViewerOptions vo;
+  vo.encryption_key = key;
+  auto viewer = rdaccel::Viewer::Create(rdaccel::ConnectUdp("127.0.0.1", 47311, &err), {}, vo, &err);
   ASSERT_NE(viewer, nullptr) << err;
   ASSERT_TRUE(StreamUntil(host, *viewer, 5));
   EXPECT_EQ(host.state(), rdaccel::ConnectionState::kConnected);
@@ -589,8 +596,12 @@ TEST(PublicApi, UdpFromYourOwnSockets) {
   ASSERT_NE(host_t, nullptr) << err;
   auto viewer_t = rdaccel::UdpFromFd(fds[1], true, &err);
   ASSERT_NE(viewer_t, nullptr) << err;
-  rdaccel::Host host(std::move(host_t));
-  auto viewer = rdaccel::Viewer::Create(std::move(viewer_t), {}, &err);
+  rdaccel::HostConfig cfg;
+  cfg.allow_plaintext = true;
+  rdaccel::Host host(std::move(host_t), cfg);
+  rdaccel::ViewerOptions vo;
+  vo.allow_plaintext = true;
+  auto viewer = rdaccel::Viewer::Create(std::move(viewer_t), {}, vo, &err);
   ASSERT_NE(viewer, nullptr) << err;
   ASSERT_TRUE(StreamUntil(host, *viewer, 5));
   EXPECT_EQ(viewer->state(), rdaccel::ConnectionState::kConnected);
@@ -599,6 +610,7 @@ TEST(PublicApi, UdpFromYourOwnSockets) {
 TEST(PublicApi, ViewerGivesUpWhenNoHostAnswers) {
   rdaccel::ViewerOptions opts;
   opts.peer_timeout_ms = 300;
+  opts.allow_plaintext = true;
   std::atomic<int> reason{0};
   rdaccel::ViewerHandlers h;
   h.on_state = [&](rdaccel::ConnectionState s, rda_status r) {
@@ -612,4 +624,44 @@ TEST(PublicApi, ViewerGivesUpWhenNoHostAnswers) {
   }
   EXPECT_EQ(viewer->state(), rdaccel::ConnectionState::kDisconnected);
   EXPECT_EQ(reason.load(), RDA_ERR_TIMEOUT);
+}
+
+TEST(PublicApi, NetworkTransportsNeedAKeyOrExplicitPlaintext) {
+  std::string err;
+  rdaccel::Host host(rdaccel::BindUdp(47313, &err));
+  EXPECT_FALSE(host.ok());
+  EXPECT_FALSE(host.SubmitFrame({nullptr, 0, 0, 0}, 0, {}, &err));
+  EXPECT_NE(err.find("allow_plaintext"), std::string::npos) << err;
+  auto viewer = rdaccel::Viewer::Create(rdaccel::ConnectUdp("127.0.0.1", 47313, &err), {}, &err);
+  EXPECT_EQ(viewer, nullptr);
+  rdaccel::HostConfig bad;
+  bad.encryption_key = {1, 2, 3};
+  rdaccel::Host host2(rdaccel::BindUdp(47314, &err), bad);
+  EXPECT_FALSE(host2.ok());
+}
+
+TEST(PublicApi, WrongKeyDisconnectsBothSides) {
+  std::string err;
+  rdaccel::HostConfig cfg;
+  cfg.encryption_key = std::vector<uint8_t>(32, 1);
+  std::atomic<int> host_reason{0}, viewer_reason{0};
+  rdaccel::Host host(rdaccel::BindUdp(47315, &err), cfg);
+  ASSERT_TRUE(host.ok()) << err;
+  host.SetStateHandler([&](rdaccel::ConnectionState s, rda_status r) {
+    if (s == rdaccel::ConnectionState::kDisconnected) host_reason = r;
+  });
+  rdaccel::ViewerOptions vo;
+  vo.encryption_key = std::vector<uint8_t>(32, 2);
+  rdaccel::ViewerHandlers h;
+  h.on_state = [&](rdaccel::ConnectionState s, rda_status r) {
+    if (s == rdaccel::ConnectionState::kDisconnected) viewer_reason = r;
+  };
+  auto viewer = rdaccel::Viewer::Create(rdaccel::ConnectUdp("127.0.0.1", 47315, &err), std::move(h), vo, &err);
+  ASSERT_NE(viewer, nullptr) << err;
+  for (int i = 0; i < 1000 && (host_reason == 0 || viewer_reason == 0); ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  EXPECT_EQ(viewer_reason.load(), RDA_ERR_AUTH);
+  EXPECT_EQ(host_reason.load(), RDA_ERR_AUTH);
+  EXPECT_EQ(viewer->stats().frames_decoded, 0u);
 }

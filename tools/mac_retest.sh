@@ -93,6 +93,11 @@ serve_view() {  # NAME SERVE_ARGS... -- VIEW_ARGS...
   while [[ $# -gt 0 && "$1" != "--" ]]; do sargs+=("$1"); shift; done
   shift
   vargs=("$@")
+  # A throwaway key for this run: the link is encrypted like real use.
+  local key
+  key=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')
+  sargs+=("--key=$key")
+  vargs+=("--key=$key")
   "$bin/rdaccel_serve" "${sargs[@]}" > "$out/$name.serve.log" 2>&1 &
   local sp=$!
   sleep 1

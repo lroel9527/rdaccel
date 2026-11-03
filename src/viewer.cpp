@@ -3,6 +3,8 @@
 #include "platform.h"
 #include "session/link.h"
 #include "session/viewer_session.h"
+#include "log/log.h"
+#include "transport/secure_transport.h"
 
 namespace rdacore {
 
@@ -54,6 +56,19 @@ std::unique_ptr<Viewer> Viewer::Create(std::unique_ptr<Transport> transport,
     });
   }
   if (handlers.on_cursor) impl->session->SetCursorHandler(std::move(handlers.on_cursor));
+  transport::SecureTransport* secure = nullptr;
+  if (transport && !options.encryption_key.empty()) {
+    if (options.encryption_key.size() != transport::kSecureKeySize) {
+      if (error) *error = "encryption_key must be 32 bytes";
+      return nullptr;
+    }
+    auto s = std::make_unique<transport::SecureTransport>(
+        std::move(transport), /*is_host=*/false,
+        std::span<const uint8_t, transport::kSecureKeySize>(options.encryption_key.data(),
+                                                            transport::kSecureKeySize));
+    secure = s.get();
+    transport = std::move(s);
+  }
   // Handlers are in place before any byte can arrive.
   impl->transport = std::move(transport);
   if (impl->transport) {
@@ -69,6 +84,12 @@ std::unique_ptr<Viewer> Viewer::Create(std::unique_ptr<Transport> transport,
     impl->link = std::make_unique<session::Link>(session::Link::Role::kViewer, impl->transport.get(),
                                                  std::move(lo), std::move(h));
     session::Link* link = impl->link.get();
+    if (secure) {
+      secure->SetErrorHandler([link](ConnectionError e, const std::string& msg) {
+        log::Warn("viewer: " + msg);
+        link->Abort(e);
+      });
+    }
     impl->transport->SetReceiver(
         [link](Channel ch, std::span<const uint8_t> bytes) { link->OnReceive(ch, bytes); });
     link->Start();

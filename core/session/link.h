@@ -78,6 +78,9 @@ class Link {
 
   // Closes from our side: Goodbye to the peer, state kDisconnected (kClosed).
   void Close();
+  // Disconnects with `e` without telling the peer (the channel to it is
+  // unusable, e.g. the encryption failed).
+  void Abort(LinkError e) { SetState(LinkState::kDisconnected, e); }
 
   // For the owner's destructor, while the transport still works: stops the
   // timer, says Goodbye, and makes later events silent (no more callbacks).
