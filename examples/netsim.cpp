@@ -6,7 +6,7 @@
 //   rdaccel_netsim [--background=SCREEN.ppm] [--scenario=video] [--seconds=10] [--fps=30]
 //                  [--bandwidth=4000000] [--delay=20] [--jitter=0] [--loss=0] [--queue-ms=200]
 //                  [--drop-to=BPS --drop-at=SECONDS]   bandwidth change mid-run
-//                  [--bitrate=8000000] [--cc=1] [--abr=1] [--max-queue-ms=50] [--regions=1]
+//                  [--bitrate=8000000] [--cc=1] [--abr=1] [--max-queue-ms=50] [--regions=1] [--progressive=1]
 //                  [--warmup=3]   seconds left out of the steady-state numbers
 //                  [--cursor=1]   also move the mouse pointer (cursor channel) and
 //                                 report how long positions take to arrive
@@ -86,6 +86,8 @@ int main(int argc, char** argv) {
   std::vector<uint64_t> shown_at;
   const auto warmup_frames = static_cast<uint64_t>(args.real("warmup", 3) * fps);
   double first_frame_ms = -1;
+  std::vector<std::pair<double, double>> first_psnr;  // (ms since start, PSNR) during warm-up
+  uint64_t start_us = rdaccel::NowMicros();          // reset when the first frame is captured
   Image ref;
   std::vector<double> cursor_ms;
   const bool with_cursor = args.num("cursor", 0) != 0;
@@ -106,12 +108,15 @@ int main(int argc, char** argv) {
       if (it == index_of.end()) return;
       index = it->second;
       if (first_frame_ms < 0) first_frame_ms = (now - info.capture_time_us) / 1000.0;
-      if (index < warmup_frames) return;
-      latency_ms.push_back((now - info.capture_time_us) / 1000.0);
-      shown_at.push_back(now);
+      if (index >= warmup_frames) {
+        latency_ms.push_back((now - info.capture_time_us) / 1000.0);
+        shown_at.push_back(now);
+      }
     }
-    // Quality on a sample of frames, to keep the viewer thread real time.
-    if (index % 10 == 0) {
+    // Quality on a sample of frames, to keep the viewer thread real time;
+    // more often during warm-up, to see how fast the first picture sharpens.
+    const bool warm = index < warmup_frames;
+    if (warm ? index % 5 == 0 || first_psnr.empty() : index % 10 == 0) {
       Render(scene, sc->fn, index, ref);
       double se = 0;
       for (int y = 0; y < img.height; ++y) {
@@ -124,8 +129,13 @@ int main(int argc, char** argv) {
         }
       }
       const double mse = se / (static_cast<double>(img.width) * img.height * 3);
+      const double p = mse == 0 ? 99.0 : 10.0 * std::log10(255.0 * 255.0 / mse);
       std::lock_guard<std::mutex> lock(mu);
-      psnr.push_back(mse == 0 ? 99.0 : 10.0 * std::log10(255.0 * 255.0 / mse));
+      if (warm) {
+        first_psnr.push_back({(now - start_us) / 1000.0, p});
+      } else {
+        psnr.push_back(p);
+      }
     }
   };
   std::string err;
@@ -141,10 +151,15 @@ int main(int argc, char** argv) {
   cfg.adaptive_bitrate = args.num("abr", 1) != 0;
   cfg.max_queue_ms = static_cast<int32_t>(args.num("max-queue-ms", 50));
   cfg.video_regions = args.num("regions", 1) != 0;
+  cfg.progressive = args.num("progressive", 1) != 0;
   rdaccel::Host host(std::move(host_end), cfg);
 
   const auto frames = static_cast<uint64_t>(seconds * fps);
   const uint64_t t0 = rdaccel::NowMicros();
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    start_us = t0;
+  }
   Image frame;
   double target_sum = 0;
   uint64_t warm_bytes = 0, warm_dropped = 0;
@@ -213,6 +228,23 @@ int main(int argc, char** argv) {
       static_cast<unsigned long long>(hs.frames_dropped_congestion - warm_dropped), pct(0.5), pct(0.95),
       lat.empty() ? 0.0 : lat.back(), max_gap, psnr_avg, target_n ? target_sum / target_n / 1000.0 : 0.0,
       hs.bandwidth_estimate_bps / 1000.0);
+  if (!first_psnr.empty()) {
+    // How the screen looks while the session starts: PSNR of what is shown
+    // at about these times after the first capture.
+    std::printf("       start: ");
+    for (double at : {500.0, 1000.0, 2000.0, 3000.0, 5000.0}) {
+      double p = -1;
+      for (const auto& [t, q] : first_psnr) {
+        if (t <= at) p = q;
+      }
+      if (p < 0) {
+        std::printf(" %4.1fs  (nothing) ", at / 1000);
+      } else {
+        std::printf(" %4.1fs %5.2f dB ", at / 1000, p);
+      }
+    }
+    std::printf("\n");
+  }
   if (with_cursor) {
     std::vector<double> c = cursor_ms;
     std::sort(c.begin(), c.end());

@@ -123,6 +123,7 @@ struct Host::Impl {
       opts.refine_frames = config.refine_frames;
       opts.tile_cache = config.tile_cache;
       opts.refresh = config.refresh;
+      opts.progressive = config.progressive;
       if (config.video_regions) {
         const std::string prefer = config.encoder;
         opts.region_encoder_factory = [prefer](const codec::EncoderConfig& c, std::string* e) {
