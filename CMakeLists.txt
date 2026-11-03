@@ -90,6 +90,7 @@ if(APPLE)
     platform/mac/capture_sck.mm
     platform/mac/displays_mac.mm
     platform/mac/cursor_mac.mm
+    platform/mac/inject_mac.mm
     platform/mac/video_vt.mm
   )
 elseif(UNIX)
@@ -98,6 +99,7 @@ elseif(UNIX)
     platform/linux/capture_x11.cpp
     platform/linux/cursor_xfixes.cpp
     platform/linux/displays_x11.cpp
+    platform/linux/inject_xtest.cpp
     platform/linux/video_ffmpeg.cpp
   )
 else()
@@ -158,7 +160,7 @@ if(APPLE)
 else()
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale)
-  pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11 xext xfixes xrandr)
+  pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11 xext xfixes xrandr xtst)
   target_link_libraries(rdaccel PRIVATE PkgConfig::FFMPEG PkgConfig::X11)
 endif()
 

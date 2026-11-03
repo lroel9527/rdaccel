@@ -259,6 +259,46 @@ inline bool SetError(std::string* error) {
 
 }  // namespace detail
 
+// ---- input injection --------------------------------------------------------
+
+struct InjectorConfig {
+  int32_t display_index = 0;
+  int32_t source_width = 0;  // the host's capture size when it scales; 0 = native
+  int32_t source_height = 0;
+};
+
+// Plays InputEvents into the host OS (XTest on Linux; CGEvent on macOS, with
+// the Accessibility permission). Typically called from Host's input handler.
+class Injector {
+ public:
+  static std::unique_ptr<Injector> Create(const InjectorConfig& config = {}, std::string* error = nullptr) {
+    rda_injector_config c;
+    rda_injector_config_default(&c);
+    c.display_index = config.display_index;
+    c.source_width = config.source_width;
+    c.source_height = config.source_height;
+    rda_injector* i = nullptr;
+    if (rda_injector_create(&c, &i) != RDA_OK) {
+      detail::SetError(error);
+      return nullptr;
+    }
+    return std::unique_ptr<Injector>(new Injector(i));
+  }
+  ~Injector() { rda_injector_destroy(i_); }
+  Injector(const Injector&) = delete;
+  Injector& operator=(const Injector&) = delete;
+
+  // Thread-safe. False (with `error`) for a key or character the OS lacks.
+  bool Inject(const InputEvent& ev, std::string* error = nullptr) {
+    const rda_input_event c = detail::ToC(ev);
+    return rda_injector_inject(i_, &c) == RDA_OK || detail::SetError(error);
+  }
+
+ private:
+  explicit Injector(rda_injector* i) : i_(i) {}
+  rda_injector* i_;
+};
+
 // ---- transport --------------------------------------------------------------
 
 enum class Channel : uint8_t {

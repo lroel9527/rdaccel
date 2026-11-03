@@ -18,7 +18,7 @@ jobs:
       matrix:
         include:
           - os: ubuntu-24.04
-            deps: sudo apt-get update && sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxext-dev libxfixes-dev libxrandr-dev zlib1g-dev
+            deps: sudo apt-get update && sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxext-dev libxfixes-dev libxrandr-dev libxtst-dev zlib1g-dev
           - os: macos-14
             deps: "true"
     runs-on: ${{ matrix.os }}

@@ -559,6 +559,33 @@ TEST(CApi, NetworkTransportsNeedAKeyOrExplicitPlaintext) {
   EXPECT_EQ(rda_udp_from_fd(-1, 0, &t), RDA_ERR_INVALID_ARG);
 }
 
+TEST(CApi, InjectorCreateAndArguments) {
+  rda_injector* inj = nullptr;
+  EXPECT_EQ(rda_injector_create(nullptr, nullptr), RDA_ERR_INVALID_ARG);
+  rda_injector_config c;
+  rda_injector_config_default(&c);
+  c.display_index = -1;
+  EXPECT_EQ(rda_injector_create(&c, &inj), RDA_ERR_INVALID_ARG);
+  const rda_status st = rda_injector_create(nullptr, &inj);
+  if (st == RDA_ERR_UNSUPPORTED || st == RDA_ERR_PERMISSION) GTEST_SKIP() << rda_last_error();
+  ASSERT_EQ(st, RDA_OK) << rda_last_error();
+  ASSERT_NE(inj, nullptr);
+  EXPECT_EQ(rda_injector_inject(inj, nullptr), RDA_ERR_INVALID_ARG);
+  rda_input_event ev;
+  rda_input_event_default(&ev);
+  ev.kind = static_cast<rda_input_kind>(99);
+  EXPECT_EQ(rda_injector_inject(inj, &ev), RDA_ERR_INVALID_ARG);
+  ev.kind = RDA_INPUT_MOUSE_DOWN;
+  ev.code = 77;  // no such button
+  EXPECT_EQ(rda_injector_inject(inj, &ev), RDA_ERR_UNSUPPORTED);
+  ev.kind = RDA_INPUT_MOUSE_MOVE;
+  ev.x = 3;
+  ev.y = 4;
+  EXPECT_EQ(rda_injector_inject(inj, &ev), RDA_OK) << rda_last_error();
+  rda_injector_destroy(inj);
+  rda_injector_destroy(nullptr);
+}
+
 TEST(CApi, ListDisplaysAndPickOne) {
   size_t n = 0;
   EXPECT_EQ(rda_list_displays(nullptr, 1, &n), RDA_ERR_INVALID_ARG);

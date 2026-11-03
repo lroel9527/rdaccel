@@ -18,6 +18,7 @@
 #include "capture/capturer.h"
 #include "capture/synthetic_capturer.h"
 #include "log/log.h"
+#include "platform.h"
 #include "rdacore/rdacore.h"
 
 namespace {
@@ -359,6 +360,51 @@ void rda_input_event_default(rda_input_event* ev) {
   *ev = rda_input_event{};
   ev->struct_size = sizeof(*ev);
   ev->kind = RDA_INPUT_MOUSE_MOVE;
+}
+
+// ---- input injection --------------------------------------------------------
+
+struct rda_injector {
+  std::unique_ptr<rdacore::platform::IInputInjector> impl;
+};
+
+void rda_injector_config_default(rda_injector_config* config) {
+  if (!config) return;
+  *config = rda_injector_config{};
+  config->struct_size = sizeof(*config);
+}
+
+rda_status rda_injector_create(const rda_injector_config* config, rda_injector** out) {
+  RDA_GUARD_BEGIN
+  if (!out) return Fail(RDA_ERR_INVALID_ARG, "out is required");
+  *out = nullptr;
+  rda_injector_config c;
+  rda_injector_config_default(&c);
+  if (config && !ReadStruct(config, c)) return Fail(RDA_ERR_INVALID_ARG, "config needs struct_size");
+  if (c.display_index < 0 || c.source_width < 0 || c.source_height < 0) {
+    return Fail(RDA_ERR_INVALID_ARG, "negative display index or source size");
+  }
+  std::string err;
+  auto impl = rdacore::platform::CreateInputInjector({c.display_index, c.source_width, c.source_height}, &err);
+  if (!impl) return Fail(Classify(err, RDA_ERR_UNSUPPORTED), err);
+  *out = new rda_injector{std::move(impl)};
+  return RDA_OK;
+  RDA_GUARD_END
+}
+
+void rda_injector_destroy(rda_injector* injector) { delete injector; }
+
+rda_status rda_injector_inject(rda_injector* injector, const rda_input_event* ev) {
+  RDA_GUARD_BEGIN
+  if (!injector || !ev) return Fail(RDA_ERR_INVALID_ARG, "injector and event are required");
+  rda_input_event e;
+  rda_input_event_default(&e);
+  rdacore::InputEvent ie;
+  if (!ReadStruct(ev, e) || !FromC(e, ie)) return Fail(RDA_ERR_INVALID_ARG, "bad input event");
+  std::string err;
+  if (!injector->impl->Inject(ie, &err)) return Fail(RDA_ERR_UNSUPPORTED, err);
+  return RDA_OK;
+  RDA_GUARD_END
 }
 
 // ---- transports -----------------------------------------------------------

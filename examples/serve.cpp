@@ -4,13 +4,15 @@
 //
 //   rdaccel_serve [--udp=PORT | --tcp=PORT] [--source=screen|synthetic] [--seconds=0]
 //                 (--key=<64 hex digits> | --plaintext)
-//                 [--size=WxH] [--fps=60] [--bitrate=8000000] [--display=0]
+//                 [--size=WxH] [--fps=60] [--bitrate=8000000] [--display=0] [--inject]
 //   rdaccel_serve --list-displays
 //
 // UDP (the default, port 7300) has congestion control and adaptive bitrate;
 // TCP sends at the configured bitrate. --size is the test pattern's size, or
 // with --source=screen the size the screen is captured at (default: native). --seconds=0 runs until the viewer
-// disconnects or the process is killed. Uses only the public API.
+// disconnects or the process is killed. --inject plays the viewer's mouse and
+// keyboard into this machine (macOS: needs the Accessibility permission).
+// Uses only the public API.
 
 #include <rdaccel/rdaccel.hpp>
 
@@ -92,6 +94,19 @@ int main(int argc, char** argv) {
     cfg.capture_width = w;
     cfg.capture_height = h;
   }
+  // Before the host, so it outlives the host's input handler.
+  std::unique_ptr<rdaccel::Injector> injector;
+  if (args.has("inject")) {
+    rdaccel::InjectorConfig ic;
+    ic.display_index = cfg.display_index;
+    ic.source_width = cfg.capture_width;
+    ic.source_height = cfg.capture_height;
+    injector = rdaccel::Injector::Create(ic, &err);
+    if (!injector) {
+      std::fprintf(stderr, "input injection: %s\n", err.c_str());
+      return 1;
+    }
+  }
   rdaccel::Host host(std::move(transport), cfg);
   std::atomic<bool> failed{false};
   host.SetErrorHandler([&](const std::string& e) {
@@ -111,9 +126,9 @@ int main(int argc, char** argv) {
   host.SetMessageHandler([](uint32_t type, std::span<const uint8_t> p) {
     std::printf("message %u from the viewer, %zu bytes\n", type, p.size());
   });
-  host.SetInputHandler([](const rdaccel::InputEvent& ev) {
-    // A real application would inject the event into the OS here.
-    (void)ev;
+  host.SetInputHandler([&injector](const rdaccel::InputEvent& ev) {
+    std::string e;
+    if (injector && !injector->Inject(ev, &e)) std::fprintf(stderr, "inject: %s\n", e.c_str());
   });
 
   if (source == "screen") {
