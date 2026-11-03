@@ -153,7 +153,7 @@ void SecureTransport::OnInner(Channel ch, std::span<const uint8_t> bytes) {
     hello_.insert(hello_.end(), bytes.begin(), bytes.begin() + take);
     bytes = bytes.subspan(take);
     const size_t check = std::min(hello_.size(), sizeof(kMagic));
-    if (std::memcmp(hello_.data(), kMagic, check) != 0) {
+    if (check > 0 && std::memcmp(hello_.data(), kMagic, check) != 0) {
       Fail(ConnectionError::kProtocol, "the peer does not encrypt (set the same key on both sides)");
       return;
     }

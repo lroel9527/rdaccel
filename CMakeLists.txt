@@ -10,6 +10,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(RDACCEL_BUILD_TESTS "Build unit tests" ${PROJECT_IS_TOP_LEVEL})
 option(RDACCEL_BUILD_EXAMPLES "Build example programs" ${PROJECT_IS_TOP_LEVEL})
 option(RDACCEL_INSTALL "Generate install rules" ${PROJECT_IS_TOP_LEVEL})
+# libFuzzer targets for every parser of network data (clang only). Configure
+# with CMAKE_C_FLAGS/CMAKE_CXX_FLAGS="-fsanitize=fuzzer-no-link,address,undefined";
+# see fuzz/README.md.
+option(RDACCEL_BUILD_FUZZERS "Build libFuzzer targets" OFF)
 
 include(GNUInstallDirs)
 
@@ -235,4 +239,13 @@ if(RDACCEL_BUILD_TESTS)
     set_tests_properties(minimal_c PROPERTIES
       ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan.supp")
   endif()
+endif()
+
+if(RDACCEL_BUILD_FUZZERS)
+  foreach(name messages lossless viewer link secure reliable hevc)
+    add_executable(fuzz_${name} fuzz/fuzz_${name}.cpp)
+    target_link_libraries(fuzz_${name} PRIVATE rdaccel_internal)
+    target_link_options(fuzz_${name} PRIVATE -fsanitize=fuzzer)
+    set_target_properties(fuzz_${name} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/fuzz)
+  endforeach()
 endif()

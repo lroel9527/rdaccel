@@ -176,6 +176,11 @@ std::optional<Message> ReadHello(ByteReader& r) {
     return std::nullopt;
   }
   if (codec != static_cast<uint8_t>(VideoCodec::kHevc)) return std::nullopt;
+  // A screen size a viewer can allocate (also bounds what a hostile host
+  // can make it do).
+  if (m.width == 0 || m.height == 0 || m.width > kMaxScreenSide || m.height > kMaxScreenSide) {
+    return std::nullopt;
+  }
   m.codec = static_cast<VideoCodec>(codec);
   // Version 4 fields; older hosts serve only their own version.
   m.min_version = m.version;
