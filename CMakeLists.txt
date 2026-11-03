@@ -317,7 +317,7 @@ if(RDACCEL_BUILD_TESTS)
 endif()
 
 if(RDACCEL_BUILD_FUZZERS)
-  foreach(name messages lossless viewer link secure reliable hevc)
+  foreach(name messages lossless viewer link secure reliable hevc recording)
     add_executable(fuzz_${name} fuzz/fuzz_${name}.cpp)
     target_link_libraries(fuzz_${name} PRIVATE rdaccel_internal)
     target_link_options(fuzz_${name} PRIVATE -fsanitize=fuzzer)

@@ -251,6 +251,23 @@ TEST(Synthetic, IncrementalRenderMatchesFullRender) {
   EXPECT_EQ(inc, full);
 }
 
+TEST(Synthetic, AnySizeStaysInsideTheFrame) {
+  // Small frames once wrote past the buffer (the page margins and the video
+  // area did not fit). Under ASan this checks every pixel written.
+  for (auto [w, h] : {std::pair{2, 2}, {16, 16}, {64, 64}, {100, 50}, {50, 300}, {130, 72}}) {
+    std::vector<uint8_t> inc;
+    for (uint64_t i = 0; i < 40; ++i) {
+      for (const Rect& r : capture::RenderSyntheticFrame(i, w, h, inc)) {
+        EXPECT_TRUE(r.w > 0 && r.h > 0 && r.x >= 0 && r.y >= 0 && r.right() <= w && r.bottom() <= h)
+            << w << "x" << h << " frame " << i;
+      }
+    }
+    std::vector<uint8_t> full;
+    capture::RenderSyntheticFrame(39, w, h, full);
+    EXPECT_EQ(inc, full) << w << "x" << h;
+  }
+}
+
 TEST(Session, BusyAreaGetsItsOwnStreamAndASharpPictureWhenItStops) {
   auto [host_end, viewer_end] = transport::MakeLocalPipe();
   constexpr int W = 320, H = 256;  // 5x4 tiles

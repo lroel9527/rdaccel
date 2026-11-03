@@ -107,10 +107,13 @@ jobs:
       - name: Fuzz each target for 60 s
         run: |
           mkdir -p crashes
-          for t in messages lossless viewer link secure reliable hevc; do
+          for t in messages lossless viewer link secure reliable hevc recording; do
             echo "::group::fuzz_$t"
             mkdir -p corpus/$t
-            ./build-fuzz/fuzz/fuzz_$t corpus/$t -max_total_time=60 -rss_limit_mb=2048 -artifact_prefix=crashes/$t- -print_final_stats=1
+            # Seeds checked into the repo (read only; new finds go to corpus/).
+            seeds=""
+            if [ -d fuzz/corpus/$t ]; then seeds=fuzz/corpus/$t; fi
+            ./build-fuzz/fuzz/fuzz_$t corpus/$t $seeds -max_total_time=60 -rss_limit_mb=2048 -artifact_prefix=crashes/$t- -print_final_stats=1
             echo "::endgroup::"
           done
       - uses: actions/upload-artifact@v4
