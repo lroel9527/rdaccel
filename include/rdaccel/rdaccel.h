@@ -159,7 +159,13 @@ typedef enum rda_input_kind {
   RDA_INPUT_MOUSE_UP = 3,
   RDA_INPUT_SCROLL = 4,
   RDA_INPUT_KEY_DOWN = 5,
-  RDA_INPUT_KEY_UP = 6
+  RDA_INPUT_KEY_UP = 6,
+  /* Typed text: one Unicode scalar value in `code` (1..0x10FFFF, no
+   * surrogates). For what the viewer's keyboard layout or IME produced; the
+   * host types it whatever its own layout. Send a string one character at
+   * a time. rda_viewer_send_input() returns RDA_ERR_UNSUPPORTED when the
+   * host is older than 0.4 and cannot take it. */
+  RDA_INPUT_TEXT = 7
 } rda_input_kind;
 
 /* A viewer-side input event, delivered to the host. The library carries it;
@@ -168,9 +174,10 @@ typedef struct rda_input_event {
   uint32_t struct_size;
   rda_input_kind kind;
   int32_t x, y;             /* host pixels (mouse events) */
-  int32_t delta_x, delta_y; /* scroll */
+  int32_t delta_x, delta_y; /* scroll, in wheel lines: y > 0 up, x > 0 right */
   uint32_t code;            /* RDA_BUTTON_* for mouse events; for keys a USB
-                               HID usage (keyboard page 0x07), see below */
+                               HID usage (keyboard page 0x07), see below;
+                               for RDA_INPUT_TEXT a Unicode scalar value */
   uint32_t modifiers;       /* RDA_MOD_* bits held during the event */
 } rda_input_event;
 
@@ -199,6 +206,35 @@ RDA_API uint32_t rda_keycode_to_mac(uint32_t hid_usage);
 /* Linux evdev codes (KEY_*; an X11 keycode minus 8). */
 RDA_API uint32_t rda_keycode_from_evdev(uint32_t evdev_code);
 RDA_API uint32_t rda_keycode_to_evdev(uint32_t hid_usage);
+
+/* ---- input injection ----------------------------------------------------- */
+
+/* Optional: plays rda_input_event into the host OS, for applications that
+ * do not inject input themselves. Linux: the XTest extension of the X
+ * server in DISPLAY. macOS: CGEvent, which needs the Accessibility
+ * permission. Typical use: create one next to the host and call
+ * rda_injector_inject() from on_input. */
+typedef struct rda_injector rda_injector;
+
+typedef struct rda_injector_config {
+  uint32_t struct_size;
+  int32_t display_index; /* 0; the display the host captures */
+  /* The picture size the viewer's coordinates refer to: the host's
+   * capture_width / capture_height when it scales. 0 = native size. */
+  int32_t source_width, source_height;
+} rda_injector_config;
+
+RDA_API void rda_injector_config_default(rda_injector_config* config);
+/* RDA_ERR_PERMISSION without the macOS Accessibility permission,
+ * RDA_ERR_UNSUPPORTED without an X server with XTest or for a display
+ * that does not exist. config may be NULL for the defaults. */
+RDA_API rda_status rda_injector_create(const rda_injector_config* config, rda_injector** out);
+RDA_API void rda_injector_destroy(rda_injector* injector); /* releases held keys and buttons */
+/* Thread-safe. Scroll deltas are wheel lines (y > 0 up, x > 0 right).
+ * Keys pass through as physical keys; RDA_INPUT_TEXT types the character
+ * whatever the host's layout. RDA_ERR_UNSUPPORTED for a key or character
+ * the host cannot produce. */
+RDA_API rda_status rda_injector_inject(rda_injector* injector, const rda_input_event* ev);
 
 /* ---- connection --------------------------------------------------------- */
 

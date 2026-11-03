@@ -303,7 +303,7 @@ std::optional<Message> ReadCursorShape(ByteReader& r) {
   return m;
 }
 
-std::optional<Message> ReadInputEvent(ByteReader& r) {
+std::optional<Message> ReadInputEvent(ByteReader& r, bool& unknown_kind) {
   InputEvent m;
   uint8_t kind = 0;
   if (!(r.u8(kind) && r.svarint32(m.x) && r.svarint32(m.y) && r.svarint32(m.delta_x) &&
@@ -311,10 +311,13 @@ std::optional<Message> ReadInputEvent(ByteReader& r) {
     return std::nullopt;
   }
   if (kind < static_cast<uint8_t>(InputKind::kMouseMove) ||
-      kind > static_cast<uint8_t>(InputKind::kKeyUp)) {
+      kind > static_cast<uint8_t>(InputKind::kText)) {
+    // A kind from a later version: the caller skips the message.
+    unknown_kind = true;
     return std::nullopt;
   }
   m.kind = static_cast<InputKind>(kind);
+  if (m.kind == InputKind::kText && !IsUnicodeScalar(m.code)) return std::nullopt;
   return m;
 }
 
@@ -353,7 +356,15 @@ std::optional<Message> DecodePayload(MsgType type, std::span<const uint8_t> payl
     case MsgType::kCopyRect: m = ReadCopyRect(r); break;
     case MsgType::kCursorPos: m = ReadCursorPos(r); break;
     case MsgType::kCursorShape: m = ReadCursorShape(r); break;
-    case MsgType::kInputEvent: m = ReadInputEvent(r); break;
+    case MsgType::kInputEvent: {
+      bool unknown_kind = false;
+      m = ReadInputEvent(r, unknown_kind);
+      if (unknown_kind) {
+        known = false;
+        return std::nullopt;
+      }
+      break;
+    }
     case MsgType::kFeedback: m = ReadFeedback(r); break;
     case MsgType::kLosslessData: m = ReadLosslessData(r); break;
     case MsgType::kKeyframeRequest: m = ReadKeyframeRequest(r); break;

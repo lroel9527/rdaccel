@@ -181,6 +181,13 @@ TEST(CApi, HostToViewerWithInput) {
   EXPECT_EQ(rda_viewer_send_input(v, &ev), RDA_ERR_INVALID_ARG);
   EXPECT_TRUE(WaitUntil([&] { return got.inputs == 1; }));
   EXPECT_EQ(got.last_code, 4u);
+  ev.kind = RDA_INPUT_TEXT;
+  ev.code = 0xD800;  // a surrogate is not a character
+  EXPECT_EQ(rda_viewer_send_input(v, &ev), RDA_ERR_INVALID_ARG);
+  ev.code = 0x4E2D;
+  ASSERT_EQ(rda_viewer_send_input(v, &ev), RDA_OK) << rda_last_error();
+  EXPECT_TRUE(WaitUntil([&] { return got.inputs == 2; }));
+  EXPECT_EQ(got.last_code, 0x4E2Du);
 
   char enc[64];
   EXPECT_GT(rda_host_encoder_name(h, enc, sizeof(enc)), 0u);
@@ -550,6 +557,33 @@ TEST(CApi, NetworkTransportsNeedAKeyOrExplicitPlaintext) {
   ASSERT_EQ(rda_host_create(a, nullptr, &h), RDA_OK);
   rda_host_destroy(h);
   EXPECT_EQ(rda_udp_from_fd(-1, 0, &t), RDA_ERR_INVALID_ARG);
+}
+
+TEST(CApi, InjectorCreateAndArguments) {
+  rda_injector* inj = nullptr;
+  EXPECT_EQ(rda_injector_create(nullptr, nullptr), RDA_ERR_INVALID_ARG);
+  rda_injector_config c;
+  rda_injector_config_default(&c);
+  c.display_index = -1;
+  EXPECT_EQ(rda_injector_create(&c, &inj), RDA_ERR_INVALID_ARG);
+  const rda_status st = rda_injector_create(nullptr, &inj);
+  if (st == RDA_ERR_UNSUPPORTED || st == RDA_ERR_PERMISSION) GTEST_SKIP() << rda_last_error();
+  ASSERT_EQ(st, RDA_OK) << rda_last_error();
+  ASSERT_NE(inj, nullptr);
+  EXPECT_EQ(rda_injector_inject(inj, nullptr), RDA_ERR_INVALID_ARG);
+  rda_input_event ev;
+  rda_input_event_default(&ev);
+  ev.kind = static_cast<rda_input_kind>(99);
+  EXPECT_EQ(rda_injector_inject(inj, &ev), RDA_ERR_INVALID_ARG);
+  ev.kind = RDA_INPUT_MOUSE_DOWN;
+  ev.code = 77;  // no such button
+  EXPECT_EQ(rda_injector_inject(inj, &ev), RDA_ERR_UNSUPPORTED);
+  ev.kind = RDA_INPUT_MOUSE_MOVE;
+  ev.x = 3;
+  ev.y = 4;
+  EXPECT_EQ(rda_injector_inject(inj, &ev), RDA_OK) << rda_last_error();
+  rda_injector_destroy(inj);
+  rda_injector_destroy(nullptr);
 }
 
 TEST(CApi, ListDisplaysAndPickOne) {

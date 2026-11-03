@@ -543,6 +543,39 @@ TEST(PublicApi, ConnectionAndMessages) {
   EXPECT_NE(err.find("disconnected"), std::string::npos) << err;
 }
 
+TEST(PublicApi, TextInputReachesTheHost) {
+  auto [host_t, viewer_t] = rdaccel::CreateLocalPipe();
+  rdaccel::Host host(std::move(host_t));
+  ASSERT_TRUE(host.ok());
+  std::mutex mu;
+  std::vector<rdaccel::InputEvent> got;
+  host.SetInputHandler([&](const rdaccel::InputEvent& ev) {
+    std::lock_guard<std::mutex> lock(mu);
+    got.push_back(ev);
+  });
+  std::string err;
+  auto viewer = rdaccel::Viewer::Create(std::move(viewer_t), {}, &err);
+  ASSERT_NE(viewer, nullptr) << err;
+  auto wait = [](const std::function<bool()>& f) {
+    for (int i = 0; i < 2000 && !f(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    return f();
+  };
+  ASSERT_TRUE(wait([&] { return viewer->state() == rdaccel::ConnectionState::kConnected; }));
+  EXPECT_FALSE(viewer->SendText("ab\xC3", &err));  // cut-off UTF-8: nothing sent
+  EXPECT_FALSE(viewer->SendText("\xED\xA0\x80", &err));  // an encoded surrogate
+  EXPECT_FALSE(viewer->SendText("\xC0\xAF", &err));  // overlong
+  ASSERT_TRUE(viewer->SendText("a\xE4\xB8\xAD\xF0\x9F\x98\x80", &err)) << err;  // a, 中, 😀
+  ASSERT_TRUE(wait([&] {
+    std::lock_guard<std::mutex> lock(mu);
+    return got.size() == 3;
+  }));
+  std::lock_guard<std::mutex> lock(mu);
+  for (const auto& ev : got) EXPECT_EQ(ev.kind, rdaccel::InputKind::kText);
+  EXPECT_EQ(got[0].code, 0x61u);
+  EXPECT_EQ(got[1].code, 0x4E2Du);
+  EXPECT_EQ(got[2].code, 0x1F600u);
+}
+
 namespace {
 
 // Submits frames until `viewer` has decoded `n` or time runs out.

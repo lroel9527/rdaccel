@@ -233,6 +233,30 @@ TEST(Link, ViewerAcceptsANewerHostThatStillServesIt) {
   b.reset();
 }
 
+TEST(Link, BothSidesLearnThePeersCapabilities) {
+  Pair p;
+  ASSERT_TRUE(WaitUntil([&] { return p.viewer->state() == LinkState::kConnected; }));
+  ASSERT_TRUE(WaitUntil([&] { return p.host->state() == LinkState::kConnected; }));
+  EXPECT_EQ(p.viewer->peer_caps(), proto::kCapsAll);
+  EXPECT_EQ(p.host->peer_caps(), proto::kCapsAll);
+}
+
+TEST(Link, OlderHostHasFewerCapabilities) {
+  auto [a, b] = CreateLocalPipe();
+  RawPeer host(std::move(a));
+  Events ev;
+  Link viewer(Link::Role::kViewer, b.get(), {}, ev.Handlers());
+  b->SetReceiver([&](Channel ch, std::span<const uint8_t> bytes) { viewer.OnReceive(ch, bytes); });
+  viewer.Start();
+  proto::Welcome w;
+  w.caps = proto::kCapMessages;  // what a 0.3 host sends
+  host.Send(w);
+  ASSERT_TRUE(WaitUntil([&] { return viewer.state() == LinkState::kConnected; }));
+  EXPECT_EQ(viewer.peer_caps(), proto::kCapMessages);
+  viewer.Shutdown();
+  b.reset();
+}
+
 TEST(Link, HostRefusesAnOldViewer) {
   auto [a, b] = CreateLocalPipe();
   RawPeer viewer(std::move(b));

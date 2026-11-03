@@ -102,7 +102,22 @@ host.SetMessageHandler([](uint32_t type, std::span<const uint8_t> p) { ... });
 
 0x10000 以下的类型是库保留的（现在只定义了 1 = 剪贴板文本），发送保留类型会失败。库只负责传，剪贴板怎么读写由应用决定。
 
-**输入事件。** 键盘事件的 `code` 是 USB HID 用法码（键盘页 0x07：0x04 = A，0x28 = 回车，0xE0 = 左 Ctrl……），跟操作系统无关，所以 Mac 控制端和 Linux 被控端对得上。和本机键码互转：`KeyCodeFromMac` / `KeyCodeToMac`（macOS `kVK_*`、`NSEvent.keyCode`）、`KeyCodeFromEvdev` / `KeyCodeToEvdev`（Linux `KEY_*`，X11 键码减 8）；C 里是 `rda_keycode_from_mac()` 等。鼠标按键是 `kButtonLeft = 1`、`kButtonRight = 2`、`kButtonMiddle = 3`、`kButtonBack = 4`、`kButtonForward = 5`；`modifiers` 是 `kModShift | kModCtrl | kModAlt | kModMeta | kModCaps` 的组合（Mac 的 Command 是 `kModMeta`，Option 是 `kModAlt`）。把事件注入系统仍由应用自己做。
+**输入事件。** 键盘事件的 `code` 是 USB HID 用法码（键盘页 0x07：0x04 = A，0x28 = 回车，0xE0 = 左 Ctrl……），跟操作系统无关，所以 Mac 控制端和 Linux 被控端对得上。和本机键码互转：`KeyCodeFromMac` / `KeyCodeToMac`（macOS `kVK_*`、`NSEvent.keyCode`）、`KeyCodeFromEvdev` / `KeyCodeToEvdev`（Linux `KEY_*`，X11 键码减 8）；C 里是 `rda_keycode_from_mac()` 等。鼠标按键是 `kButtonLeft = 1`、`kButtonRight = 2`、`kButtonMiddle = 3`、`kButtonBack = 4`、`kButtonForward = 5`；`modifiers` 是 `kModShift | kModCtrl | kModAlt | kModMeta | kModCaps` 的组合（Mac 的 Command 是 `kModMeta`，Option 是 `kModAlt`）。滚轮的 `delta_x` / `delta_y` 以“行”（滚轮格）为单位，y > 0 向上、x > 0 向右。
+
+**注入到系统。** 库只负责传输入事件；要让它们真正作用到被控机器上，可以自己注入，也可以用库带的 `Injector`（C：`rda_injector_*`）：Linux 走 X 服务器的 XTest 扩展，macOS 走 CGEvent（需要“辅助功能”权限，没有时创建返回 `RDA_ERR_PERMISSION`）。
+
+```cpp
+rdaccel::InjectorConfig ic;
+ic.display_index = cfg.display_index;                       // 和采集的是同一块屏
+ic.source_width = cfg.capture_width;                        // 缩放采集时，接收端坐标按这个尺寸换算
+ic.source_height = cfg.capture_height;
+auto injector = rdaccel::Injector::Create(ic, &err);        // 在 Host 之前创建，活得比输入回调久
+host.SetInputHandler([&](const rdaccel::InputEvent& ev) { injector->Inject(ev); });
+```
+
+键盘事件按物理键注入；`kText` 按字符输入，与被控端的键盘布局无关（Linux 上当前布局里没有的字符会临时借一个空闲键码映射过去，销毁 `Injector` 时还原）。`Injector` 销毁时会松开还按着的键和鼠标键。`rdaccel_serve --inject` 就是这样用的。
+
+**文字输入。** 按键码只描述“按了哪个物理键”，两边键盘布局不同、或者用输入法打中文时就不够了。这时发 `kText`（C：`RDA_INPUT_TEXT`）事件，`code` 是一个 Unicode 字符（码点 1..0x10FFFF，不含代理区），被控端照字面输入，与它自己的布局无关。C++ 里 `viewer->SendText("你好")` 会把 UTF-8 字符串拆成一个字符一个事件；无效的 UTF-8 整串不发。对方是 0.3 及更早的版本、不支持文字输入时（握手里没有这个能力位），发送返回失败（C：`RDA_ERR_UNSUPPORTED`），什么也不发。被控端遇到以后版本新增的输入类型会跳过而不是断开。
 
 ## 2. 线程
 

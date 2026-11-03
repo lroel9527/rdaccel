@@ -11,6 +11,10 @@ enum class InputKind : uint8_t {
   kScroll = 4,
   kKeyDown = 5,
   kKeyUp = 6,
+  // Typed text, one Unicode scalar value in `code` (no surrogates). For
+  // text the viewer's keyboard layout produced, or an IME; the host types
+  // it as-is, whatever its own layout.
+  kText = 7,
 };
 
 inline constexpr uint32_t kButtonLeft = 1;
@@ -36,9 +40,15 @@ struct InputEvent {
   // Mouse events: a button (kButton*). Key events: a USB HID usage from the
   // keyboard page 0x07 (0x04 = A, 0x28 = Enter, 0xE0 = left Control, ...),
   // the same on every OS; see keycodes.h to convert from and to native codes.
+  // Text events: a Unicode scalar value (1..0x10FFFF, not 0xD800..0xDFFF).
   uint32_t code = 0;
   uint32_t modifiers = 0;  // kMod* bits held during the event
   friend bool operator==(const InputEvent&, const InputEvent&) = default;
 };
+
+// A Unicode scalar value: what kText carries.
+inline constexpr bool IsUnicodeScalar(uint32_t c) {
+  return c >= 1 && c <= 0x10FFFF && (c < 0xD800 || c > 0xDFFF);
+}
 
 }  // namespace rdacore

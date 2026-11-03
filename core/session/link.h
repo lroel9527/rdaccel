@@ -73,6 +73,8 @@ class Link {
   bool SendMessage(uint32_t type, std::span<const uint8_t> payload, std::string* error);
 
   LinkState state() const { return state_.load(); }
+  // The peer's capability bits (proto::kCap*), known once connected.
+  uint64_t peer_caps() const { return peer_caps_.load(); }
   LinkError error() const;
   bool disconnected() const { return state_.load() == LinkState::kDisconnected; }
 
@@ -100,6 +102,7 @@ class Link {
   Handlers h_;
 
   std::atomic<LinkState> state_{LinkState::kConnecting};
+  std::atomic<uint64_t> peer_caps_{0};
   mutable std::mutex state_mu_;     // guards error_ with state_ transitions
   std::recursive_mutex cb_mu_;      // serializes state callbacks
   LinkError error_ = LinkError::kNone;

@@ -12,6 +12,7 @@
 #include "capture/capturer.h"
 #include "capture/cursor_source.h"
 #include "codec/video_codec.h"
+#include "input_injector.h"
 
 namespace rdacore::platform {
 
@@ -38,5 +39,10 @@ std::unique_ptr<codec::IHevcDecoder> CreateHevcDecoder(std::string* error);
 // is on another display). Null with `error` set if it cannot be read (e.g. no
 // X display, or no such display).
 std::unique_ptr<capture::ICursorSource> CreateCursorSource(int32_t display_index, std::string* error);
+
+// Injects input into display cfg.display_index. Null with `error` set when
+// the OS will not let this process do it (no XTest; on macOS, no
+// Accessibility permission) or there is no such display.
+std::unique_ptr<IInputInjector> CreateInputInjector(const InjectorConfig& cfg, std::string* error);
 
 }  // namespace rdacore::platform

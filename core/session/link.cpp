@@ -162,6 +162,7 @@ void Link::HandleControl(proto::Message&& m) {
       Fail(LinkError::kProtocol, proto::GoodbyeReason::kIncompatible);
       return;
     }
+    peer_caps_ = welcome ? welcome->caps : hello->caps;
     SetState(LinkState::kConnected, LinkError::kNone);
     return;
   }
@@ -178,6 +179,7 @@ void Link::HandleControl(proto::Message&& m) {
       Fail(LinkError::kRejected, proto::GoodbyeReason::kRejected);
       return;
     }
+    peer_caps_ = vh->caps;
     // Connected before the Welcome goes out, so whatever the viewer sends
     // once it has the Welcome is accepted.
     SetState(LinkState::kConnected, LinkError::kNone);

@@ -8,7 +8,13 @@
 - **选择显示器**：新增 `rda_list_displays()` / `rdaccel::ListDisplays()` 和 `rda_host_config.display_index`（追加在结构体末尾，旧调用方不受影响）。
   Linux 用 RandR 1.5 的 monitor 列表（没有时整个 X screen 算一块），macOS 用 ScreenCaptureKit 的 SCDisplay；
   0 永远是主显示器。光标坐标相对所选显示器。`rdaccel_serve --list-displays` / `--display=N`。
-- Linux 新增依赖 libxrandr（`libxrandr-dev`）。
+- **文字输入**：新增输入类型 `RDA_INPUT_TEXT` / `InputKind::kText`（`code` = Unicode 字符）和 C++ `Viewer::SendText(utf8)`。
+  握手里新增能力位，对 0.3 的被控端发文字返回 `RDA_ERR_UNSUPPORTED`；被控端遇到不认识的输入类型改为跳过而不是断开。
+  C++ `Viewer::SendInput` 现在返回 `bool`。
+- **输入注入（可选）**：新增 `rda_injector_*` / `rdaccel::Injector`，把收到的输入事件注入被控系统。Linux 用 XTest
+  （CI 在 Xvfb 里验证移动、缩放坐标、点击、滚轮、按键和任意字符输入），macOS 用 CGEvent（需要辅助功能权限）。
+  `rdaccel_serve --inject`。滚轮单位明确为“行”，y > 0 向上、x > 0 向右。
+- Linux 新增依赖 libxrandr、libxtst（`libxrandr-dev libxtst-dev`）。
 - CI 在 Xvfb 里跑 X11 采集、区域选择和光标测试。
 
 ## 0.3.0
