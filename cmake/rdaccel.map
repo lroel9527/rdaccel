@@ -1,0 +1,7 @@
+/* Shared-library exports on Linux: the C ABI only. */
+{
+  global:
+    rda_*;
+  local:
+    *;
+};

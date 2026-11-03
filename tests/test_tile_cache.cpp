@@ -2,7 +2,7 @@
 
 #include "tile/tile_cache.h"
 
-using namespace rdaccel;
+using namespace rdacore;
 
 TEST(TileCache, FindInsertAndEvictLeastRecentlyUsed) {
   tile::TileCacheIndex cache(2);

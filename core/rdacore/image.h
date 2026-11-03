@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace rdaccel {
+namespace rdacore {
 
 // A read-only view of a 32-bit-per-pixel image. Pixels are BGRA (byte order
 // B, G, R, A in memory) on every platform; alpha is ignored.
@@ -13,4 +13,4 @@ struct ImageView {
   int32_t stride = 0;  // bytes per row
 };
 
-}  // namespace rdaccel
+}  // namespace rdacore

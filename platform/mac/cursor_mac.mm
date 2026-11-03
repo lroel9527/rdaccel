@@ -12,7 +12,7 @@
 
 #include "platform.h"
 
-namespace rdaccel::platform {
+namespace rdacore::platform {
 namespace {
 
 constexpr int kImageEvery = 4;  // polls between image reads (~30 Hz at 120 Hz polling)
@@ -90,4 +90,4 @@ std::unique_ptr<capture::ICursorSource> CreateCursorSource(std::string* /*error*
   return std::make_unique<MacCursorSource>();
 }
 
-}  // namespace rdaccel::platform
+}  // namespace rdacore::platform

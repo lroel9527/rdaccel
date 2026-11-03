@@ -9,7 +9,7 @@
 // Uses only the public API; a GUI application would draw the picture from
 // on_frame and the cursor from on_cursor instead of counting them.
 
-#include <rdaccel/rdaccel.h>
+#include <rdaccel/rdaccel.hpp>
 
 #include <atomic>
 #include <chrono>

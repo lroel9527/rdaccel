@@ -12,7 +12,7 @@
 
 #include "capture/capturer.h"
 
-namespace rdaccel::platform {
+namespace rdacore::platform {
 
 class X11Capturer final : public capture::ICapturer {
  public:
@@ -29,4 +29,4 @@ class X11Capturer final : public capture::ICapturer {
   std::string error_;
 };
 
-}  // namespace rdaccel::platform
+}  // namespace rdacore::platform

@@ -4,10 +4,10 @@
 #include <vector>
 
 #include "proto/messages.h"
-#include "rdaccel/cursor.h"
+#include "rdacore/cursor.h"
 #include "session/cursor_channel.h"
 
-using namespace rdaccel;
+using namespace rdacore;
 
 namespace {
 

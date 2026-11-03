@@ -30,7 +30,7 @@
 #include <unordered_map>
 
 #include "capture/capturer.h"
-#include "rdaccel/host.h"
+#include "rdacore/host.h"
 #include "codec/lossless.h"
 #include "codec/video_codec.h"
 #include "proto/messages.h"
@@ -40,9 +40,9 @@
 #include "tile/video_region.h"
 #include "transport/transport.h"
 
-namespace rdaccel::session {
+namespace rdacore::session {
 
-using HostStats = rdaccel::HostStats;
+using HostStats = rdacore::HostStats;
 
 struct HostOptions {
   bool lossless = true;
@@ -203,4 +203,4 @@ class HostSession {
 // region list short.
 std::vector<Rect> TilesToRegions(const std::vector<tile::TileChange>& changes);
 
-}  // namespace rdaccel::session
+}  // namespace rdacore::session

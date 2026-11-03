@@ -7,7 +7,12 @@
 
 ## 这是一个库
 
-rdaccel 是给其他程序集成的 C++20 库，只有一个 CMake 目标 `rdaccel::rdaccel`，公开 API 全部在 `include/rdaccel/` 下，入口是 `#include <rdaccel/rdaccel.h>`。`examples/` 里的程序只是演示和测试工具，它们和第三方应用一样只用公开 API。
+rdaccel 是给其他程序集成的库，只有一个 CMake 目标 `rdaccel::rdaccel`。公开接口只有两个头文件：
+
+- `<rdaccel/rdaccel.h>`：稳定的 C ABI，也是库唯一的二进制接口（`rda_*` 函数、不透明句柄、带 `struct_size` 的配置结构体、`rda_status` 错误码、日志回调）。动态库只导出这些符号，C、Swift、Rust、Python 都能直接用。
+- `<rdaccel/rdaccel.hpp>`：只有头文件的 C++20 包装层（`rdaccel::Host`、`rdaccel::Viewer`、`rdaccel::Transport`），全部内联调用 C 函数，所以应用可以用和库不同的编译器和标准库。
+
+库内部是 C++20（`core/`、`platform/`、`src/`，命名空间 `rdacore`），不对外。`examples/` 里的程序只是演示和测试工具，它们和第三方应用一样只用公开头文件。
 
 | 公开类型 | 作用 |
 | --- | --- |
@@ -18,10 +23,10 @@ rdaccel 是给其他程序集成的 C++20 库，只有一个 CMake 目标 `rdacc
 | `CreateRecordingTransport` / `ReadRecording` | 录制和回放码流（`.rdstream`），用于对比码率和跨平台互通测试 |
 | `RenderTestPattern` | 确定性的合成桌面，没有真实屏幕时用来测试集成 |
 
-最小用法（完整代码见 [examples/minimal/main.cpp](examples/minimal/main.cpp)）：
+最小用法（完整代码见 [examples/minimal/main.cpp](examples/minimal/main.cpp)，纯 C 版见 [examples/minimal_c/main.c](examples/minimal_c/main.c)）：
 
 ```cpp
-#include <rdaccel/rdaccel.h>
+#include <rdaccel/rdaccel.hpp>
 
 auto [host_end, viewer_end] = rdaccel::CreateLocalPipe();  // 跨机器换成 ListenUdp / ConnectUdp
 
@@ -41,7 +46,7 @@ host.StartScreenCapture();  // 或者每帧调用 host.SubmitFrame(...)
 # 1) 安装后 find_package
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 cmake --install build --prefix /opt/rdaccel
-# 你的 CMakeLists.txt：find_package(rdaccel 0.1 REQUIRED) + target_link_libraries(app PRIVATE rdaccel::rdaccel)
+# 你的 CMakeLists.txt：find_package(rdaccel 0.2 REQUIRED) + target_link_libraries(app PRIVATE rdaccel::rdaccel)
 
 # 2) 作为子目录：add_subdirectory(rdaccel)，此时默认不编译测试和示例
 ```
@@ -53,7 +58,7 @@ cmake --install build --prefix /opt/rdaccel
 ./build/bin/rdaccel_view 10.0.0.2 --udp=7300 --seconds=30 --dump=last.ppm   # 控制端：解码并每秒打印统计
 ```
 
-API 在 1.0 之前还会变。M1、M2 的功能都加在 `Host` / `Viewer` 后面，现有接口没有改，只增加了字段和函数。
+0.2 把公开接口换成了 C ABI + C++ 包装层（库形态的决定见[设计文档](https://claude.ai/artifact/71hkqA9ywj4VGktXPvpPXH)）。C++ 用法和 0.1 基本一样，只是头文件换成 `rdaccel.hpp`。1.0 之前次版本之间还可能不兼容，1.0 之后同一主版本内只加不改。
 
 ## 当前进度：M2 视频区域、网络传输、光标通道
 

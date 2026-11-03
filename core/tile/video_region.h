@@ -21,9 +21,9 @@
 #include <cstdint>
 #include <vector>
 
-#include "rdaccel/geometry.h"
+#include "rdacore/geometry.h"
 
-namespace rdaccel::tile {
+namespace rdacore::tile {
 
 struct VideoRegionParams {
   int32_t window = 30;    // frames of history per tile (at most 64)
@@ -90,4 +90,4 @@ class VideoRegionTracker {
   std::vector<VideoRegion> regions_;
 };
 
-}  // namespace rdaccel::tile
+}  // namespace rdacore::tile

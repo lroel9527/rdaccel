@@ -17,7 +17,7 @@
 #include <utility>
 #include <vector>
 
-namespace rdaccel {
+namespace rdacore {
 
 // Logical channels. A transport may map them to separate streams (so a large
 // video frame does not delay input) or multiplex them on one connection.
@@ -106,4 +106,4 @@ std::pair<std::unique_ptr<Transport>, std::unique_ptr<Transport>> CreateSimulate
     const NetworkConditions& host_to_viewer, const NetworkConditions& viewer_to_host,
     bool congestion_control = true);
 
-}  // namespace rdaccel
+}  // namespace rdacore

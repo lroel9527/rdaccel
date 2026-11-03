@@ -8,7 +8,7 @@
 
 #include "proto/wire.h"
 
-namespace rdaccel::codec {
+namespace rdacore::codec {
 namespace {
 
 // Text tiles are small, so a stronger level costs little time and finds more
@@ -350,4 +350,4 @@ bool LosslessDecoder::Decode(std::span<const uint8_t> data, bool reset, int32_t 
   return true;
 }
 
-}  // namespace rdaccel::codec
+}  // namespace rdacore::codec

@@ -13,7 +13,7 @@
 
 #include "transport/transport.h"
 
-namespace rdaccel::transport {
+namespace rdacore::transport {
 
 class LocalPipeEndpoint;
 
@@ -43,4 +43,4 @@ class LocalPipeEndpoint final : public ITransport {
   std::thread worker_;
 };
 
-}  // namespace rdaccel::transport
+}  // namespace rdacore::transport

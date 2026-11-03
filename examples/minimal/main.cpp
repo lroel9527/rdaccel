@@ -4,7 +4,7 @@
 // and the pipe with ListenTcp / ConnectTcp (or your own Transport) to go
 // across machines.
 
-#include <rdaccel/rdaccel.h>
+#include <rdaccel/rdaccel.hpp>
 
 #include <atomic>
 #include <chrono>

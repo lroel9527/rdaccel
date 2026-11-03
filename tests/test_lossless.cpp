@@ -2,7 +2,7 @@
 
 #include "codec/lossless.h"
 
-using namespace rdaccel;
+using namespace rdacore;
 
 namespace {
 

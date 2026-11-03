@@ -15,7 +15,7 @@
 #include "session/viewer_session.h"
 #include "transport/local_pipe.h"
 
-using namespace rdaccel;
+using namespace rdacore;
 
 namespace {
 

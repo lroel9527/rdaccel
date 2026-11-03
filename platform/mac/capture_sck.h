@@ -10,7 +10,7 @@
 
 #include "capture/capturer.h"
 
-namespace rdaccel::platform {
+namespace rdacore::platform {
 
 class SckCapturer final : public capture::ICapturer {
  public:
@@ -30,4 +30,4 @@ class SckCapturer final : public capture::ICapturer {
   std::string error_;
 };
 
-}  // namespace rdaccel::platform
+}  // namespace rdacore::platform

@@ -11,7 +11,7 @@
 #include <mutex>
 #include <optional>
 
-namespace rdaccel::platform {
+namespace rdacore::platform {
 namespace {
 
 std::string OsStatusText(const char* what, OSStatus st) {
@@ -414,4 +414,4 @@ std::unique_ptr<codec::IHevcDecoder> CreateVtHevcDecoder(std::string*) {
   return std::make_unique<VtHevcDecoder>();
 }
 
-}  // namespace rdaccel::platform
+}  // namespace rdacore::platform

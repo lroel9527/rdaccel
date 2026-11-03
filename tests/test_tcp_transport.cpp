@@ -9,7 +9,7 @@
 
 #include "transport/tcp_transport.h"
 
-using namespace rdaccel::transport;
+using namespace rdacore::transport;
 
 TEST(TcpTransport, LoopbackRoundTrip) {
   constexpr uint16_t kPort = 47391;

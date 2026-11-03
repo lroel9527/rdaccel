@@ -12,7 +12,7 @@
 
 #include "codec/video_codec.h"
 
-namespace rdaccel::platform {
+namespace rdacore::platform {
 
 // Returns null and fills `error` if no HEVC encoder could be opened.
 // `prefer` may name one backend ("hevc_nvenc", "libx265") to try first.
@@ -22,4 +22,4 @@ std::unique_ptr<codec::IHevcEncoder> CreateFfmpegHevcEncoder(const codec::Encode
 
 std::unique_ptr<codec::IHevcDecoder> CreateFfmpegHevcDecoder(std::string* error);
 
-}  // namespace rdaccel::platform
+}  // namespace rdacore::platform

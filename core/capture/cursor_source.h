@@ -8,9 +8,9 @@
 #include <cstdint>
 #include <string>
 
-#include "rdaccel/cursor.h"
+#include "rdacore/cursor.h"
 
-namespace rdaccel::capture {
+namespace rdacore::capture {
 
 struct CursorSample {
   // Pointer position and the size of the screen it is measured on, in the
@@ -34,4 +34,4 @@ class ICursorSource {
   virtual bool Poll(CursorSample& out) = 0;
 };
 
-}  // namespace rdaccel::capture
+}  // namespace rdacore::capture

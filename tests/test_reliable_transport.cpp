@@ -8,7 +8,7 @@
 #include "capture/capturer.h"
 #include "net/reliable_transport.h"
 
-using namespace rdaccel;
+using namespace rdacore;
 
 namespace {
 

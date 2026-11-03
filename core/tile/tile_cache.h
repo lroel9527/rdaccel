@@ -16,7 +16,7 @@
 #include <optional>
 #include <unordered_map>
 
-namespace rdaccel::tile {
+namespace rdacore::tile {
 
 class TileCacheIndex {
  public:
@@ -49,4 +49,4 @@ class TileCacheIndex {
   std::unordered_map<uint64_t, std::list<Entry>::iterator> map_;
 };
 
-}  // namespace rdaccel::tile
+}  // namespace rdacore::tile

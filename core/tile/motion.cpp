@@ -4,7 +4,7 @@
 #include <cstring>
 #include <map>
 
-namespace rdaccel::tile {
+namespace rdacore::tile {
 namespace {
 
 constexpr uint64_t kBase = 0x100000001b3ull;  // any odd multiplier works
@@ -304,4 +304,4 @@ void ApplyMoves(std::span<const Move> moves, uint8_t* bgra, int32_t width, int32
   }
 }
 
-}  // namespace rdaccel::tile
+}  // namespace rdacore::tile

@@ -6,8 +6,8 @@
 
 #include "proto/wire.h"
 
-using rdaccel::proto::ByteReader;
-using rdaccel::proto::ByteWriter;
+using rdacore::proto::ByteReader;
+using rdacore::proto::ByteWriter;
 
 TEST(Wire, VarintRoundTrip) {
   const std::vector<uint64_t> values = {0, 1, 127, 128, 300, 16383, 16384,

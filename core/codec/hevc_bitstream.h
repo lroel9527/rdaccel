@@ -14,7 +14,7 @@
 #include <span>
 #include <vector>
 
-namespace rdaccel::codec {
+namespace rdacore::codec {
 
 enum HevcNalType : uint8_t {
   kNalIdrWRadl = 19,
@@ -66,4 +66,4 @@ HevcAccessUnit AnnexBToAccessUnit(std::span<const uint8_t> annexb);
 bool AccessUnitToAnnexB(const std::vector<std::vector<uint8_t>>& parameter_sets,
                         std::span<const uint8_t> nal_data, std::vector<uint8_t>& out);
 
-}  // namespace rdaccel::codec
+}  // namespace rdacore::codec

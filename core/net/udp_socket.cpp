@@ -13,7 +13,7 @@
 
 #include "net/datagram.h"
 
-namespace rdaccel::net {
+namespace rdacore::net {
 namespace {
 
 std::string Errno(const char* what) { return std::string(what) + ": " + std::strerror(errno); }
@@ -134,4 +134,4 @@ std::unique_ptr<DatagramSocket> ConnectUdpSocket(const std::string& host, uint16
   return std::make_unique<UdpSocket>(fd, std::vector<uint8_t>{});
 }
 
-}  // namespace rdaccel::net
+}  // namespace rdacore::net

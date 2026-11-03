@@ -25,7 +25,7 @@
 
 #include "tile/tile_diff.h"
 
-namespace rdaccel::tile {
+namespace rdacore::tile {
 
 struct Move {
   Rect dst;  // area of the current frame
@@ -54,4 +54,4 @@ std::vector<Move> DetectMoves(const ImageView& prev, const ImageView& cur,
 void ApplyMoves(std::span<const Move> moves, uint8_t* bgra, int32_t width, int32_t height,
                 std::vector<uint8_t>& scratch);
 
-}  // namespace rdaccel::tile
+}  // namespace rdacore::tile

@@ -1,10 +1,10 @@
-#include "rdaccel/transport.h"
+#include "rdacore/transport.h"
 
 #include "net/reliable_transport.h"
 #include "transport/local_pipe.h"
 #include "transport/tcp_transport.h"
 
-namespace rdaccel {
+namespace rdacore {
 
 std::pair<std::unique_ptr<Transport>, std::unique_ptr<Transport>> CreateLocalPipe() {
   auto [a, b] = transport::MakeLocalPipe();
@@ -55,4 +55,4 @@ std::pair<std::unique_ptr<Transport>, std::unique_ptr<Transport>> CreateSimulate
               std::move(b), net::ReliableOptions{.client = true, .congestion_control = congestion_control})};
 }
 
-}  // namespace rdaccel
+}  // namespace rdacore

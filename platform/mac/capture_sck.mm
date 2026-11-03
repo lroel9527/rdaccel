@@ -9,8 +9,8 @@
 
 #include <cmath>
 
-using rdaccel::capture::CapturedFrame;
-using rdaccel::capture::FrameFn;
+using rdacore::capture::CapturedFrame;
+using rdacore::capture::FrameFn;
 
 @interface RDStreamOutput : NSObject <SCStreamOutput>
 - (instancetype)initWithCallback:(FrameFn)fn;
@@ -47,7 +47,7 @@ using rdaccel::capture::FrameFn;
             static_cast<int32_t>(CVPixelBufferGetWidth(pb)),
             static_cast<int32_t>(CVPixelBufferGetHeight(pb)),
             static_cast<int32_t>(CVPixelBufferGetBytesPerRow(pb))};
-  f.capture_time_us = rdaccel::capture::MonotonicMicros();
+  f.capture_time_us = rdacore::capture::MonotonicMicros();
 
   // Dirty rects are in points relative to the content rect; convert to
   // buffer pixels. If anything is missing, leave the list empty, which makes
@@ -67,7 +67,7 @@ using rdaccel::capture::FrameFn;
       const auto x1 = static_cast<int32_t>(std::ceil((CGRectGetMaxX(r) - content.origin.x) * scale));
       const auto y1 = static_cast<int32_t>(std::ceil((CGRectGetMaxY(r) - content.origin.y) * scale));
       // Qualified: MacTypes.h also declares a global Rect.
-      f.dirty.push_back(rdaccel::Rect{x0, y0, x1 - x0, y1 - y0});
+      f.dirty.push_back(rdacore::Rect{x0, y0, x1 - x0, y1 - y0});
     }
   }
 
@@ -77,7 +77,7 @@ using rdaccel::capture::FrameFn;
 
 @end
 
-namespace rdaccel::platform {
+namespace rdacore::platform {
 
 struct SckCapturer::Impl {
   SCStream* stream = nil;
@@ -181,4 +181,4 @@ void SckCapturer::Stop() {
   impl_->output = nil;
 }
 
-}  // namespace rdaccel::platform
+}  // namespace rdacore::platform

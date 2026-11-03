@@ -1,6 +1,6 @@
 #include "tile/tile_cache.h"
 
-namespace rdaccel::tile {
+namespace rdacore::tile {
 
 std::optional<uint32_t> TileCacheIndex::Find(uint64_t hash) {
   auto it = map_.find(hash);
@@ -28,4 +28,4 @@ void TileCacheIndex::Clear() {
   map_.clear();
 }
 
-}  // namespace rdaccel::tile
+}  // namespace rdacore::tile

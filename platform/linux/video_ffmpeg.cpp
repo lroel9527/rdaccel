@@ -1,5 +1,7 @@
 #include "linux/video_ffmpeg.h"
 
+#include "log/log.h"
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/imgutils.h>
@@ -9,10 +11,12 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <cstdarg>
+#include <mutex>
 #include <cstdio>
 #include <cstdlib>
 
-namespace rdaccel::platform {
+namespace rdacore::platform {
 namespace {
 
 std::string AvError(int rc) {
@@ -295,10 +299,10 @@ class FfmpegHevcDecoder final : public codec::IHevcDecoder {
       const int* coeffs = sws_getCoefficients(cs);
       sws_setColorspaceDetails(sws_.get(), coeffs, full_range ? 1 : 0, coeffs, 1, 0, 1 << 16,
                                1 << 16);
-      if (std::getenv("RDACCEL_DEBUG")) {
-        std::fprintf(stderr, "rdaccel: decoding %dx%d %s, colorspace %s, %s range\n", w, h,
-                     av_get_pix_fmt_name(fmt), av_color_space_name(spc),
-                     full_range ? "full" : "limited");
+      if (log::Enabled(log::Level::kInfo)) {
+        log::Info(std::string("decoding ") + std::to_string(w) + "x" + std::to_string(h) + " " +
+                  av_get_pix_fmt_name(fmt) + ", colorspace " + av_color_space_name(spc) + ", " +
+                  (full_range ? "full" : "limited") + " range");
       }
       sws_w_ = w;
       sws_h_ = h;
@@ -326,11 +330,32 @@ class FfmpegHevcDecoder final : public codec::IHevcDecoder {
   std::string error_;
 };
 
+// FFmpeg prints to stderr by default; send its messages to the library log
+// instead (a library must not write to the application's terminal). Its
+// warnings are mostly about backends we probe and skip (e.g. NVENC without a
+// GPU), so they go out at debug level.
+void RouteFfmpegLog() {
+  static std::once_flag once;
+  std::call_once(once, [] {
+    av_log_set_callback([](void*, int level, const char* fmt, va_list vl) {
+      if (level > AV_LOG_WARNING) return;
+      const log::Level ours = level <= AV_LOG_FATAL ? log::Level::kWarn : log::Level::kDebug;
+      if (!log::Enabled(ours)) return;
+      char buf[512];
+      std::vsnprintf(buf, sizeof(buf), fmt, vl);
+      std::string msg = std::string("ffmpeg: ") + buf;
+      while (!msg.empty() && msg.back() == '\n') msg.pop_back();
+      log::Write(ours, msg);
+    });
+  });
+}
+
 }  // namespace
 
 std::unique_ptr<codec::IHevcEncoder> CreateFfmpegHevcEncoder(const codec::EncoderConfig& cfg,
                                                              const std::string& prefer,
                                                              std::string* error) {
+  RouteFfmpegLog();
   std::vector<std::string> order = {"hevc_nvenc", "libx265"};
   if (!prefer.empty()) {
     order.erase(std::remove(order.begin(), order.end(), prefer), order.end());
@@ -347,7 +372,8 @@ std::unique_ptr<codec::IHevcEncoder> CreateFfmpegHevcEncoder(const codec::Encode
 }
 
 std::unique_ptr<codec::IHevcDecoder> CreateFfmpegHevcDecoder(std::string* error) {
+  RouteFfmpegLog();
   return FfmpegHevcDecoder::Open(error);
 }
 
-}  // namespace rdaccel::platform
+}  // namespace rdacore::platform

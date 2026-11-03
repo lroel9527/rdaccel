@@ -19,10 +19,10 @@
 #include <string>
 #include <vector>
 
-#include "rdaccel/geometry.h"
-#include "rdaccel/image.h"
+#include "rdacore/geometry.h"
+#include "rdacore/image.h"
 
-namespace rdaccel::codec {
+namespace rdacore::codec {
 
 struct PaletteTile {
   Rect rect;
@@ -100,4 +100,4 @@ class LosslessDecoder {
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace rdaccel::codec
+}  // namespace rdacore::codec

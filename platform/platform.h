@@ -12,7 +12,7 @@
 #include "capture/cursor_source.h"
 #include "codec/video_codec.h"
 
-namespace rdaccel::platform {
+namespace rdacore::platform {
 
 // Short name of the platform, e.g. "macOS" or "Linux".
 const char* PlatformName();
@@ -32,4 +32,4 @@ std::unique_ptr<codec::IHevcDecoder> CreateHevcDecoder(std::string* error);
 // be read (e.g. no X display).
 std::unique_ptr<capture::ICursorSource> CreateCursorSource(std::string* error);
 
-}  // namespace rdaccel::platform
+}  // namespace rdacore::platform

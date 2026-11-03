@@ -13,7 +13,7 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
-namespace rdaccel::platform {
+namespace rdacore::platform {
 
 bool X11Capturer::Start(const capture::CaptureConfig& cfg, capture::FrameFn on_frame) {
   if (running_) {
@@ -130,4 +130,4 @@ void X11Capturer::Stop() {
   if (thread_.joinable()) thread_.join();
 }
 
-}  // namespace rdaccel::platform
+}  // namespace rdacore::platform

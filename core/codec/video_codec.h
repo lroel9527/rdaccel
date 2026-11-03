@@ -15,7 +15,7 @@
 #include "codec/hevc_bitstream.h"
 #include "tile/tile_diff.h"
 
-namespace rdaccel::codec {
+namespace rdacore::codec {
 
 struct EncoderConfig {
   int32_t width = 0;
@@ -68,4 +68,4 @@ class IHevcDecoder {
   virtual const std::string& last_error() const = 0;
 };
 
-}  // namespace rdaccel::codec
+}  // namespace rdacore::codec

@@ -7,7 +7,7 @@
 
 #include "transport/local_pipe.h"
 
-using namespace rdaccel::transport;
+using namespace rdacore::transport;
 
 TEST(LocalPipe, DeliversInOrderInBothDirections) {
   auto [a, b] = MakeLocalPipe();

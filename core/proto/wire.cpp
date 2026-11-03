@@ -2,7 +2,7 @@
 
 #include <limits>
 
-namespace rdaccel::proto {
+namespace rdacore::proto {
 
 void ByteWriter::u32le(uint32_t v) {
   for (int i = 0; i < 4; ++i) buf_.push_back(static_cast<uint8_t>(v >> (8 * i)));
@@ -110,4 +110,4 @@ bool ByteReader::svarint32(int32_t& v) {
   return true;
 }
 
-}  // namespace rdaccel::proto
+}  // namespace rdacore::proto

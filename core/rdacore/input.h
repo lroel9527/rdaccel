@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace rdaccel {
+namespace rdacore {
 
 enum class InputKind : uint8_t {
   kMouseMove = 1,
@@ -26,4 +26,4 @@ struct InputEvent {
   friend bool operator==(const InputEvent&, const InputEvent&) = default;
 };
 
-}  // namespace rdaccel
+}  // namespace rdacore

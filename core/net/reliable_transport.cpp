@@ -6,7 +6,7 @@
 #include "capture/capturer.h"
 #include "proto/wire.h"
 
-namespace rdaccel::net {
+namespace rdacore::net {
 namespace {
 
 enum PacketType : uint8_t { kData = 1, kAck = 2, kHello = 3 };
@@ -547,4 +547,4 @@ void ReliableTransport::OnDatagram(std::span<const uint8_t> d) {
   for (auto& [ch, bytes] : deliver) fn(static_cast<transport::Channel>(ch), bytes);
 }
 
-}  // namespace rdaccel::net
+}  // namespace rdacore::net

@@ -10,7 +10,7 @@
 #include <X11/Xlib.h>
 #include <X11/extensions/Xfixes.h>
 
-namespace rdaccel::platform {
+namespace rdacore::platform {
 namespace {
 
 class XFixesCursorSource final : public capture::ICursorSource {
@@ -90,4 +90,4 @@ std::unique_ptr<capture::ICursorSource> CreateCursorSource(std::string* error) {
   return std::make_unique<XFixesCursorSource>(dpy, event_base);
 }
 
-}  // namespace rdaccel::platform
+}  // namespace rdacore::platform

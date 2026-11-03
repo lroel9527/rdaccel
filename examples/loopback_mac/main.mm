@@ -1,5 +1,5 @@
 // rdaccel_loopback: host and viewer in one macOS process. An example of
-// embedding the library; it uses only the public API (rdaccel/rdaccel.h).
+// embedding the library; it uses only the public API (rdaccel/rdaccel.hpp).
 //
 //   ScreenCaptureKit -> tile diff -> VideoToolbox HEVC encode -> local pipe
 //   -> VideoToolbox HEVC decode -> window
@@ -17,7 +17,7 @@
 #import <AppKit/AppKit.h>
 #import <QuartzCore/QuartzCore.h>
 
-#include <rdaccel/rdaccel.h>
+#include <rdaccel/rdaccel.hpp>
 
 #include <algorithm>
 #include <atomic>

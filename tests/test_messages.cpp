@@ -4,8 +4,8 @@
 
 #include "proto/messages.h"
 
-using namespace rdaccel;
-using namespace rdaccel::proto;
+using namespace rdacore;
+using namespace rdacore::proto;
 
 namespace {
 

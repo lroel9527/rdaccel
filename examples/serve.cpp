@@ -10,7 +10,7 @@
 // with --source=screen the size the screen is captured at (default: native). --seconds=0 runs until the viewer
 // disconnects or the process is killed. Uses only the public API.
 
-#include <rdaccel/rdaccel.h>
+#include <rdaccel/rdaccel.hpp>
 
 #include <atomic>
 #include <chrono>

@@ -12,15 +12,15 @@
 
 #include "codec/lossless.h"
 #include "codec/video_codec.h"
-#include "rdaccel/viewer.h"
+#include "rdacore/viewer.h"
 #include "proto/messages.h"
 #include "session/cursor_channel.h"
 #include "tile/motion.h"
 #include "transport/transport.h"
 
-namespace rdaccel::session {
+namespace rdacore::session {
 
-using ViewerStats = rdaccel::ViewerStats;
+using ViewerStats = rdacore::ViewerStats;
 
 class ViewerSession {
  public:
@@ -104,4 +104,4 @@ class ViewerSession {
   HelloFn on_hello_;
 };
 
-}  // namespace rdaccel::session
+}  // namespace rdacore::session

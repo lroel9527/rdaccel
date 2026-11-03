@@ -30,7 +30,7 @@
 #include "net/datagram.h"
 #include "transport/transport.h"
 
-namespace rdaccel::net {
+namespace rdacore::net {
 
 struct ReliableOptions {
   // The connecting side pings until it hears from the peer, so a listener
@@ -144,4 +144,4 @@ class ReliableTransport final : public transport::ITransport {
   std::thread worker_;
 };
 
-}  // namespace rdaccel::net
+}  // namespace rdacore::net

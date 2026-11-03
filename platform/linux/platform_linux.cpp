@@ -3,7 +3,7 @@
 #include "linux/capture_x11.h"
 #include "linux/video_ffmpeg.h"
 
-namespace rdaccel::platform {
+namespace rdacore::platform {
 
 const char* PlatformName() { return "Linux"; }
 
@@ -21,4 +21,4 @@ std::unique_ptr<codec::IHevcDecoder> CreateHevcDecoder(std::string* error) {
   return CreateFfmpegHevcDecoder(error);
 }
 
-}  // namespace rdaccel::platform
+}  // namespace rdacore::platform

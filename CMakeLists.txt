@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(rdaccel VERSION 0.1.0 LANGUAGES CXX)
+project(rdaccel VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -32,12 +32,14 @@ endif()
 # ---------------------------------------------------------------------------
 # The library: one target, rdaccel::rdaccel.
 #
-#   include/   public API (the only headers installed)
-#   src/       public API implementation
+#   include/   public API: rdaccel.h (C ABI) + rdaccel.hpp (header-only C++)
+#   src/capi/  the C ABI, on top of the internal C++ API
+#   src/       internal C++ API (Host, Viewer, transports) in namespace rdacore
 #   core/      platform-independent internals
 #   platform/  capture + HEVC codecs, one implementation per OS
 # ---------------------------------------------------------------------------
 set(RDACCEL_SOURCES
+  src/capi/capi.cpp
   src/host.cpp
   src/viewer.cpp
   src/transport.cpp
@@ -61,6 +63,7 @@ set(RDACCEL_SOURCES
   core/session/rate_control.cpp
   core/session/cursor_channel.cpp
   core/io/stream_file.cpp
+  core/log/log.cpp
 )
 if(APPLE)
   list(APPEND RDACCEL_SOURCES
@@ -82,11 +85,24 @@ endif()
 
 add_library(rdaccel ${RDACCEL_SOURCES})
 add_library(rdaccel::rdaccel ALIAS rdaccel)
+# Only the rda_* functions are exported from a shared build.
 set_target_properties(rdaccel PROPERTIES
+  C_VISIBILITY_PRESET hidden
+  CXX_VISIBILITY_PRESET hidden
+  OBJCXX_VISIBILITY_PRESET hidden
+  VISIBILITY_INLINES_HIDDEN ON
   EXPORT_NAME rdaccel
   VERSION ${PROJECT_VERSION}
   SOVERSION ${PROJECT_VERSION_MAJOR})
 target_compile_features(rdaccel PUBLIC cxx_std_20)
+get_target_property(RDACCEL_TYPE rdaccel TYPE)
+if(RDACCEL_TYPE STREQUAL "SHARED_LIBRARY")
+  if(APPLE)
+    target_link_options(rdaccel PRIVATE "LINKER:-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/cmake/rdaccel.exp")
+  else()
+    target_link_options(rdaccel PRIVATE "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/cmake/rdaccel.map")
+  endif()
+endif()
 target_include_directories(rdaccel
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -196,9 +212,18 @@ if(RDACCEL_BUILD_TESTS)
 
   # Platform codec round trip: encode synthetic frames with the platform
   # encoder and decode them with the platform decoder.
-  # The public API test (test_api.cpp) uses only include/rdaccel/.
-  add_executable(rdaccel_platform_tests tests/test_platform_codec.cpp tests/test_api.cpp)
+  # The public API tests use only include/rdaccel/: test_api.cpp the C++
+  # wrapper (rdaccel.hpp), test_capi.cpp the C ABI (rdaccel.h).
+  add_executable(rdaccel_platform_tests tests/test_platform_codec.cpp tests/test_api.cpp
+    tests/test_capi.cpp)
   target_link_libraries(rdaccel_platform_tests PRIVATE rdaccel_internal GTest::gtest_main)
   gtest_discover_tests(rdaccel_platform_tests DISCOVERY_TIMEOUT 30
     PROPERTIES ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan.supp")
+
+  # The plain C example doubles as a test of the C ABI from C.
+  if(RDACCEL_BUILD_EXAMPLES)
+    add_test(NAME minimal_c COMMAND rdaccel_minimal_c)
+    set_tests_properties(minimal_c PROPERTIES
+      ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan.supp")
+  endif()
 endif()

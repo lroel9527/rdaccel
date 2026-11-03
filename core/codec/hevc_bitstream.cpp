@@ -1,6 +1,6 @@
 #include "codec/hevc_bitstream.h"
 
-namespace rdaccel::codec {
+namespace rdacore::codec {
 
 std::vector<std::span<const uint8_t>> SplitAnnexB(std::span<const uint8_t> s) {
   std::vector<std::span<const uint8_t>> nals;
@@ -82,4 +82,4 @@ bool AccessUnitToAnnexB(const std::vector<std::vector<uint8_t>>& parameter_sets,
   return true;
 }
 
-}  // namespace rdaccel::codec
+}  // namespace rdacore::codec

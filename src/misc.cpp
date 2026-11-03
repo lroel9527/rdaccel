@@ -1,4 +1,4 @@
-#include "rdaccel/rdaccel.h"
+#include "rdacore/rdacore.h"
 
 #include <algorithm>
 
@@ -7,7 +7,7 @@
 #include "io/stream_file.h"
 #include "platform.h"
 
-namespace rdaccel {
+namespace rdacore {
 
 const char* Version() { return RDACCEL_VERSION_STRING; }
 
@@ -30,9 +30,9 @@ bool ReadRecording(const std::string& path, std::vector<uint8_t>& out, std::stri
   return io::ReadStreamFile(path, out, error);
 }
 
-}  // namespace rdaccel
+}  // namespace rdacore
 
-namespace rdaccel {
+namespace rdacore {
 
 void DrawCursor(const CursorImage& c, int32_t x, int32_t y, uint8_t* bgra, int32_t width,
                 int32_t height, int32_t stride) {
@@ -53,4 +53,4 @@ void DrawCursor(const CursorImage& c, int32_t x, int32_t y, uint8_t* bgra, int32
   }
 }
 
-}  // namespace rdaccel
+}  // namespace rdacore

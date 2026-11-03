@@ -16,10 +16,10 @@
 #include <unordered_map>
 
 #include "proto/messages.h"
-#include "rdaccel/cursor.h"
+#include "rdacore/cursor.h"
 #include "transport/transport.h"
 
-namespace rdaccel::session {
+namespace rdacore::session {
 
 inline constexpr size_t kCursorCacheSize = 64;
 
@@ -72,4 +72,4 @@ class CursorReceiver {
   uint64_t last_id_ = 0;
 };
 
-}  // namespace rdaccel::session
+}  // namespace rdacore::session
