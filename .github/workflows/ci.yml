@@ -24,6 +24,7 @@ jobs:
         env:
           ASAN_OPTIONS: detect_leaks=0
         run: |
+          set -o pipefail
           xvfb-run -a -s "-screen 0 1280x720x24" ./build/bin/rdaccel_platform_tests \
             --gtest_filter='Platform*:CApi.ListDisplays*:CApi.Injector*' 2>&1 | tee x11.log
           if grep -q SKIPPED x11.log; then echo "X11 tests skipped under Xvfb"; exit 1; fi
@@ -69,6 +70,24 @@ jobs:
         with:
           name: linux-stream
           path: linux.rdstream
+
+  abi:
+    # The C ABI against the PR's base: incompatible changes need a version bump.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y abigail-tools libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxext-dev libxfixes-dev libxrandr-dev libxtst-dev zlib1g-dev
+      - name: abidiff against the base branch
+        run: |
+          set -o pipefail
+          tools/abi_check.sh ${{ github.event.pull_request.base.sha }} "$RUNNER_TEMP/abi" | tee abi.txt
+          { echo '### C ABI'; echo '```'; cat abi.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
   fuzz:
     runs-on: ubuntu-24.04
