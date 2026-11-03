@@ -138,8 +138,16 @@ uint64_t ReliableTransport::Cwnd() const {
   if (!opt_.congestion_control) return UINT64_MAX;
   if (bw_ <= 0 || min_rtt_ == 0) return kInitialCwnd;
   const double gain = mode_ == Mode::kStartup ? kStartupGain : 2.0;
+  // Two round trips' worth: past startup, the minimum one plus the smoothed
+  // one. Where the round trip runs well above its minimum without a queue
+  // (threads that wake late hold packets and acknowledgements: 3x on macOS
+  // CI), a window of two minimum round trips could not keep the path busy,
+  // so its samples came in below the estimate, which shrank the window in
+  // turn. The pacing rate, not the window, keeps the queue short.
   // A few packets on top absorb delayed and stretched acknowledgements.
-  const auto bdp = static_cast<uint64_t>(gain * bw_ * static_cast<double>(min_rtt_));
+  double rtt = static_cast<double>(min_rtt_);
+  if (mode_ != Mode::kStartup) rtt = (rtt + static_cast<double>(std::max(srtt_, min_rtt_))) / 2;
+  const auto bdp = static_cast<uint64_t>(gain * bw_ * rtt);
   const uint64_t cwnd = std::max(bdp + 4 * kMaxDatagram, kMinCwnd);
   // Like the pacing rate, the window does not shrink below its initial
   // size before the path has been measured under load.
@@ -407,12 +415,17 @@ void ReliableTransport::OnRateSample(const SentPacket& p, uint64_t now) {
   // round trip three times its minimum with no queue on macOS CI, a window
   // too short for the probe up to count, and the pacing 10% below it.)
   uint64_t oldest = now > kBwWindowUs ? now - kBwWindowUs : 0;
-  if (mode_ == Mode::kProbeBw && min_rtt_ > 0 && latest_rtt_ > 2 * min_rtt_ + 20'000) {
-    if (queue_since_ == 0) queue_since_ = now;
-    oldest = std::max(oldest, queue_since_ > srtt_ ? queue_since_ - srtt_ : 0);
-  } else {
+  // The queue starts with the first round trip well above the minimum and
+  // ends only once the smoothed one is back near it: jitter that dips the
+  // single samples below the line must not start a new queue (and cut the
+  // window again) every few round trips.
+  if (mode_ != Mode::kProbeBw || min_rtt_ == 0 ||
+      srtt_ < min_rtt_ + std::max<uint64_t>(min_rtt_ / 2, 10'000)) {
     queue_since_ = 0;
+  } else if (queue_since_ == 0 && latest_rtt_ > 2 * min_rtt_ + 20'000) {
+    queue_since_ = now;
   }
+  if (queue_since_ != 0) oldest = std::max(oldest, queue_since_ > srtt_ ? queue_since_ - srtt_ : 0);
   while (bw_samples_.size() > 1 && (bw_samples_.front().round + kBwWindowRounds < round_ ||
                                     bw_samples_.front().time < oldest)) {
     bw_samples_.pop_front();
