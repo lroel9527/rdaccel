@@ -10,10 +10,13 @@
 2. 在 `CHANGELOG.md` 顶部写 `## x.y.z` 一节（发布说明直接取这一节）。
 3. 合并到 main，确认 CI 全绿。
 4. 打标签并推送：`git tag vx.y.z && git push origin vx.y.z`。
-5. `release` 工作流在 Linux（ubuntu-24.04, x86_64）和 macOS（14, arm64）上构建共享库 + 工具，打包、自检，
+5. `release` 工作流在 Linux（ubuntu-24.04, x86_64）和 macOS（14）上各构建共享库 + 工具、静态库两种包，
+   macOS 的包是通用二进制（arm64 + x86_64，逐个文件用 `lipo` 检查），每个包都会拿 `examples/minimal` 编译运行一遍自检，
    然后建一个**草稿** release，附上：
-   - `rdaccel-x.y.z-linux-x86_64.tar.gz`
-   - `rdaccel-x.y.z-darwin-arm64.tar.gz`
+   - `rdaccel-x.y.z-linux-x86_64.tar.gz`（共享库 + `rdaccel_serve` 等工具）
+   - `rdaccel-x.y.z-linux-x86_64-static.tar.gz`（`librdaccel.a`；链接时还要系统的 FFmpeg、X11，CMake 包和 `pkg-config --static` 会带上）
+   - `rdaccel-x.y.z-darwin-universal.tar.gz`
+   - `rdaccel-x.y.z-darwin-universal-static.tar.gz`（只依赖系统框架和 zlib）
    - `rdaccel-x.y.z.tar.gz`（源码）
    - `SHA256SUMS`
 6. 在 GitHub 上检查草稿，点发布。

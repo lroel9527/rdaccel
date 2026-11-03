@@ -17,6 +17,7 @@
 - **fuzz**：新增 `fuzz_recording`（录制文件回放，走真实 HEVC 解码器）和 `fuzz/corpus/recording/` 种子语料。
 - **修复**：`rda_test_pattern_render()` / `RenderTestPattern` 在宽或高小于约 120 像素时越界写内存；
   文字绕回页首后整帧渲染与增量渲染不一致。
+- **发布包**：macOS 改为通用二进制（arm64 + x86_64）；Linux 和 macOS 都多一个静态库包（`...-static.tar.gz`）。
 - **CI**：每个 PR 用 abidiff 检查 C ABI（`tools/abi_check.sh`）。
 - Linux 新增依赖 libxrandr、libxtst（`libxrandr-dev libxtst-dev`）。
 - CI 在 Xvfb 里跑 X11 采集、区域选择和光标测试。
