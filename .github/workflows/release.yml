@@ -1,0 +1,78 @@
+name: release
+
+# Push a tag vX.Y.Z (matching project(VERSION) and rdaccel.h) to build the
+# packages and attach them to a draft GitHub release; publishing the draft
+# stays a manual step. Run it by hand (workflow_dispatch) to build the
+# packages as workflow artifacts only.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            deps: sudo apt-get update && sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxext-dev libxfixes-dev zlib1g-dev
+          - os: macos-14
+            deps: "true"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: ${{ matrix.deps }}
+      - name: Tag matches the version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          v=$(sed -n 's/^project(rdaccel VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          test "v$v" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME but CMakeLists.txt says $v"; exit 1; }
+      - name: Build (shared library + tools)
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+            -DRDACCEL_BUILD_TESTS=OFF -DRDACCEL_INSTALL_TOOLS=ON
+          cmake --build build -j4
+      - name: Package
+        run: cd build && cpack
+      - name: The package works on its own
+        run: |
+          mkdir pkg && tar -xzf build/rdaccel-*.tar.gz -C pkg --strip-components=1
+          # Loads the bundled shared library, then refuses to run without a key.
+          ./pkg/bin/rdaccel_serve 2>&1 | grep -q -- --key
+          if command -v pkg-config; then
+            PKG_CONFIG_PATH=$(dirname $(find pkg -name rdaccel.pc)) pkg-config --modversion --libs --cflags rdaccel
+          fi
+          cmake -S examples/minimal -B build-minimal -DCMAKE_PREFIX_PATH="$PWD/pkg" -DCMAKE_BUILD_RPATH="$PWD/pkg/lib"
+          cmake --build build-minimal
+      - name: Source package
+        if: runner.os == 'Linux'
+        run: cd build && cpack --config CPackSourceConfig.cmake
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.os }}
+          path: build/rdaccel-*.tar.gz
+
+  release:
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          (cd dist && sha256sum rdaccel-*.tar.gz > SHA256SUMS)
+          v=${GITHUB_REF_NAME#v}
+          awk -v v="$v" '$0 ~ "^## " v "$" {p=1; next} /^## / {p=0} p' CHANGELOG.md > notes.md
+          gh release create "$GITHUB_REF_NAME" dist/* --draft --title "rdaccel $v" --notes-file notes.md
