@@ -15,45 +15,74 @@ permissions:
 jobs:
   package:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-24.04
-            deps: sudo apt-get update && sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxext-dev libxfixes-dev libxrandr-dev libxtst-dev zlib1g-dev
+            kind: shared
+          - os: ubuntu-24.04
+            kind: static
+          # macOS packages are universal (arm64 + x86_64).
           - os: macos-14
-            deps: "true"
+            kind: shared
+          - os: macos-14
+            kind: static
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: ${{ matrix.deps }}
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxext-dev libxfixes-dev libxrandr-dev libxtst-dev zlib1g-dev
       - name: Tag matches the version
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           v=$(sed -n 's/^project(rdaccel VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
           test "v$v" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME but CMakeLists.txt says $v"; exit 1; }
-      - name: Build (shared library + tools)
+      - name: Build (${{ matrix.kind }} library${{ matrix.kind == 'shared' && ' + tools' || '' }})
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
-            -DRDACCEL_BUILD_TESTS=OFF -DRDACCEL_INSTALL_TOOLS=ON
+          flags="-DCMAKE_BUILD_TYPE=Release -DRDACCEL_BUILD_TESTS=OFF"
+          if [ "${{ matrix.kind }}" = shared ]; then
+            flags="$flags -DBUILD_SHARED_LIBS=ON -DRDACCEL_INSTALL_TOOLS=ON"
+          else
+            flags="$flags -DBUILD_SHARED_LIBS=OFF -DRDACCEL_BUILD_EXAMPLES=OFF"
+          fi
+          if [ "$RUNNER_OS" = macOS ]; then flags="$flags -DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"; fi
+          cmake -S . -B build $flags
           cmake --build build -j4
       - name: Package
         run: cd build && cpack
       - name: The package works on its own
         run: |
           mkdir pkg && tar -xzf build/rdaccel-*.tar.gz -C pkg --strip-components=1
-          # Loads the bundled shared library, then refuses to run without a key.
-          ./pkg/bin/rdaccel_serve 2>&1 | grep -q -- --key
-          if command -v pkg-config; then
-            PKG_CONFIG_PATH=$(dirname $(find pkg -name rdaccel.pc)) pkg-config --modversion --libs --cflags rdaccel
+          find pkg -type f | sort
+          if [ "$RUNNER_OS" = macOS ]; then
+            # Both architectures in every binary.
+            for f in $(find pkg -type f \( -name '*.dylib' -o -name '*.a' -o -path '*/bin/*' \)); do
+              archs=$(lipo -archs "$f"); echo "$f: $archs"
+              case "$archs" in *arm64*x86_64*|*x86_64*arm64*) ;; *) echo "not universal: $f"; exit 1;; esac
+            done
           fi
-          cmake -S examples/minimal -B build-minimal -DCMAKE_PREFIX_PATH="$PWD/pkg" -DCMAKE_BUILD_RPATH="$PWD/pkg/lib"
+          if [ "${{ matrix.kind }}" = shared ]; then
+            # Loads the bundled shared library, then refuses to run without a key.
+            ./pkg/bin/rdaccel_serve 2>&1 | grep -q -- --key
+            rpath="-DCMAKE_BUILD_RPATH=$PWD/pkg/lib"
+          fi
+          if command -v pkg-config; then
+            PKG_CONFIG_PATH=$(dirname $(find pkg -name rdaccel.pc)) pkg-config --modversion --libs --cflags --static rdaccel
+          fi
+          cmake -S examples/minimal -B build-minimal -DCMAKE_PREFIX_PATH="$PWD/pkg" ${rpath:-}
           cmake --build build-minimal
+          # The example runs the built-in test pattern through the encoder
+          # and decoder (no screen, no network).
+          ./build-minimal/minimal_c
       - name: Source package
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.kind == 'shared'
         run: cd build && cpack --config CPackSourceConfig.cmake
       - uses: actions/upload-artifact@v4
         with:
-          name: package-${{ matrix.os }}
+          name: package-${{ matrix.os }}-${{ matrix.kind }}
           path: build/rdaccel-*.tar.gz
 
   release:
