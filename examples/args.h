@@ -40,6 +40,10 @@ class Args {
     auto it = kv_.find(k);
     return it == kv_.end() ? def : std::atoll(it->second.c_str());
   }
+  double real(const std::string& k, double def) const {
+    auto it = kv_.find(k);
+    return it == kv_.end() ? def : std::atof(it->second.c_str());
+  }
   // Parses "WxH". Returns false if the key is absent or malformed.
   bool size(const std::string& k, int& w, int& h) const {
     auto it = kv_.find(k);

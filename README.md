@@ -61,7 +61,8 @@ M0 是整屏硬编基线；M1 在它上面加了按区域分类，每一项都�
 | 码控 | 给视频编码器设 QP 下限，避免低延迟码控在静止内容上无限精修 | `min_qp`（默认 24，0 = 编码器自定） |
 | HEVC 编解码 | macOS：VideoToolbox 硬件（优先低延迟模式）；Linux：FFmpeg，NVENC 优先，否则 x265 | `encoder` |
 | 屏幕采集 | macOS：ScreenCaptureKit（带脏区，不采集声音）；Linux：X11 MIT-SHM | — |
-| 传输 | 进程内管道（回环）、TCP（跨机器）；QUIC 在后续里程碑 | — |
+| 传输 | 进程内管道（回环）、TCP、UDP（M2，`ListenUdp` / `ConnectUdp`）。UDP 传输自带丢包恢复（选择性确认 + 重传，每个通道独立有序，丢一个视频包不会卡住输入）和 BBR 式拥塞控制（按测得的瓶颈带宽发包，不把路由器缓冲塞满） | — |
+| 自适应码率（M2） | 传输层报告带宽估计和发送队列（`Transport::GetStats`）。队列超过 `max_queue_ms` 时跳过这一帧（下一帧会带上所有变化），排队时码率降到估计带宽的 85%，畅通时每 250 ms 最多升 25% | `adaptive_bitrate`、`min_bitrate_bps`、`max_queue_ms`（默认 50） |
 | 示例 | `rdaccel_record`、`rdaccel_play`、`rdaccel_bench`（场景评测）、`rdaccel_loopback`（macOS 窗口程序）、`minimal` | — |
 
 只支持 HEVC，没有 H.264 回退。
@@ -102,6 +103,31 @@ M0 是整屏硬编基线；M1 在它上面加了按区域分类，每一项都�
 python3 tools/make_desktop.py desktop.ppm
 ./build/bin/rdaccel_bench --background=desktop.ppm --frames=600              # 开启
 ./build/bin/rdaccel_bench --background=desktop.ppm --frames=600 --regions=0  # 关闭对照
+```
+
+### 网络传输（M2，Linux x265，模拟网络）
+
+`rdaccel_netsim` 把 Host 和 Viewer 放在同一进程，中间是模拟网络（限速、单向时延、随机丢包、200 ms 瓶颈缓冲），实时跑 15 秒 `video` 场景（30 fps，配置码率 8 Mbps，背景同上），去掉前 3 秒后统计。"关闭"是固定码率（和现在走 TCP 时一样：编码器不知道网络多快，数据在发送端排队）。
+
+| 网络 | 自适应 | 采集到显示延迟 p50 / p95 | 显示帧比例 | PSNR |
+| --- | --- | --- | --- | --- |
+| 20 Mbps，5 ms | 开 | 15 / 21 ms | 100% | 41.7 dB |
+| 4 Mbps，20 ms，2% 丢包 | 关 | 35 / 219 ms | 100% | 41.6 dB |
+| 4 Mbps，20 ms，2% 丢包 | 开 | 35 / 110 ms | 100% | 39.1 dB |
+| 1.5 Mbps，20 ms | 关 | 3132 / 5929 ms | 100%（越来越晚） | 41.6 dB |
+| 1.5 Mbps，20 ms | 开 | 42 / 65 ms | 98% | 37.0 dB |
+| 1.5 Mbps，不做拥塞控制 | 关 | 4807 / 9701 ms | 100%（越来越晚） | 41.6 dB |
+| 4 Mbps，第 6 秒降到 1 Mbps | 关 | 54 / 1472 ms | 100% | 41.6 dB |
+| 4 Mbps，第 6 秒降到 1 Mbps | 开 | 41 / 113 ms | 96% | 38.4 dB |
+| 0.8 Mbps，20 ms | 关 | 稳态阶段一帧都没显示 | 0% | — |
+| 0.8 Mbps，20 ms | 开 | 46 / 93 ms | 76% | 33.9 dB |
+
+带宽估计：4 Mbps 链路上估计 4.0 Mbps、RTT 43 ms（基础 40 ms），3% 丢包时吞吐仍接近链路速率。已知不足：第一帧是整屏（大部分是无损层，约 550 kB），在 1.5 Mbps 上要 3.1 秒才显示出来，后续可以改成先发一张低质量画面再逐步补齐。
+
+```bash
+./build/bin/rdaccel_netsim --background=desktop.ppm --seconds=15 --bandwidth=1500000            # 自适应
+./build/bin/rdaccel_netsim --background=desktop.ppm --seconds=15 --bandwidth=1500000 --abr=0    # 固定码率对照
+./build/bin/rdaccel_netsim --background=desktop.ppm --seconds=15 --drop-to=1000000 --drop-at=6  # 带宽骤降
 ```
 
 ## 在 Mac 上编译运行
@@ -153,9 +179,9 @@ ctest --test-dir build
 ```text
 include/rdaccel/   公开 API（唯一会被安装的头文件）
 src/               公开 API 的实现
-core/              内部：协议、分块比对、HEVC 码流格式、会话、传输、合成画面
+core/              内部：协议、分块比对、HEVC 码流格式、会话、传输（net/：UDP、可靠传输、网络模拟）、合成画面
 platform/          内部：mac/（ScreenCaptureKit、VideoToolbox）、linux/（X11、FFmpeg）
-examples/          只用公开 API 的示例：record、play、bench、loopback_mac、minimal（独立 CMake 工程）
+examples/          只用公开 API 的示例：record、play、bench、netsim、loopback_mac、minimal（独立 CMake 工程）
 tools/             开发辅助脚本（make_desktop.py：生成评测用的仿真桌面）
 tests/             GoogleTest（test_api.cpp 只用公开 API）
 cmake/             find_package 配置模板

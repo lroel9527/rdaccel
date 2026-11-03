@@ -53,8 +53,12 @@ set(RDACCEL_SOURCES
   core/capture/synthetic_capturer.cpp
   core/transport/local_pipe.cpp
   core/transport/tcp_transport.cpp
+  core/net/sim_link.cpp
+  core/net/udp_socket.cpp
+  core/net/reliable_transport.cpp
   core/session/host_session.cpp
   core/session/viewer_session.cpp
+  core/session/rate_control.cpp
   core/io/stream_file.cpp
 )
 if(APPLE)
@@ -178,6 +182,7 @@ if(RDACCEL_BUILD_TESTS)
     tests/test_lossless.cpp
     tests/test_local_pipe.cpp
     tests/test_tcp_transport.cpp
+    tests/test_reliable_transport.cpp
     tests/test_session.cpp
   )
   target_link_libraries(rdaccel_tests PRIVATE rdaccel_internal GTest::gtest_main)

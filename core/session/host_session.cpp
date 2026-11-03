@@ -577,6 +577,24 @@ std::vector<size_t> HostSession::TilesOf(const Rect& r) const {
   return out;
 }
 
+int64_t HostSession::RegionBitrate(const Rect& r) const {
+  const double share = 2.0 * r.w * r.h / (static_cast<double>(width_) * height_);
+  int64_t bps = static_cast<int64_t>(static_cast<double>(options_.bitrate_bps) * std::clamp(share, 0.25, 1.0));
+  // A fixed area bitrate still has to fit the (adapted) budget.
+  if (options_.region_bitrate_bps > 0) bps = std::min(options_.region_bitrate_bps, options_.bitrate_bps);
+  return bps;
+}
+
+void HostSession::SetBitrate(int64_t bps) {
+  options_.bitrate_bps = bps;
+  encoder_->SetBitrate(bps);
+  for (auto& [stream, re] : region_enc_) {
+    for (const auto& reg : regions_.regions()) {
+      if (reg.stream == stream && re.enc) re.enc->SetBitrate(RegionBitrate(reg.rect));
+    }
+  }
+}
+
 bool HostSession::EncodeRegions(const capture::CapturedFrame& frame, const std::vector<bool>& dirty,
                                 uint64_t frame_id, std::vector<uint8_t>& out, size_t& bytes,
                                 size_t& pictures, uint64_t& us) {
@@ -590,12 +608,7 @@ bool HostSession::EncodeRegions(const capture::CapturedFrame& frame, const std::
       cfg.height = reg.rect.h;
       cfg.fps = options_.fps;
       cfg.min_qp = options_.region_min_qp;
-      cfg.bitrate_bps = options_.region_bitrate_bps;
-      if (cfg.bitrate_bps <= 0) {
-        const double share = 2.0 * reg.rect.w * reg.rect.h / (static_cast<double>(width_) * height_);
-        cfg.bitrate_bps =
-            static_cast<int64_t>(static_cast<double>(options_.bitrate_bps) * std::clamp(share, 0.25, 1.0));
-      }
+      cfg.bitrate_bps = RegionBitrate(reg.rect);
       std::string err;
       re.enc = options_.region_encoder_factory(cfg, &err);
       if (!re.enc) return false;

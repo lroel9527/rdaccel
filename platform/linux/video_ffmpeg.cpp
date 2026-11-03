@@ -53,9 +53,8 @@ void SetBt709(SwsContext* sws, bool rgb_to_yuv) {
 
 class FfmpegHevcEncoder final : public codec::IHevcEncoder {
  public:
-  static std::unique_ptr<FfmpegHevcEncoder> Open(const std::string& backend,
-                                                 const codec::EncoderConfig& cfg,
-                                                 std::string* error) {
+  static CodecCtxPtr OpenContext(const std::string& backend, const codec::EncoderConfig& cfg,
+                                 std::string* error) {
     const AVCodec* codec = avcodec_find_encoder_by_name(backend.c_str());
     if (!codec) {
       if (error) *error = backend + ": not available in this FFmpeg build";
@@ -100,8 +99,17 @@ class FfmpegHevcEncoder final : public codec::IHevcEncoder {
       if (error) *error = backend + ": avcodec_open2 failed: " + AvError(rc);
       return nullptr;
     }
+    return ctx;
+  }
+
+  static std::unique_ptr<FfmpegHevcEncoder> Open(const std::string& backend,
+                                                 const codec::EncoderConfig& cfg,
+                                                 std::string* error) {
+    CodecCtxPtr ctx = OpenContext(backend, cfg, error);
+    if (!ctx) return nullptr;
     auto enc = std::unique_ptr<FfmpegHevcEncoder>(new FfmpegHevcEncoder());
     enc->backend_ = backend;
+    enc->cfg_ = cfg;
     enc->ctx_ = std::move(ctx);
     enc->frame_.reset(av_frame_alloc());
     enc->frame_->format = AV_PIX_FMT_YUV420P;
@@ -122,6 +130,15 @@ class FfmpegHevcEncoder final : public codec::IHevcEncoder {
   const std::string& last_error() const override { return error_; }
 
   void SetBitrate(int64_t bps) override {
+    if (backend_ == "libx265") {
+      // FFmpeg's libx265 wrapper cannot change the rate mid-stream, so the
+      // encoder is reopened, which costs a keyframe. Only for real changes,
+      // and not more than every few seconds (see Encode()).
+      const double ratio = static_cast<double>(bps) / static_cast<double>(cfg_.bitrate_bps);
+      reopen_bps_ = ratio > 1.3 || ratio < 1 / 1.3 ? bps : 0;
+      return;
+    }
+    // NVENC reconfigures itself when these change.
     ctx_->bit_rate = bps;
     ctx_->rc_max_rate = bps;
   }
@@ -132,6 +149,20 @@ class FfmpegHevcEncoder final : public codec::IHevcEncoder {
     if (bgra.width != ctx_->width || bgra.height != ctx_->height) {
       error_ = "frame size changed; recreate the encoder";
       return std::nullopt;
+    }
+    constexpr uint64_t kMinReopenGapUs = 2'000'000;
+    if (reopen_bps_ > 0 && (!reopened_ || pts_us >= last_reopen_us_ + kMinReopenGapUs)) {
+      codec::EncoderConfig c = cfg_;
+      c.bitrate_bps = reopen_bps_;
+      std::string err;
+      if (CodecCtxPtr ctx = OpenContext(backend_, c, &err)) {
+        ctx_ = std::move(ctx);
+        cfg_ = c;
+        force_keyframe = true;  // a new stream starts with an IDR picture
+        reopened_ = true;
+        last_reopen_us_ = pts_us;
+      }
+      reopen_bps_ = 0;
     }
     if (av_frame_make_writable(frame_.get()) < 0) {
       error_ = "av_frame_make_writable failed";
@@ -172,6 +203,10 @@ class FfmpegHevcEncoder final : public codec::IHevcEncoder {
   FfmpegHevcEncoder() = default;
 
   std::string backend_;
+  codec::EncoderConfig cfg_;
+  int64_t reopen_bps_ = 0;  // libx265: reopen at this bitrate
+  bool reopened_ = false;
+  uint64_t last_reopen_us_ = 0;
   CodecCtxPtr ctx_;
   FramePtr frame_;
   PacketPtr packet_;
