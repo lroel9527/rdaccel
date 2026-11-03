@@ -169,11 +169,64 @@ const Scenario kScenarios[] = {
     {"pause", [](const Scene& s, Image& img, uint64_t i) {
        Video(s, img, i % 300 < 180 ? i : i - i % 300 + 179);
      }, VideoRect},
+    // Nothing on the screen changes but the mouse pointer (use with
+    // --cursor=frame or --cursor=channel).
+    {"pointer", [](const Scene&, Image&, uint64_t) {}},
 };
+
+// A mouse pointer for the cursor comparisons: an arrow, and a text beam
+// while it is over the left third of the screen (the "document").
+inline rdaccel::CursorImage PointerImage(bool beam) {
+  rdaccel::CursorImage c;
+  c.width = 24;
+  c.height = 32;
+  c.bgra.assign(static_cast<size_t>(c.width) * c.height * 4, 0);
+  auto put = [&](int x, int y, uint8_t v) {
+    uint8_t* p = &c.bgra[(static_cast<size_t>(y) * c.width + x) * 4];
+    p[0] = p[1] = p[2] = v;
+    p[3] = 255;
+  };
+  if (beam) {
+    c.hotspot_x = 4;
+    c.hotspot_y = 10;
+    for (int y = 0; y < 20; ++y) put(4, y, 0);
+    for (int x = 1; x < 8; ++x) {
+      if (x != 4) {
+        put(x, 0, 0);
+        put(x, 19, 0);
+      }
+    }
+  } else {
+    // Black outline, white inside, 1-pixel-per-row wider triangle.
+    for (int y = 0; y < 26; ++y) {
+      const int wdt = std::min(y, 16) + 1;
+      for (int x = 0; x < wdt && x < c.width; ++x) put(x, y, (x == 0 || x == wdt - 1 || y == 25) ? 0 : 255);
+    }
+  }
+  return c;
+}
+
+// Where the pointer is at frame `i`: sweeps the whole screen at the speed
+// of a hand moving a mouse (a few hundred pixels per second, faster across).
+inline void PointerAt(uint64_t i, int w, int h, int& x, int& y, bool& beam) {
+  const double t = static_cast<double>(i);
+  x = static_cast<int>(w * (0.5 + 0.42 * std::sin(t * 0.021)));
+  y = static_cast<int>(h * (0.5 + 0.40 * std::sin(t * 0.033 + 1.0)));
+  beam = x < w / 3;
+}
 
 inline void Render(const Scene& s, const SceneFn& fn, uint64_t i, Image& out) {
   out = *s.bg;
   fn(s, out, i);
+}
+
+// The scene with the pointer drawn in, as the user sees it.
+inline void DrawPointer(const Scene& s, uint64_t i, Image& img) {
+  static const rdaccel::CursorImage kArrow = PointerImage(false), kBeam = PointerImage(true);
+  int x, y;
+  bool beam;
+  PointerAt(i, s.w, s.h, x, y, beam);
+  rdaccel::DrawCursor(beam ? kBeam : kArrow, x, y, img.data(), s.w, s.h, s.w * 4);
 }
 
 inline void WritePpm(const std::string& path, const uint8_t* bgra, int w, int h, int stride) {

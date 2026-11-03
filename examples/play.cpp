@@ -77,7 +77,7 @@ int main(int argc, char** argv) {
   int32_t stream_w = 0, stream_h = 0;
   std::vector<uint8_t> ref;
   double psnr_sum = 0, psnr_min = 1e9;
-  uint64_t frames = 0, full_frames = 0;
+  uint64_t frames = 0, full_frames = 0, cursor_moves = 0, cursor_images = 0;
 
   rdaccel::ViewerHandlers handlers;
   handlers.on_stream_info = [&](int32_t w, int32_t h) {
@@ -104,6 +104,10 @@ int main(int argc, char** argv) {
       WritePpm(dump + name, img);
     }
   };
+  handlers.on_cursor = [&](const rdaccel::CursorState& c) {
+    ++cursor_moves;
+    cursor_images += c.image_changed;
+  };
   auto viewer = rdaccel::Viewer::Create(nullptr, std::move(handlers), &err);
   if (!viewer) {
     std::fprintf(stderr, "%s\n", err.c_str());
@@ -117,6 +121,8 @@ int main(int argc, char** argv) {
   std::printf("stream          : %dx%d, %zu bytes\n", stream_w, stream_h, bytes.size());
   std::printf("frames decoded  : %llu (%llu full-screen)\n", static_cast<unsigned long long>(frames),
               static_cast<unsigned long long>(full_frames));
+  std::printf("cursor          : %llu updates, %llu image changes\n",
+              static_cast<unsigned long long>(cursor_moves), static_cast<unsigned long long>(cursor_images));
   std::printf("decode errors   : %llu\n", static_cast<unsigned long long>(st.decode_errors));
   if (st.frames_decoded > 0) {
     std::printf("decode time     : %.2f ms/frame avg\n",

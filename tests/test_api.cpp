@@ -303,3 +303,88 @@ TEST(PublicApi, AdaptsToASlowNetwork) {
   EXPECT_GT(frames, 30);
   EXPECT_LT(worst_late_us, 1'000'000u);
 }
+
+TEST(PublicApi, CursorTravelsOnItsOwnChannel) {
+  auto [host_end, viewer_end] = rdaccel::CreateLocalPipe();
+  std::mutex mu;
+  std::condition_variable cv;
+  std::vector<rdaccel::CursorState> states;
+  std::vector<rdaccel::CursorImage> images;
+  rdaccel::ViewerHandlers h;
+  h.on_cursor = [&](const rdaccel::CursorState& s) {
+    std::lock_guard<std::mutex> lock(mu);
+    states.push_back(s);
+    images.push_back(s.image ? *s.image : rdaccel::CursorImage{});
+    cv.notify_all();
+  };
+  std::string err;
+  auto viewer = rdaccel::Viewer::Create(std::move(viewer_end), std::move(h), &err);
+  ASSERT_TRUE(viewer) << err;
+  rdaccel::Host host(std::move(host_end));
+
+  rdaccel::CursorImage img;
+  img.width = img.height = 16;
+  img.hotspot_x = 3;
+  img.bgra.assign(16 * 16 * 4, 0);
+  for (size_t i = 0; i < 16 * 4; ++i) img.bgra[i] = 255;  // top row opaque white
+  // No frame needed: the cursor works before the first picture.
+  host.SetCursorImage(img);
+  host.SetCursor(100, 50);
+  host.SetCursor(100, 50);  // unchanged
+  host.SetCursor(101, 52, true, 777);
+  {
+    std::unique_lock<std::mutex> lock(mu);
+    ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(10), [&] { return states.size() >= 2; }));
+    EXPECT_EQ(states[0].x, 100);
+    EXPECT_TRUE(states[0].image_changed);
+    EXPECT_EQ(images[0], img);
+    EXPECT_EQ(states[1].x, 101);
+    EXPECT_EQ(states[1].y, 52);
+    EXPECT_EQ(states[1].time_us, 777u);
+    EXPECT_FALSE(states[1].image_changed);
+    EXPECT_EQ(states[1].image_id, states[0].image_id);
+  }
+  const auto st = host.stats();
+  EXPECT_EQ(st.cursor_updates, 2u);
+  EXPECT_EQ(st.cursor_images, 1u);
+  EXPECT_GT(st.cursor_bytes, 0u);
+  EXPECT_LT(st.cursor_bytes, 200u);
+
+  // Drawing it on a frame.
+  std::vector<uint8_t> px(kW * kH * 4, 0);
+  rdaccel::DrawCursor(img, 101, 52, px.data(), kW, kH, kW * 4);
+  EXPECT_EQ(px[(52 * kW + 98) * 4], 255);  // hotspot (3, 0) lands on (101, 52)
+  EXPECT_EQ(px[(52 * kW + 97) * 4], 0);
+}
+
+TEST(PublicApi, RecordingKeepsTheCursor) {
+  const std::string path = ::testing::TempDir() + "rdaccel_cursor_test.rdstream";
+  std::string err;
+  {
+    auto file = rdaccel::CreateRecordingTransport(path, &err);
+    ASSERT_TRUE(file) << err;
+    rdaccel::Host host(std::move(file));
+    std::vector<uint8_t> px;
+    rdaccel::RenderTestPattern(0, kW, kH, px);
+    ASSERT_TRUE(host.SubmitFrame({px.data(), kW, kH, kW * 4}, 1, {}, &err)) << err;
+    rdaccel::CursorImage img;
+    img.width = img.height = 4;
+    img.bgra.assign(64, 255);
+    host.SetCursorImage(img);
+    host.SetCursor(5, 6);
+  }
+  std::vector<uint8_t> bytes;
+  ASSERT_TRUE(rdaccel::ReadRecording(path, bytes, &err)) << err;
+  int cursors = 0;
+  rdaccel::ViewerHandlers h;
+  h.on_cursor = [&](const rdaccel::CursorState& s) {
+    ++cursors;
+    EXPECT_EQ(s.x, 5);
+    EXPECT_TRUE(s.image);
+  };
+  auto viewer = rdaccel::Viewer::Create(nullptr, std::move(h), &err);
+  ASSERT_TRUE(viewer) << err;
+  viewer->FeedRecording(bytes);
+  EXPECT_EQ(cursors, 1);
+  std::remove(path.c_str());
+}

@@ -1,12 +1,13 @@
 #pragma once
 
 // .rdstream files: the exact bytes the host sends on the video and control
-// channels, behind an 8-byte magic. A file recorded on one platform can be
+// channels (and the cursor channel), behind an 8-byte magic. A file recorded on one platform can be
 // played back on another, which is how Mac <-> Linux interop is tested
 // without a live connection.
 
 #include <cstdint>
 #include <cstdio>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -28,9 +29,14 @@ class StreamFileWriter final : public transport::ITransport {
   void SetReceiver(ReceiveFn) override {}
   void Close() override;
 
-  uint64_t bytes_written() const { return bytes_; }
+  uint64_t bytes_written() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return bytes_;
+  }
 
  private:
+  // The cursor is sent from another thread than the screen.
+  mutable std::mutex mu_;
   std::FILE* f_ = nullptr;
   uint64_t bytes_ = 0;
 };

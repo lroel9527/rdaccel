@@ -41,6 +41,7 @@ std::unique_ptr<Viewer> Viewer::Create(std::unique_ptr<Transport> transport,
       fn(img, regions, FrameInfo{frame_id, capture_time_us});
     });
   }
+  if (handlers.on_cursor) impl->session->SetCursorHandler(std::move(handlers.on_cursor));
   // Handlers are in place before any byte can arrive.
   impl->transport = std::move(transport);
   if (impl->transport) impl->session->Attach(impl->transport.get());

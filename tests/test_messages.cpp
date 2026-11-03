@@ -40,7 +40,7 @@ std::vector<Message> SampleMessages() {
       video,
       FrameEnd{42},
       CopyRect{43, {0, 64, 1920, 1000}, 0, -64},
-      CursorPos{-5, 1080, false},
+      CursorPos{-5, 1080, false, 9, 123456},
       cursor,
       InputEvent{InputKind::kScroll, 100, 200, 0, -3, 0, 0x100000},
       Feedback{42, 1000, 2000},

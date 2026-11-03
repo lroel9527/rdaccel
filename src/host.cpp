@@ -2,10 +2,14 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cmath>
 #include <mutex>
+#include <thread>
 
 #include "capture/capturer.h"
 #include "platform.h"
+#include "session/cursor_channel.h"
 #include "session/host_session.h"
 #include "session/rate_control.h"
 
@@ -22,6 +26,31 @@ struct Host::Impl {
   // Declared after `session`, so it is destroyed first: its destructor stops
   // the receive thread that calls into the session.
   std::unique_ptr<Transport> transport;
+  // After `transport`, so it goes first: it sends on it.
+  std::unique_ptr<session::CursorSender> cursor;
+
+  // System cursor polling (screen capture mode).
+  std::thread cursor_thread;
+  std::atomic<bool> cursor_running{false};
+  std::atomic<int32_t> frame_w{0}, frame_h{0};
+
+  void PollCursor(std::unique_ptr<capture::ICursorSource> src) {
+    const int hz = std::clamp(config.cursor_poll_hz, 1, 1000);
+    const auto period = std::chrono::microseconds(1'000'000 / hz);
+    auto next = std::chrono::steady_clock::now();
+    capture::CursorSample s;
+    while (cursor_running) {
+      next += period;
+      std::this_thread::sleep_until(next);
+      if (!src->Poll(s)) continue;
+      if (s.image_changed) cursor->SetImage(s.image);
+      const int32_t w = frame_w, h = frame_h;
+      if (w <= 0 || s.screen_width <= 0 || s.screen_height <= 0) continue;  // no frame yet
+      const auto x = static_cast<int32_t>(std::lround(s.x * w / s.screen_width));
+      const auto y = static_cast<int32_t>(std::lround(s.y * h / s.screen_height));
+      cursor->SetPosition(x, y, s.visible, capture::MonotonicMicros());
+    }
+  }
 
   std::mutex submit_mu;  // serializes frames (screen capture vs SubmitFrame)
   std::atomic<bool> failed{false};  // encoder creation failed; drop further frames
@@ -71,6 +100,8 @@ struct Host::Impl {
       }
       width = f.bgra.width;
       height = f.bgra.height;
+      frame_w = width;
+      frame_h = height;
       session::HostOptions opts;
       opts.lossless = config.lossless;
       opts.lossless_max_colors = config.lossless_max_colors;
@@ -147,10 +178,12 @@ Host::Host(std::unique_ptr<Transport> transport, HostConfig config)
     : impl_(std::make_unique<Impl>()) {
   impl_->config = std::move(config);
   impl_->transport = std::move(transport);
+  impl_->cursor = std::make_unique<session::CursorSender>(impl_->transport.get());
 }
 
 Host::~Host() {
   StopScreenCapture();
+  impl_->cursor.reset();
   // Stop the receive thread before the session goes away.
   impl_->transport.reset();
 }
@@ -190,10 +223,31 @@ bool Host::StartScreenCapture(std::string* error) {
     return false;
   }
   impl_->capturer = std::move(cap);
+  if (impl_->config.cursor_channel && !impl_->config.capture_cursor) {
+    std::string cerr;
+    if (auto src = platform::CreateCursorSource(&cerr)) {
+      impl_->cursor_running = true;
+      impl_->cursor_thread = std::thread(
+          [impl, s = std::move(src)]() mutable { impl->PollCursor(std::move(s)); });
+    } else {
+      // Not fatal: the screen still streams, just without a cursor.
+      impl_->ReportError("cursor channel unavailable: " + cerr);
+    }
+  }
   return true;
 }
 
+void Host::SetCursor(int32_t x, int32_t y, bool visible, uint64_t time_us) {
+  impl_->cursor->SetPosition(x, y, visible, time_us ? time_us : capture::MonotonicMicros());
+}
+
+void Host::SetCursorImage(const CursorImage& image) { impl_->cursor->SetImage(image); }
+
 void Host::StopScreenCapture() {
+  if (impl_->cursor_thread.joinable()) {
+    impl_->cursor_running = false;
+    impl_->cursor_thread.join();
+  }
   if (impl_->capturer) {
     impl_->capturer->Stop();
     impl_->capturer.reset();
@@ -232,6 +286,11 @@ HostStats Host::stats() const {
   st.target_bitrate_bps = impl_->target_bitrate_bps;
   st.bandwidth_estimate_bps = impl_->net.bandwidth_bps;
   st.rtt_us = impl_->net.rtt_us;
+  const auto cs = impl_->cursor->stats();
+  st.cursor_updates = cs.positions;
+  st.cursor_images = cs.images;
+  st.cursor_bytes = cs.bytes;
+  st.bytes_sent += cs.bytes;
   return st;
 }
 

@@ -1,11 +1,16 @@
 // rdaccel_bench: repeatable bitrate / quality / CPU comparisons on desktop-like
 // scenes, using only the public API (rdaccel/rdaccel.h).
 //
-//   rdaccel_bench [--background=SCREEN.ppm] [--scenario=all|idle|typing|scroll|drag|video|pause]
+//   rdaccel_bench [--background=SCREEN.ppm] [--scenario=all|idle|typing|scroll|drag|video|pause|pointer]
 //                 [--frames=300] [--fps=60] [--bitrate=8000000] [--min-qp=24]
 //                 [--lossless=1] [--max-colors=256] [--max-colors-hot=4] [--moves=1] [--refine=8] [--cache=1] [--refresh=0]
 //                 [--regions=1] [--region-min-qp=27] [--region-bitrate=0]
-//                 [--tmp=bench.rdstream] [--dump=DIR]
+//                 [--cursor=none|frame|channel] [--tmp=bench.rdstream] [--dump=DIR]
+//
+// --cursor adds a moving mouse pointer to the scenario (the "pointer"
+// scenario has nothing else): drawn into the captured frames, or sent on the
+// cursor channel and drawn by the viewer. Quality is measured on what the
+// user sees, pointer included, either way.
 //
 // --dump writes the viewer's final picture and the last source frame of each
 // scenario as PPM files.
@@ -55,8 +60,11 @@ uint64_t FrameIndex(uint64_t time_us, int fps) {
   return (time_us * static_cast<uint64_t>(fps) + 500'000) / 1'000'000;
 }
 
+enum class Pointer { kNone, kFrame, kChannel };
+
 Result Run(const Scene& s, const Scenario& sc, uint64_t frames, const rdaccel::HostConfig& cfg,
-           const std::string& tmp, const std::string& dump) {
+           const std::string& tmp, const std::string& dump, Pointer pointer) {
+  const rdaccel::CursorImage arrow = PointerImage(false), beam_img = PointerImage(true);
   Result res;
   std::string err;
   Image frame;
@@ -72,7 +80,15 @@ Result Run(const Scene& s, const Scenario& sc, uint64_t frames, const rdaccel::H
     for (uint64_t i = 0; i < frames; ++i) {
       const double r0 = CpuSeconds();
       Render(s, sc.fn, i, frame);
+      if (pointer == Pointer::kFrame) DrawPointer(s, i, frame);
       render_cpu += CpuSeconds() - r0;
+      if (pointer == Pointer::kChannel) {
+        int x, y;
+        bool beam;
+        PointerAt(i, s.w, s.h, x, y, beam);
+        host.SetCursorImage(beam ? beam_img : arrow);
+        host.SetCursor(x, y, true, FrameTime(i, cfg.fps));
+      }
       // Content time, not wall time: the encoder's rate control needs real
       // frame spacing, and the viewer side recovers the frame index from it.
       if (!host.SubmitFrame({frame.data(), s.w, s.h, s.w * 4}, FrameTime(i, cfg.fps), {}, &err)) {
@@ -96,11 +112,33 @@ Result Run(const Scene& s, const Scenario& sc, uint64_t frames, const rdaccel::H
   rdaccel::ViewerHandlers handlers;
   Image ref;
   double compare_cpu = 0;
-  handlers.on_frame = [&](const rdaccel::ImageView& img, std::span<const rdaccel::Rect>,
+  // Cursor channel: the viewer draws the last pointer it got on the picture.
+  rdaccel::CursorState cursor;
+  rdaccel::CursorImage cursor_img;
+  Image composed;
+  handlers.on_cursor = [&](const rdaccel::CursorState& c) {
+    cursor = c;
+    if (c.image) cursor_img = *c.image;
+  };
+  handlers.on_frame = [&](const rdaccel::ImageView& pic, std::span<const rdaccel::Rect>,
                           const rdaccel::FrameInfo& info) {
     const double c = CpuSeconds();
+    rdaccel::ImageView img = pic;
+    if (pointer == Pointer::kChannel) {
+      composed.resize(static_cast<size_t>(pic.width) * pic.height * 4);
+      for (int y = 0; y < pic.height; ++y) {
+        std::memcpy(composed.data() + static_cast<size_t>(y) * pic.width * 4,
+                    pic.data + static_cast<size_t>(y) * pic.stride, static_cast<size_t>(pic.width) * 4);
+      }
+      if (cursor.visible && cursor.image) {
+        rdaccel::DrawCursor(cursor_img, cursor.x, cursor.y, composed.data(), pic.width, pic.height,
+                            pic.width * 4);
+      }
+      img = {composed.data(), pic.width, pic.height, pic.width * 4};
+    }
     const uint64_t index = FrameIndex(info.capture_time_us, cfg.fps);
     Render(s, sc.fn, index, ref);
+    if (pointer != Pointer::kNone) DrawPointer(s, index, ref);
     double se = 0, se_in = 0;
     uint64_t n_in = 0;
     const rdaccel::Rect focus = sc.focus ? sc.focus(s) : rdaccel::Rect{};
@@ -153,6 +191,7 @@ Result Run(const Scene& s, const Scenario& sc, uint64_t frames, const rdaccel::H
     // What the viewer shows at the end against the last source frame (later
     // frames may have been skipped as unchanged).
     Render(s, sc.fn, frames - 1, ref);
+    if (pointer != Pointer::kNone) DrawPointer(s, frames - 1, ref);
     WritePpm(dump + "/" + sc.name + "_viewer.ppm", last.data(), s.w, s.h, s.w * 4);
     WritePpm(dump + "/" + sc.name + "_source.ppm", ref.data(), s.w, s.h, s.w * 4);
   }
@@ -187,6 +226,10 @@ int main(int argc, char** argv) {
     rdaccel::RenderTestPattern(600, w, h, bg);
   }
   const Scene scene{&bg, w, h};
+  const std::string pointer_arg = args.str("cursor", "none");
+  const Pointer pointer = pointer_arg == "frame"     ? Pointer::kFrame
+                          : pointer_arg == "channel" ? Pointer::kChannel
+                                                     : Pointer::kNone;
 
   rdaccel::HostConfig cfg;
   cfg.fps = fps;
@@ -214,7 +257,8 @@ int main(int argc, char** argv) {
   bool all_ok = true;
   for (const auto& sc : kScenarios) {
     if (which != "all" && which != sc.name) continue;
-    const Result r = Run(scene, sc, frames, cfg, tmp, args.str("dump"));
+    if (which == "all" && std::string(sc.name) == "pointer" && pointer == Pointer::kNone) continue;
+    const Result r = Run(scene, sc, frames, cfg, tmp, args.str("dump"), pointer);
     const double secs = static_cast<double>(frames) / fps;
     const auto& st = r.host;
     std::printf("%-8s %9.1f %9.1f %9.1f %9.1f %7llu %7llu %7llu %8.2f %8.2f %4llu/%-4llu %6.0f%% %7.2f %7.2f %7.2f%s\n",
@@ -238,6 +282,11 @@ int main(int argc, char** argv) {
                 // the time spent rendering the scene.
                 100.0 * r.host_cpu / secs, r.psnr_avg, r.psnr_min, r.exact,
                 r.ok ? "" : "  FAIL");
+    if (pointer == Pointer::kChannel) {
+      std::printf("%-8s cursor channel: %llu positions, %llu images, %.1f kbps (included above)\n", "",
+                  static_cast<unsigned long long>(st.cursor_updates),
+                  static_cast<unsigned long long>(st.cursor_images), st.cursor_bytes * 8 / 1000.0 / secs);
+    }
     if (sc.focus) {
       std::printf("%-8s PSNR inside the moving area %.2f dB, elsewhere %.2f dB\n", "", r.psnr_in,
                   r.psnr_out);

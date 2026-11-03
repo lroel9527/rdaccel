@@ -9,6 +9,7 @@
 #include <span>
 #include <string>
 
+#include "rdaccel/cursor.h"
 #include "rdaccel/geometry.h"
 #include "rdaccel/image.h"
 #include "rdaccel/input.h"
@@ -30,7 +31,14 @@ struct HostConfig {
   // Only used by StartScreenCapture(). 0 = native resolution.
   int32_t capture_width = 0;
   int32_t capture_height = 0;
-  bool capture_cursor = false;  // the viewer is expected to draw the cursor
+  // Draw the cursor into the captured picture. Off by default: the cursor
+  // channel below is cheaper and smoother.
+  bool capture_cursor = false;
+  // Send the system cursor on the cursor channel (see cursor.h), polled
+  // `cursor_poll_hz` times a second, while StartScreenCapture() runs and
+  // `capture_cursor` is off. With SubmitFrame() call SetCursor() instead.
+  bool cursor_channel = true;
+  int32_t cursor_poll_hz = 120;
   // Send tiles with few colours (text, UI) through the lossless layer instead
   // of the video encoder. A tile that also changed in the previous frame
   // (animation, video, dragging) is "hot" and must have at most
@@ -81,7 +89,7 @@ struct HostStats {
   uint64_t video_frames = 0;    // frames that went through the video encoder
   uint64_t keyframes = 0;
   uint64_t encode_errors = 0;
-  uint64_t bytes_sent = 0;
+  uint64_t bytes_sent = 0;      // everything, cursor channel included
   uint64_t video_bytes = 0;     // HEVC payload only
   uint64_t lossless_bytes = 0;  // lossless payload only
   uint64_t lossless_tiles = 0;
@@ -98,6 +106,10 @@ struct HostStats {
   int64_t target_bitrate_bps = 0;          // current encoder budget
   int64_t bandwidth_estimate_bps = 0;      // from the transport
   uint32_t rtt_us = 0;
+  // Cursor channel.
+  uint64_t cursor_updates = 0;  // position messages
+  uint64_t cursor_images = 0;   // images sent (each distinct image once)
+  uint64_t cursor_bytes = 0;
   uint64_t encode_us_total = 0;    // video encoder
   uint64_t lossless_us_total = 0;  // palette extraction + deflate
 };
@@ -134,6 +146,15 @@ class Host {
   // frame then becomes a full refresh. Calls must not overlap.
   bool SubmitFrame(const ImageView& bgra, uint64_t capture_time_us,
                    std::span<const Rect> dirty = {}, std::string* error = nullptr);
+
+  // The mouse cursor, for applications that feed frames themselves (with
+  // StartScreenCapture() the library reads the system cursor). Position in
+  // pixels of the submitted frames; the image is sent once and remembered,
+  // so calling SetCursorImage() with the same image again costs nothing.
+  // Thread-safe, independent of SubmitFrame(), any rate: unchanged state is
+  // not resent. `time_us` 0 = now.
+  void SetCursor(int32_t x, int32_t y, bool visible = true, uint64_t time_us = 0);
+  void SetCursorImage(const CursorImage& image);
 
   // Makes the next encoded frame a full refresh.
   void RequestKeyframe();
