@@ -263,7 +263,7 @@ TEST(Link, ConnectedHostTimesOutWhenTheViewerGoesQuiet) {
   host.Start();
   viewer.Send(proto::ViewerHello{});
   ASSERT_TRUE(WaitUntil([&] { return host.state() == LinkState::kConnected; }));
-  EXPECT_TRUE(viewer.Find<proto::Welcome>().has_value());
+  EXPECT_TRUE(WaitUntil([&] { return viewer.Find<proto::Welcome>().has_value(); }));
   const auto t0 = std::chrono::steady_clock::now();
   ASSERT_TRUE(WaitUntil([&] { return host.disconnected(); }));
   const auto ms =
