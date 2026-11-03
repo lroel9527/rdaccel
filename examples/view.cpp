@@ -3,7 +3,7 @@
 // statistics per second; --dump writes the last picture (with the cursor
 // drawn on it) as a PPM file at the end.
 //
-//   rdaccel_view HOST [--udp=PORT | --tcp=PORT] [--seconds=10] [--dump=last.ppm]
+//   rdaccel_view HOST [--udp=PORT | --tcp=PORT] [--seconds=10] [--dump=last.ppm] [--keyframe-at=S]
 //
 // The protocol of both ends must match: --udp with --udp, --tcp with --tcp.
 // Uses only the public API; a GUI application would draw the picture from
@@ -29,6 +29,9 @@ int main(int argc, char** argv) {
   const auto port = static_cast<uint16_t>(args.num(tcp ? "tcp" : "udp", 7300));
   const double seconds = args.real("seconds", 10);
   const std::string dump = args.str("dump");
+  // Ask the host for a keyframe after this many seconds (0 = never), e.g. to
+  // check that one comes while the host's screen is static.
+  const auto keyframe_at = static_cast<int>(args.num("keyframe-at", 0));
 
   std::string err;
   auto transport = tcp ? rdaccel::ConnectTcp(host_name, port, &err) : rdaccel::ConnectUdp(host_name, port, &err);
@@ -78,6 +81,7 @@ int main(int argc, char** argv) {
   const auto t0 = std::chrono::steady_clock::now();
   uint64_t last_frames = 0, last_cursor = 0;
   rdaccel::ViewerStats last;
+  uint64_t frames_at_request = 0;
   for (int s = 1; s <= static_cast<int>(seconds + 0.5); ++s) {
     std::this_thread::sleep_until(t0 + std::chrono::seconds(s));
     const auto st = viewer->stats();
@@ -93,6 +97,16 @@ int main(int argc, char** argv) {
     last = st;
     last_frames = frames;
     last_cursor = cursor_updates;
+    if (s == keyframe_at) {
+      viewer->RequestKeyframe();
+      frames_at_request = frames;
+      std::printf("keyframe requested\n");
+    }
+  }
+  if (keyframe_at > 0) {
+    std::lock_guard<std::mutex> lock(mu);
+    std::printf("frames after the keyframe request: %llu\n",
+                static_cast<unsigned long long>(frames - frames_at_request));
   }
 
   std::lock_guard<std::mutex> lock(mu);
