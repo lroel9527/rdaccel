@@ -113,6 +113,10 @@ struct HostStats {
   uint64_t region_encode_us_total = 0;
   // Adaptive bitrate (zero unless the transport measures the path).
   uint64_t frames_dropped_congestion = 0;  // skipped because the send queue was full
+  // Frames the host re-sent from memory because no new frame came for
+  // 100 ms while a keyframe was requested or a skipped frame's changes were
+  // still unsent (a static screen; ScreenCaptureKit only delivers changes).
+  uint64_t frames_resubmitted = 0;
   int64_t target_bitrate_bps = 0;          // current encoder budget
   int64_t bandwidth_estimate_bps = 0;      // from the transport
   uint32_t rtt_us = 0;
