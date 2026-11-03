@@ -4,6 +4,8 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <cstring>
 #include <mutex>
 #include <thread>
 
@@ -39,16 +41,73 @@ struct Host::Impl {
     const auto period = std::chrono::microseconds(1'000'000 / hz);
     auto next = std::chrono::steady_clock::now();
     capture::CursorSample s;
+    CursorImage original;      // as the source reported it
+    double sent_factor = 0;    // scale of the image last sent (0 = none sent)
     while (cursor_running) {
       next += period;
       std::this_thread::sleep_until(next);
       if (!src->Poll(s)) continue;
-      if (s.image_changed) cursor->SetImage(s.image);
       const int32_t w = frame_w, h = frame_h;
+      if (s.image_changed) {
+        original = std::move(s.image);
+        sent_factor = 0;
+      }
       if (w <= 0 || s.screen_width <= 0 || s.screen_height <= 0) continue;  // no frame yet
+      // The image follows the captured frame's scale (a 4K or Retina screen
+      // captured at 1080p gets a cursor of the matching, smaller size).
+      const double factor = w / (s.screen_width * std::max(s.image_scale, 0.01));
+      if (original.width > 0 && std::abs(factor - sent_factor) > 1e-3) {
+        cursor->SetImage(std::abs(factor - 1) < 0.02 ? original
+                                                     : session::ScaleCursorImage(original, factor));
+        sent_factor = factor;
+      }
       const auto x = static_cast<int32_t>(std::lround(s.x * w / s.screen_width));
       const auto y = static_cast<int32_t>(std::lround(s.y * h / s.screen_height));
       cursor->SetPosition(x, y, s.visible, capture::MonotonicMicros());
+    }
+  }
+
+  // Static screens. A source may stop delivering frames while nothing
+  // changes (ScreenCaptureKit does; so may an application). A keyframe the
+  // viewer asks for, or the changes of a frame skipped for congestion, would
+  // then wait for the next change. This thread re-submits the screen after
+  // `kIdleResubmitUs` without frames.
+  static constexpr uint64_t kIdleResubmitUs = 100'000;
+  std::thread idle_thread;
+  std::mutex idle_mu;
+  std::condition_variable idle_cv;
+  bool idle_stop = false;
+  std::atomic<uint64_t> last_frame_us{0};
+  // A copy of the newest frame skipped for congestion (under submit_mu).
+  std::vector<uint8_t> skipped_px;
+  uint64_t frames_resubmitted = 0;  // under mu
+
+  void IdleLoop() {
+    std::unique_lock<std::mutex> lock(idle_mu);
+    while (!idle_cv.wait_for(lock, std::chrono::milliseconds(25), [&] { return idle_stop; })) {
+      auto* s = session_ptr.load();
+      if (!s || failed) continue;
+      const uint64_t now = capture::MonotonicMicros();
+      if (now - last_frame_us.load() < kIdleResubmitUs) continue;
+      // Under submit_mu throughout, so no newer frame can go in between.
+      std::lock_guard<std::mutex> l(submit_mu);
+      std::vector<uint8_t> px;
+      if (!skipped_px.empty()) {
+        px = std::move(skipped_px);
+        skipped_px.clear();
+      } else if (s->keyframe_pending()) {
+        px = s->last_frame();
+      } else {
+        continue;
+      }
+      capture::CapturedFrame f;
+      f.bgra = {px.data(), s->width(), s->height(), s->width() * 4};
+      f.capture_time_us = now;
+      {
+        std::lock_guard<std::mutex> m(mu);
+        ++frames_resubmitted;
+      }
+      OnFrameLocked(f, nullptr);
     }
   }
 
@@ -79,6 +138,11 @@ struct Host::Impl {
 
   bool OnFrame(const capture::CapturedFrame& f, std::string* error) {
     std::lock_guard<std::mutex> lock(submit_mu);
+    return OnFrameLocked(f, error);
+  }
+
+  bool OnFrameLocked(const capture::CapturedFrame& f, std::string* error) {
+    last_frame_us = capture::MonotonicMicros();
     if (failed) {
       if (error) *error = "host stopped after an earlier encoder error";
       return false;
@@ -110,6 +174,7 @@ struct Host::Impl {
       opts.refine_frames = config.refine_frames;
       opts.tile_cache = config.tile_cache;
       opts.refresh = config.refresh;
+      opts.progressive = config.progressive;
       if (config.video_regions) {
         const std::string prefer = config.encoder;
         opts.region_encoder_factory = [prefer](const codec::EncoderConfig& c, std::string* e) {
@@ -157,8 +222,18 @@ struct Host::Impl {
         target_bitrate_bps = rate->target_bps();
         if (d.skip_frame) ++frames_dropped_congestion;
       }
-      // The next frame that goes through carries all changes since.
-      if (d.skip_frame) return true;
+      // The next frame that goes through carries all changes since; keep
+      // this one in case no next frame comes.
+      if (d.skip_frame) {
+        skipped_px.resize(static_cast<size_t>(width) * height * 4);
+        for (int32_t y = 0; y < height; ++y) {
+          std::memcpy(skipped_px.data() + static_cast<size_t>(y) * width * 4,
+                      f.bgra.data + static_cast<size_t>(y) * f.bgra.stride,
+                      static_cast<size_t>(width) * 4);
+        }
+        return true;
+      }
+      skipped_px.clear();
     }
     std::string err;
     if (!session->OnFrame(f, &err)) {
@@ -179,10 +254,17 @@ Host::Host(std::unique_ptr<Transport> transport, HostConfig config)
   impl_->config = std::move(config);
   impl_->transport = std::move(transport);
   impl_->cursor = std::make_unique<session::CursorSender>(impl_->transport.get());
+  impl_->idle_thread = std::thread([impl = impl_.get()] { impl->IdleLoop(); });
 }
 
 Host::~Host() {
   StopScreenCapture();
+  {
+    std::lock_guard<std::mutex> lock(impl_->idle_mu);
+    impl_->idle_stop = true;
+  }
+  impl_->idle_cv.notify_all();
+  impl_->idle_thread.join();
   impl_->cursor.reset();
   // Stop the receive thread before the session goes away.
   impl_->transport.reset();
@@ -283,6 +365,7 @@ HostStats Host::stats() const {
   HostStats st = s ? s->stats() : HostStats{};
   std::lock_guard<std::mutex> lock(impl_->mu);
   st.frames_dropped_congestion = impl_->frames_dropped_congestion;
+  st.frames_resubmitted = impl_->frames_resubmitted;
   st.target_bitrate_bps = impl_->target_bitrate_bps;
   st.bandwidth_estimate_bps = impl_->net.bandwidth_bps;
   st.rtt_us = impl_->net.rtt_us;

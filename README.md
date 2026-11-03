@@ -57,7 +57,7 @@ API 在 1.0 之前还会变。M1、M2 的功能都加在 `Host` / `Viewer` 后�
 
 ## 当前进度：M2 视频区域、网络传输、光标通道
 
-M0 是整屏硬编基线；M1 在它上面加了按区域分类；M2 加了视频区域单独编码、带拥塞控制和自适应码率的 UDP 传输、独立光标通道。每一项都可以在 `HostConfig` 里单独关掉做对比。M2 目前只在 Linux 和 macOS CI 上验证过，还要在真实 Mac 上复测：清单和一键（静音）脚本见 [docs/mac_retest.md](docs/mac_retest.md)。
+M0 是整屏硬编基线；M1 在它上面加了按区域分类；M2 加了视频区域单独编码、带拥塞控制和自适应码率的 UDP 传输、独立光标通道、渐进式首帧。每一项都可以在 `HostConfig` 里单独关掉做对比。M2 目前只在 Linux 和 macOS CI 上验证过，还要在真实 Mac 上复测：清单和一键（静音）脚本见 [docs/mac_retest.md](docs/mac_retest.md)。
 
 | 模块 | 说明 | 开关 |
 | --- | --- | --- |
@@ -72,8 +72,9 @@ M0 是整屏硬编基线；M1 在它上面加了按区域分类；M2 加了视�
 | 屏幕采集 | macOS：ScreenCaptureKit（带脏区，不采集声音）；Linux：X11 MIT-SHM | — |
 | 传输 | 进程内管道（回环）、TCP、UDP（M2，`ListenUdp` / `ConnectUdp`）。UDP 传输自带丢包恢复（选择性确认 + 重传，每个通道独立有序，丢一个视频包不会卡住输入）和 BBR 式拥塞控制（按测得的瓶颈带宽发包，不把路由器缓冲塞满） | — |
 | 自适应码率（M2） | 传输层报告带宽估计和发送队列（`Transport::GetStats`）。队列超过 `max_queue_ms` 时跳过这一帧（下一帧会带上所有变化），排队时码率降到估计带宽的 85%，畅通时每 250 ms 最多升 25% | `adaptive_bitrate`、`min_bitrate_bps`、`max_queue_ms`（默认 50） |
-| 光标通道（M2） | 光标不画进画面：Host 单独发指针位置（每次约 17 字节）和光标图像（每种图像只发一次，deflate 压缩，两端各记最近 64 种），Viewer 通过 `on_cursor` 拿到位置和图像自己画（可用 `DrawCursor()`，或交给系统的硬件光标）。光标走单独的高优先级通道，大帧还在路上时指针照样跟手。`StartScreenCapture()` 时库自己以 120 Hz 读系统光标（macOS：CoreGraphics + NSCursor；Linux：XFixes）；自己喂帧的程序调用 `Host::SetCursor()` / `SetCursorImage()` | `cursor_channel`、`cursor_poll_hz`（默认 120）、`capture_cursor`（改回画进画面） |
-| 关键帧请求（M2） | 接收端解码失败或中途接入时自动向发送端要一次全屏刷新（最多每 250 ms 一次），应用也可以调用 `Viewer::RequestKeyframe()` | — |
+| 光标通道（M2） | 光标不画进画面：Host 单独发指针位置（每次约 17 字节）和光标图像（每种图像只发一次，deflate 压缩，两端各记最近 64 种），Viewer 通过 `on_cursor` 拿到位置和图像自己画（可用 `DrawCursor()`，或交给系统的硬件光标）。光标走单独的高优先级通道，大帧还在路上时指针照样跟手。`StartScreenCapture()` 时库自己以 120 Hz 读系统光标（macOS：CoreGraphics + NSCursor；Linux：XFixes）；自己喂帧的程序调用 `Host::SetCursor()` / `SetCursorImage()`。按 `capture_width` / `capture_height` 缩放抓屏时，光标图像和热点按同样比例缩放（Retina 屏按像素算） | `cursor_channel`、`cursor_poll_hz`（默认 120）、`capture_cursor`（改回画进画面） |
+| 渐进式首帧（M2） | 首帧（以及每次全屏刷新）先只发视频版本，比无损版小好几倍，慢速网络上也能很快出画面；文字和界面块随后按码率的约 80% 逐帧补成无损，补完后再给剩下的视频块（照片、渐变）发一张清晰的帧内画面。纯色块直接走无损，不用等 | `progressive`（默认开） |
+| 关键帧请求（M2） | 接收端解码失败或中途接入时自动向发送端要一次全屏刷新（最多每 250 ms 一次），应用也可以调用 `Viewer::RequestKeyframe()`。画面静止、没有新帧时，Host 100 ms 后用记住的最后一帧补发（拥塞时跳过的帧也一样），不用等下一次画面变化 | — |
 | 示例 | `rdaccel_serve` / `rdaccel_view`（跨机器）、`rdaccel_record`、`rdaccel_play`、`rdaccel_bench`（场景评测）、`rdaccel_netsim`（模拟网络）、`rdaccel_loopback`（macOS 窗口程序，含光标层）、`minimal` | — |
 
 只支持 HEVC，没有 H.264 回退。
@@ -133,12 +134,36 @@ python3 tools/make_desktop.py desktop.ppm
 | 0.8 Mbps，20 ms | 关 | 稳态阶段一帧都没显示 | 0% | — |
 | 0.8 Mbps，20 ms | 开 | 46 / 93 ms | 76% | 33.9 dB |
 
-带宽估计：4 Mbps 链路上估计 4.0 Mbps、RTT 43 ms（基础 40 ms），3% 丢包时吞吐仍接近链路速率。已知不足：第一帧是整屏（大部分是无损层，约 550 kB），在 1.5 Mbps 上要 3.1 秒才显示出来，后续可以改成先发一张低质量画面再逐步补齐。
+带宽估计：4 Mbps 链路上估计 4.0 Mbps、RTT 43 ms（基础 40 ms），3% 丢包时吞吐仍接近链路速率。上表测于渐进式首帧之前（相当于 `--progressive=0`）。
 
 ```bash
 ./build/bin/rdaccel_netsim --background=desktop.ppm --seconds=15 --bandwidth=1500000            # 自适应
 ./build/bin/rdaccel_netsim --background=desktop.ppm --seconds=15 --bandwidth=1500000 --abr=0    # 固定码率对照
 ./build/bin/rdaccel_netsim --background=desktop.ppm --seconds=15 --drop-to=1000000 --drop-at=6  # 带宽骤降
+```
+
+### 渐进式首帧（M2，Linux x265，模拟网络）
+
+不渐进时第一帧是整屏，大部分走无损层（约 520 kB），1.5 Mbps 上要 3.1 秒才出画面。渐进时第一帧只发视频（约 220 kB），文字随后补成无损。`rdaccel_netsim`，60 fps，配置码率 8 Mbps，10 秒，去掉前 6 秒后算稳态；"出画面"是第一帧从采集到显示的时间，后面几列是那一刻屏幕上画面的 PSNR（"—" = 还没有画面）。
+
+| 场景 / 网络 | 渐进 | 出画面 | 1 秒 | 2 秒 | 3 秒 | 5 秒 | 稳态 PSNR |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 静止桌面，1.5 Mbps | 关 | 3111 ms | — | — | — | 41.8 dB | 41.7 dB |
+| 静止桌面，1.5 Mbps | 开 | 1389 ms | — | 33.3 dB | 34.3 dB | 41.2 dB | 43.4 dB |
+| 静止桌面，3 Mbps，2% 丢包 | 关 | 1667 ms | — | 43.7 dB | 43.7 dB | 43.7 dB | 43.7 dB |
+| 静止桌面，3 Mbps，2% 丢包 | 开 | 782 ms | 33.2 dB | 35.4 dB | 41.0 dB | 43.7 dB | 43.7 dB |
+| 静止桌面，5 Mbps | 关 | 1082 ms | — | 43.8 dB | 43.8 dB | 43.8 dB | 43.8 dB |
+| 静止桌面，5 Mbps | 开 | 584 ms | 33.7 dB | 42.5 dB | 43.4 dB | 43.4 dB | 43.4 dB |
+| 静止桌面，20 Mbps | 关 | 512 ms | 44.2 dB | 44.2 dB | 44.2 dB | 44.2 dB | 44.2 dB |
+| 静止桌面，20 Mbps | 开 | 384 ms | 42.2 dB | 44.5 dB | 44.5 dB | 44.5 dB | 44.5 dB |
+| 播放视频，3 Mbps | 关 | 1677 ms | — | 37.0 dB | 38.7 dB | 39.3 dB | 39.0 dB |
+| 播放视频，3 Mbps | 开 | 727 ms | 33.4 dB | 33.3 dB | 35.8 dB | 40.8 dB | 40.5 dB |
+
+出画面快一倍以上。完全清晰要比不渐进时出画面晚一些（1.5 Mbps 上约 4.7 秒对 3.1 秒），因为总数据量多了首帧视频那部分。稳态通常持平或更好，因为最后那张帧内画面不用再和文字分码率；5 Mbps 时低 0.4 dB。调参时踩过的坑：首帧之后照常"细化"视频画面反而更糊（码率降下来以后编码器把静止块编得更差），补发的无损块马上在编码器输入里抹平也会拖累周围的块，所以首帧画面在补完之前保持不动，抹平留到最后那张帧内画面一起做。
+
+```bash
+./build/bin/rdaccel_netsim --background=desktop.ppm --scenario=idle --seconds=10 --warmup=6 --bandwidth=1500000 --progressive=1
+./build/bin/rdaccel_netsim --background=desktop.ppm --scenario=idle --seconds=10 --warmup=6 --bandwidth=1500000 --progressive=0
 ```
 
 ### 光标通道（M2，Linux x265）

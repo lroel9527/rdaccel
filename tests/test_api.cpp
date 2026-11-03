@@ -114,15 +114,16 @@ TEST(PublicApi, StaticScreenIsSkipped) {
   rdaccel::Host host(std::move(host_end), cfg);
   std::vector<uint8_t> px;
   rdaccel::RenderTestPattern(0, kW, kH, px);
-  // After the first frame the encoder may refine the static picture for
-  // `refine_frames` frames; after that, nothing more is sent.
-  const int n = cfg.refine_frames + 20;
+  // After the first frame come the progressive tiles, one sharper picture of
+  // what stays video, and `refine_frames` refinements of it; after that,
+  // nothing more is sent.
+  const int n = cfg.refine_frames + 40;
   for (int i = 0; i < n; ++i) {
     ASSERT_TRUE(host.SubmitFrame({px.data(), kW, kH, kW * 4}, rdaccel::NowMicros()));
   }
   ASSERT_TRUE(got.WaitFor(1));
   const auto st = host.stats();
-  EXPECT_LE(st.frames_encoded, 1u + static_cast<uint64_t>(cfg.refine_frames));
+  EXPECT_LE(st.frames_encoded, 2u + static_cast<uint64_t>(cfg.refine_frames) + st.progressive_tiles);
   EXPECT_EQ(st.frames_encoded + st.frames_skipped, static_cast<uint64_t>(n));
   const uint64_t sent = st.bytes_sent;
   for (int i = 0; i < 10; ++i) {
@@ -412,4 +413,28 @@ TEST(PublicApi, ViewerCanAskForAKeyframe) {
   EXPECT_EQ(viewer->stats().keyframe_requests, 1u);
   EXPECT_EQ(host.stats().keyframe_requests, 1u);
   EXPECT_EQ(host.stats().keyframes, 2u);
+}
+
+TEST(PublicApi, KeyframeComesEvenWhenTheScreenIsStatic) {
+  // Sources such as ScreenCaptureKit deliver no frames while nothing
+  // changes; a keyframe the viewer asks for must not wait for a change.
+  auto [host_end, viewer_end] = rdaccel::CreateLocalPipe();
+  Received got;
+  std::string err;
+  auto viewer = rdaccel::Viewer::Create(std::move(viewer_end), got.Handlers(), &err);
+  ASSERT_TRUE(viewer) << err;
+  rdaccel::Host host(std::move(host_end));
+  std::vector<uint8_t> px;
+  rdaccel::RenderTestPattern(0, kW, kH, px);
+  ASSERT_TRUE(host.SubmitFrame({px.data(), kW, kH, kW * 4}, rdaccel::NowMicros(), {}, &err)) << err;
+  ASSERT_TRUE(got.WaitFor(1));
+  viewer->RequestKeyframe();  // and no more frames are submitted
+  ASSERT_TRUE(got.WaitFor(2));
+  const auto st = host.stats();
+  EXPECT_EQ(st.keyframes, 2u);
+  EXPECT_EQ(st.frames_resubmitted, 1u);
+  // Nothing more is owed: no further frames.
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  EXPECT_EQ(host.stats().frames_resubmitted, 1u);
+  EXPECT_EQ(host.stats().frames_encoded, st.frames_encoded);
 }
