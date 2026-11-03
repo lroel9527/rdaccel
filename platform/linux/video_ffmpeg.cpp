@@ -189,7 +189,6 @@ class FfmpegHevcDecoder final : public codec::IHevcDecoder {
     }
     CodecCtxPtr ctx(avcodec_alloc_context3(codec));
     ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
-    if (cfg.min_qp > 0) ctx->qmin = cfg.min_qp;  // NVENC; x265 gets it below
     // Frame threading adds a frame of delay per thread; slices don't.
     ctx->thread_type = FF_THREAD_SLICE;
     if (const int rc = avcodec_open2(ctx.get(), codec, nullptr); rc < 0) {
