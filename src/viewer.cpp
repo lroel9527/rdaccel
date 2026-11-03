@@ -50,6 +50,8 @@ std::unique_ptr<Viewer> Viewer::Create(std::unique_ptr<Transport> transport,
 
 void Viewer::SendInput(const InputEvent& ev) { impl_->session->SendInput(ev); }
 
+void Viewer::RequestKeyframe() { impl_->session->RequestKeyframe(); }
+
 void Viewer::FeedRecording(std::span<const uint8_t> bytes) {
   impl_->session->FeedVideoBytes(bytes);
 }

@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <mutex>
+#include <thread>
 
 #include "capture/synthetic_capturer.h"
 #include "session/host_session.h"
@@ -53,10 +54,15 @@ class FakeEncoder final : public codec::IHevcEncoder {
 
 class FakeDecoder final : public codec::IHevcDecoder {
  public:
+  bool fail_next = false;
   std::string name() const override { return "fake"; }
   const std::string& last_error() const override { return err_; }
   bool Decode(const std::vector<std::vector<uint8_t>>& ps, const std::vector<uint8_t>& nal_data,
               uint64_t pts, const codec::DecodedFrameFn& on_frame) override {
+    if (fail_next) {
+      fail_next = false;
+      return false;
+    }
     if (!ps.empty()) have_ps_ = true;
     if (!have_ps_) return false;  // like a real decoder: no picture before a keyframe
     std::vector<std::span<const uint8_t>> nals;
@@ -319,4 +325,47 @@ TEST(Session, BusyAreaGetsItsOwnStreamAndASharpPictureWhenItStops) {
   EXPECT_TRUE(area_seen);
   // The final, sharp, picture covers the area's six tiles (merged per row).
   EXPECT_EQ(got.back(), (std::vector<Rect>{{64, 64, 192, 64}, {64, 128, 192, 64}}));
+}
+
+TEST(Session, ViewerAsksForAKeyframeAfterADecodeError) {
+  auto [host_end, viewer_end] = transport::MakeLocalPipe();
+  constexpr int W = 128, H = 64;
+  auto enc = std::make_unique<FakeEncoder>();
+  FakeEncoder* encoder = enc.get();
+  auto dec = std::make_unique<FakeDecoder>();
+  FakeDecoder* decoder = dec.get();
+  session::HostSession host(host_end.get(), std::move(enc), W, H, {.lossless = false, .refine_frames = 0});
+  session::ViewerSession viewer(viewer_end.get(), std::move(dec));
+  std::mutex mu;
+  std::condition_variable cv;
+  int shown = 0;
+  viewer.SetFrameHandler([&](const tile::ImageView&, const std::vector<Rect>&, uint64_t, uint64_t) {
+    std::lock_guard<std::mutex> lock(mu);
+    ++shown;
+    cv.notify_all();
+  });
+  PipeStopper stop{host_end, viewer_end};
+  std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 50);
+  capture::CapturedFrame f{{px.data(), W, H, W * 4}, {}, 0};
+  host.OnFrame(f);
+  {
+    std::unique_lock<std::mutex> lock(mu);
+    ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(5), [&] { return shown == 1; }));
+  }
+  decoder->fail_next = true;
+  px[0] = 1;
+  host.OnFrame(f);
+  // The request travels back on the control channel.
+  for (int i = 0; i < 500 && host.stats().keyframe_requests == 0; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_EQ(host.stats().keyframe_requests, 1u);
+  EXPECT_EQ(viewer.stats().keyframe_requests, 1u);
+  px[0] = 2;
+  host.OnFrame(f);
+  ASSERT_EQ(encoder->keyframe_requests.size(), 3u);
+  EXPECT_FALSE(encoder->keyframe_requests[1]);
+  EXPECT_TRUE(encoder->keyframe_requests[2]);
+  std::unique_lock<std::mutex> lock(mu);
+  ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(5), [&] { return shown == 2; }));
 }

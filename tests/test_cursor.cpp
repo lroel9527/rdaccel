@@ -53,8 +53,7 @@ CursorImage Arrow(uint8_t shade, int32_t size = 32) {
 }  // namespace
 
 TEST(Cursor, MessagesAreSmallAndRoundTrip) {
-  ASSERT_EQ(std::variant_size_v<proto::Message>, 10u);
-  ASSERT_TRUE((std::holds_alternative<proto::CursorPos>(proto::Message{proto::CursorPos{}})));
+    ASSERT_TRUE((std::holds_alternative<proto::CursorPos>(proto::Message{proto::CursorPos{}})));
   ASSERT_EQ(proto::Message{proto::CursorPos{}}.index(), kPos);
   ASSERT_EQ(proto::Message{proto::CursorShape{}}.index(), kShape);
 

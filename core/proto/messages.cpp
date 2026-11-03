@@ -115,6 +115,11 @@ MsgType Write(ByteWriter& w, const InputEvent& m) {
   return MsgType::kInputEvent;
 }
 
+MsgType Write(ByteWriter& w, const KeyframeRequest& m) {
+  w.varint(m.last_frame_id);
+  return MsgType::kKeyframeRequest;
+}
+
 MsgType Write(ByteWriter& w, const Feedback& m) {
   w.varint(m.frame_id);
   w.varint(m.receive_time_us);
@@ -231,6 +236,12 @@ std::optional<Message> ReadInputEvent(ByteReader& r) {
   return m;
 }
 
+std::optional<Message> ReadKeyframeRequest(ByteReader& r) {
+  KeyframeRequest m;
+  if (!r.varint(m.last_frame_id)) return std::nullopt;
+  return m;
+}
+
 std::optional<Message> ReadFeedback(ByteReader& r) {
   Feedback m;
   if (!(r.varint(m.frame_id) && r.varint(m.receive_time_us) && r.varint(m.present_time_us))) {
@@ -261,6 +272,7 @@ std::optional<Message> DecodePayload(MsgType type, std::span<const uint8_t> payl
     case MsgType::kInputEvent: m = ReadInputEvent(r); break;
     case MsgType::kFeedback: m = ReadFeedback(r); break;
     case MsgType::kLosslessData: m = ReadLosslessData(r); break;
+    case MsgType::kKeyframeRequest: m = ReadKeyframeRequest(r); break;
     default: return std::nullopt;
   }
   // Trailing bytes mean the peer and we disagree about the format.

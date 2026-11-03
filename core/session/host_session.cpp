@@ -664,11 +664,22 @@ void HostSession::FinishRegions(const std::vector<uint8_t>& busy,
 }
 
 void HostSession::OnReceive(transport::Channel ch, std::span<const uint8_t> bytes) {
-  if (ch != transport::Channel::kInput && ch != transport::Channel::kControl) return;
-  // Both channels share one parser here: the viewer only sends whole
-  // messages, so chunks never interleave mid-message on a single transport.
-  input_parser_.Append(bytes);
-  while (auto m = input_parser_.Next()) {
+  proto::StreamParser* parser = nullptr;
+  if (ch == transport::Channel::kInput) {
+    parser = &input_parser_;
+  } else if (ch == transport::Channel::kControl) {
+    parser = &control_parser_;
+  } else {
+    return;
+  }
+  parser->Append(bytes);
+  while (auto m = parser->Next()) {
+    if (std::holds_alternative<proto::KeyframeRequest>(*m)) {
+      force_keyframe_ = true;
+      std::lock_guard<std::mutex> lock(mu_);
+      ++stats_.keyframe_requests;
+      continue;
+    }
     if (auto* in = std::get_if<proto::InputEvent>(&*m)) {
       InputFn fn;
       {

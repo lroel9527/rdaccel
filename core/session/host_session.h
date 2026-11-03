@@ -163,7 +163,10 @@ class HostSession {
   mutable std::mutex mu_;
   HostStats stats_;
   InputFn on_input_;
+  // One per channel: on the UDP transport the channels are separate
+  // streams whose chunks may interleave mid-message.
   proto::StreamParser input_parser_;
+  proto::StreamParser control_parser_;
 };
 
 // Merges changed tiles into horizontal runs, one rect per run, to keep the
