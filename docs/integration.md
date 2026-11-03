@@ -182,7 +182,7 @@ host.SetInputHandler([&](const rdaccel::InputEvent& ev) { injector->Inject(ev); 
 | `cursor_channel` | 开 | 一般不关；关掉且 `capture_cursor` 也关时接收端看不到光标 |
 | `video_regions` | 开 | 对比测试时关 |
 | `progressive` | 开 | 首帧先发视频版、随后补成无损。要求第一张画面就逐像素准确（截图、自动化测试）时关 |
-| `encoder` | 自动 | Linux 上强制 `libx265` 或 `hevc_nvenc` |
+| `encoder` | 自动 | Linux 上强制 `libx265` 或 `hevc_nvenc`；`hevc_vaapi`（Intel / AMD 显卡，实验性，不会自动选用，设备用 `RDACCEL_VAAPI_DEVICE` 指定，默认 `/dev/dri/renderD128`）打不开时退回其他编码器 |
 
 每个模块的开关和评测数据见 [README](../README.md)。
 

@@ -17,6 +17,8 @@
 - **fuzz**：新增 `fuzz_recording`（录制文件回放，走真实 HEVC 解码器）和 `fuzz/corpus/recording/` 种子语料。
 - **修复**：`rda_test_pattern_render()` / `RenderTestPattern` 在宽或高小于约 120 像素时越界写内存；
   文字绕回页首后整帧渲染与增量渲染不一致。
+- **VAAPI 编码（实验性）**：Linux 上 `encoder = "hevc_vaapi"` 用 Intel / AMD 显卡编码（BGRA → NV12 → GPU 表面），
+  设备用 `RDACCEL_VAAPI_DEVICE` 指定；不会自动选用，打不开时退回 NVENC / x265。CI 没有显卡，只验证了退回路径。
 - **发布包**：macOS 改为通用二进制（arm64 + x86_64）；Linux 和 macOS 都多一个静态库包（`...-static.tar.gz`）。
 - **CI**：每个 PR 用 abidiff 检查 C ABI（`tools/abi_check.sh`）。
 - Linux 新增依赖 libxrandr、libxtst（`libxrandr-dev libxtst-dev`）。

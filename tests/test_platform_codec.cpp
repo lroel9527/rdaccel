@@ -31,12 +31,15 @@ double Psnr(const tile::ImageView& a, const std::vector<uint8_t>& b) {
 
 }  // namespace
 
-TEST(PlatformCodec, EncodeDecodeRoundTrip) {
+// Encodes and decodes 30 synthetic frames with the encoder CreateHevcEncoder
+// picks for `prefer`; `used` gets its name.
+void RoundTrip(const std::string& prefer, std::string& used) {
   constexpr int W = 640, H = 360, kFrames = 30;
   codec::EncoderConfig cfg{W, H, 30, 4'000'000};
   std::string err;
-  auto enc = platform::CreateHevcEncoder(cfg, "", &err);
+  auto enc = platform::CreateHevcEncoder(cfg, prefer, &err);
   ASSERT_TRUE(enc) << err;
+  used = enc->name();
   auto dec = platform::CreateHevcDecoder(&err);
   ASSERT_TRUE(dec) << err;
 
@@ -71,6 +74,20 @@ TEST(PlatformCodec, EncodeDecodeRoundTrip) {
   ASSERT_TRUE(key);
   EXPECT_TRUE(key->keyframe);
   EXPECT_EQ(key->parameter_sets.size(), 3u);
+}
+
+TEST(PlatformCodec, EncodeDecodeRoundTrip) {
+  std::string used;
+  RoundTrip("", used);
+}
+
+TEST(PlatformCodec, VaapiWhenAskedForOrAFallback) {
+  // On a machine with a VAAPI GPU this runs the whole round trip through
+  // hevc_vaapi; elsewhere (CI) the encoder falls back and still works.
+  std::string used;
+  RoundTrip("hevc_vaapi", used);
+  std::printf("encoder for hevc_vaapi: %s\n", used.c_str());
+  EXPECT_FALSE(used.empty());
 }
 
 TEST(PlatformCursor, ReadsTheSystemCursor) {

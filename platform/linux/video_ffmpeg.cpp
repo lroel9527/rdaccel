@@ -4,6 +4,7 @@
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavutil/hwcontext.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/opt.h>
@@ -42,6 +43,43 @@ using CodecCtxPtr = std::unique_ptr<AVCodecContext, CodecCtxDeleter>;
 using FramePtr = std::unique_ptr<AVFrame, FrameDeleter>;
 using PacketPtr = std::unique_ptr<AVPacket, PacketDeleter>;
 using SwsPtr = std::unique_ptr<SwsContext, SwsDeleter>;
+struct BufferRefDeleter {
+  void operator()(AVBufferRef* b) const { av_buffer_unref(&b); }
+};
+using BufferRefPtr = std::unique_ptr<AVBufferRef, BufferRefDeleter>;
+
+// VAAPI (Intel / AMD GPUs): the render node in RDACCEL_VAAPI_DEVICE, by
+// default the first one.
+BufferRefPtr OpenVaapiDevice(std::string* error) {
+  const char* env = std::getenv("RDACCEL_VAAPI_DEVICE");
+  const char* node = env && *env ? env : "/dev/dri/renderD128";
+  AVBufferRef* dev = nullptr;
+  if (const int rc = av_hwdevice_ctx_create(&dev, AV_HWDEVICE_TYPE_VAAPI, node, nullptr, 0); rc < 0) {
+    if (error) *error = std::string("hevc_vaapi: cannot open ") + node + ": " + AvError(rc);
+    return nullptr;
+  }
+  return BufferRefPtr(dev);
+}
+
+// A pool of NV12 surfaces for the encoder's input.
+BufferRefPtr VaapiFrames(AVBufferRef* device, int w, int h, std::string* error) {
+  BufferRefPtr frames(av_hwframe_ctx_alloc(device));
+  if (!frames) {
+    if (error) *error = "hevc_vaapi: av_hwframe_ctx_alloc failed";
+    return nullptr;
+  }
+  auto* fc = reinterpret_cast<AVHWFramesContext*>(frames->data);
+  fc->format = AV_PIX_FMT_VAAPI;
+  fc->sw_format = AV_PIX_FMT_NV12;
+  fc->width = w;
+  fc->height = h;
+  fc->initial_pool_size = 4;
+  if (const int rc = av_hwframe_ctx_init(frames.get()); rc < 0) {
+    if (error) *error = "hevc_vaapi: no NV12 surfaces: " + AvError(rc);
+    return nullptr;
+  }
+  return frames;
+}
 
 // Both ends use BT.709 limited range, which is also what VideoToolbox uses for
 // HD content, so colours match across platforms.
@@ -68,6 +106,15 @@ class FfmpegHevcEncoder final : public codec::IHevcEncoder {
     ctx->width = cfg.width;
     ctx->height = cfg.height;
     ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+    if (backend == "hevc_vaapi") {
+      BufferRefPtr dev = OpenVaapiDevice(error);
+      if (!dev) return nullptr;
+      BufferRefPtr frames = VaapiFrames(dev.get(), cfg.width, cfg.height, error);
+      if (!frames) return nullptr;
+      ctx->pix_fmt = AV_PIX_FMT_VAAPI;
+      ctx->hw_device_ctx = dev.release();
+      ctx->hw_frames_ctx = frames.release();
+    }
     ctx->time_base = {1, 1'000'000};  // pts in microseconds
     ctx->framerate = {cfg.fps, 1};
     ctx->bit_rate = cfg.bitrate_bps;
@@ -97,6 +144,11 @@ class FfmpegHevcEncoder final : public codec::IHevcEncoder {
       av_opt_set(ctx->priv_data, "tune", "ull", 0);
       av_opt_set_int(ctx->priv_data, "zerolatency", 1, 0);
       av_opt_set_int(ctx->priv_data, "forced-idr", 1, 0);
+    } else if (backend == "hevc_vaapi") {
+      // Constant bitrate, no lookahead; parameter sets go in-band with each
+      // IDR picture (no global header), as the wire format expects.
+      av_opt_set(ctx->priv_data, "rc_mode", "CBR", 0);
+      av_opt_set_int(ctx->priv_data, "async_depth", 1, 0);
     }
 
     if (const int rc = avcodec_open2(ctx.get(), codec, nullptr); rc < 0) {
@@ -115,8 +167,12 @@ class FfmpegHevcEncoder final : public codec::IHevcEncoder {
     enc->backend_ = backend;
     enc->cfg_ = cfg;
     enc->ctx_ = std::move(ctx);
+    // Software frame the BGRA input is converted into: YUV 4:2:0 planar, or
+    // NV12 for VAAPI, which is then uploaded to a GPU surface.
+    const AVPixelFormat sw_fmt = backend == "hevc_vaapi" ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
+    if (backend == "hevc_vaapi") enc->hw_frame_.reset(av_frame_alloc());
     enc->frame_.reset(av_frame_alloc());
-    enc->frame_->format = AV_PIX_FMT_YUV420P;
+    enc->frame_->format = sw_fmt;
     enc->frame_->width = cfg.width;
     enc->frame_->height = cfg.height;
     if (av_frame_get_buffer(enc->frame_.get(), 0) < 0) {
@@ -125,7 +181,7 @@ class FfmpegHevcEncoder final : public codec::IHevcEncoder {
     }
     enc->packet_.reset(av_packet_alloc());
     enc->sws_.reset(sws_getContext(cfg.width, cfg.height, AV_PIX_FMT_BGRA, cfg.width, cfg.height,
-                                   AV_PIX_FMT_YUV420P, SWS_BILINEAR, nullptr, nullptr, nullptr));
+                                   sw_fmt, SWS_BILINEAR, nullptr, nullptr, nullptr));
     SetBt709(enc->sws_.get(), true);
     return enc;
   }
@@ -142,7 +198,7 @@ class FfmpegHevcEncoder final : public codec::IHevcEncoder {
       reopen_bps_ = ratio > 1.3 || ratio < 1 / 1.3 ? bps : 0;
       return;
     }
-    // NVENC reconfigures itself when these change.
+    // NVENC and VAAPI reconfigure themselves when these change.
     ctx_->bit_rate = bps;
     ctx_->rc_max_rate = bps;
   }
@@ -184,7 +240,22 @@ class FfmpegHevcEncoder final : public codec::IHevcEncoder {
       frame_->flags &= ~AV_FRAME_FLAG_KEY;
     }
 
-    if (const int rc = avcodec_send_frame(ctx_.get(), frame_.get()); rc < 0) {
+    AVFrame* input = frame_.get();
+    if (hw_frame_) {
+      // Upload to a surface from the encoder's pool.
+      av_frame_unref(hw_frame_.get());
+      if (const int rc = av_hwframe_get_buffer(ctx_->hw_frames_ctx, hw_frame_.get(), 0); rc < 0) {
+        error_ = "av_hwframe_get_buffer: " + AvError(rc);
+        return std::nullopt;
+      }
+      if (const int rc = av_hwframe_transfer_data(hw_frame_.get(), frame_.get(), 0); rc < 0) {
+        error_ = "av_hwframe_transfer_data: " + AvError(rc);
+        return std::nullopt;
+      }
+      av_frame_copy_props(hw_frame_.get(), frame_.get());
+      input = hw_frame_.get();
+    }
+    if (const int rc = avcodec_send_frame(ctx_.get(), input); rc < 0) {
       error_ = "avcodec_send_frame: " + AvError(rc);
       return std::nullopt;
     }
@@ -213,6 +284,7 @@ class FfmpegHevcEncoder final : public codec::IHevcEncoder {
   uint64_t last_reopen_us_ = 0;
   CodecCtxPtr ctx_;
   FramePtr frame_;
+  FramePtr hw_frame_;  // VAAPI: the GPU surface frame_ is uploaded to
   PacketPtr packet_;
   SwsPtr sws_;
   std::string error_;
@@ -356,6 +428,8 @@ std::unique_ptr<codec::IHevcEncoder> CreateFfmpegHevcEncoder(const codec::Encode
                                                              const std::string& prefer,
                                                              std::string* error) {
   RouteFfmpegLog();
+  // hevc_vaapi is tried only when asked for (experimental: not covered by
+  // CI, which has no GPU).
   std::vector<std::string> order = {"hevc_nvenc", "libx265"};
   if (!prefer.empty()) {
     order.erase(std::remove(order.begin(), order.end(), prefer), order.end());
