@@ -16,6 +16,11 @@
   （GNOME、KDE、sway 等）。用合成器给的脏区；光标优先走 PipeWire 光标元数据（进光标通道），没有时画进画面；
   授权在进程内保留，`RDACCEL_PORTAL_TOKEN_FILE` 可跨进程保留。依赖 `libpipewire-0.3`、`gio-2.0`，
   CMake 选项 `RDACCEL_PIPEWIRE=AUTO|ON|OFF`。CI 在无头 sway + PipeWire + portal 里测试，并用公开 API 录一段 Wayland 屏幕再解码。
+- **错误回调的约定**（C ABI 语义改动）：`on_error` 只在 Host 停下或光标通道不可用时调用，状态码说明原因：
+  `RDA_ERR_UNSUPPORTED` 表示没有光标通道，画面照常；`RDA_ERR_CODEC` 表示编码器建不起来；
+  `RDA_ERR_PERMISSION` / `RDA_ERR_CLOSED` 表示抓屏停了（权限被收回，或 Wayland 共享被用户结束、屏幕没了）。
+  单帧编码失败不再回调，只记日志并计入 `encode_errors`。抓屏中途停止以前没有任何通知，现在 PipeWire 和
+  ScreenCaptureKit 会报告。`rdaccel.hpp` 的 `SetErrorHandler` 新增带 `rda_status` 的重载，旧的只收字符串的写法照旧可用。
 - 光标在画面里（Wayland 不支持光标元数据时）不再通过错误回调报“cursor channel unavailable”。
 
 ## 0.4.0

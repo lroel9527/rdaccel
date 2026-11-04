@@ -441,6 +441,9 @@ struct PipeWireCapturer::Impl {
 
   capture::CaptureConfig cfg;
   capture::FrameFn on_frame;
+  capture::StoppedFn on_stopped;
+  bool running = false;          // Start succeeded; under the loop lock
+  bool stopped_reported = false;
   std::shared_ptr<PipeWireCursor> cursor;  // with cursor metadata only
 
   // Negotiated format; guarded by the loop lock like everything below.
@@ -491,11 +494,18 @@ struct PipeWireCapturer::Impl {
   static void OnStateChanged(void* data, pw_stream_state, pw_stream_state state, const char* error) {
     auto* self = static_cast<Impl*>(data);
     self->state = state;
+    std::string ended;
     if (state == PW_STREAM_STATE_ERROR) {
       self->stream_error = error ? error : "stream error";
       log::Warn("pipewire: " + self->stream_error);
+      ended = "PipeWire capture failed: " + self->stream_error;
     } else if (state == PW_STREAM_STATE_UNCONNECTED && self->frames > 0) {
       log::Warn("pipewire: the screen-cast stream ended (sharing stopped?)");
+      ended = "the screen-cast stream ended (sharing stopped?)";
+    }
+    if (!ended.empty() && self->running && !self->stopped_reported) {
+      self->stopped_reported = true;
+      if (self->on_stopped) self->on_stopped(ended);
     }
     pw_thread_loop_signal(self->loop, false);
   }
@@ -852,6 +862,7 @@ bool PipeWireCapturer::Start(const capture::CaptureConfig& cfg, capture::FrameFn
   auto impl = std::make_unique<Impl>();
   impl->cfg = cfg;
   impl->on_frame = std::move(on_frame);
+  impl->on_stopped = on_stopped_;
   int fd = -1;
   uint32_t node = 0;
   bool cursor_metadata = false, cursor_embedded = false;
@@ -869,6 +880,9 @@ bool PipeWireCapturer::Start(const capture::CaptureConfig& cfg, capture::FrameFn
   }
   if (cursor_metadata) impl->cursor = std::make_shared<PipeWireCursor>();
   if (!impl->Start(fd, node, &error_)) return false;
+  pw_thread_loop_lock(impl->loop);
+  impl->running = true;
+  pw_thread_loop_unlock(impl->loop);
   {
     std::lock_guard<std::mutex> lock(g_mu);
     g_cursor = impl->cursor;
@@ -887,6 +901,9 @@ void PipeWireCapturer::Stop() {
       g_cursor_embedded = false;
     }
   }
+  pw_thread_loop_lock(impl_->loop);
+  impl_->running = false;  // our own teardown is not "stopped by itself"
+  pw_thread_loop_unlock(impl_->loop);
   impl_->Teardown();
   impl_.reset();
 }

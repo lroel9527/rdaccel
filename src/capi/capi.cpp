@@ -777,7 +777,14 @@ rda_status rda_host_create(rda_transport* transport, const rda_host_config* conf
   raw->host->SetErrorHandler([raw](const std::string& msg) {
     rdacore::log::Error(msg);
     if (raw->config.on_error) {
-      const rda_status s = Classify(msg, msg.rfind("cursor", 0) == 0 ? RDA_ERR_UNSUPPORTED : RDA_ERR_CODEC);
+      // The contract (rdaccel.h, on_error): RDA_ERR_UNSUPPORTED only for the
+      // cursor, which is not fatal; anything else means the host stopped.
+      rda_status s = RDA_ERR_CODEC;  // the encoder could not be created
+      if (msg.rfind("cursor", 0) == 0) {
+        s = RDA_ERR_UNSUPPORTED;
+      } else if (msg.rfind("capture stopped", 0) == 0) {
+        s = Contains(msg, "ermission") ? RDA_ERR_PERMISSION : RDA_ERR_CLOSED;
+      }
       raw->ready.Wait();
       raw->config.on_error(raw->config.user, s, msg.c_str());
     }

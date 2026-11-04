@@ -427,7 +427,17 @@ typedef struct rda_host_config {
   void* user;
   /* Input from the viewer. Transport receive thread. */
   void (*on_input)(void* user, const rda_input_event* ev);
-  /* Errors on a background thread (encoder creation, capture, cursor). */
+  /* Something on a background thread failed. `status` says what it means:
+   *   RDA_ERR_UNSUPPORTED  no cursor channel (cursor source unavailable);
+   *                        the picture keeps streaming
+   *   anything else        the host has stopped and will send no more
+   *                        pictures; destroy it (not from this callback):
+   *     RDA_ERR_CODEC       the encoder could not be created
+   *     RDA_ERR_PERMISSION  capture stopped: permission taken away (macOS)
+   *     RDA_ERR_CLOSED      capture stopped: display gone, sharing ended
+   * A single picture that fails to encode is not reported here (it is
+   * logged and counted in rda_host_stats.encode_errors; the next one is a
+   * keyframe). Capture or cursor thread. */
   void (*on_error)(void* user, rda_status status, const char* message);
 
   /* Connection. */

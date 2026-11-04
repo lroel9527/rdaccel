@@ -10,6 +10,7 @@
 // Requires C++20. See docs/integration.md.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -642,6 +643,9 @@ class Host {
  public:
   using InputHandler = std::function<void(const InputEvent&)>;
   using ErrorHandler = std::function<void(const std::string&)>;
+  // With the status: RDA_ERR_UNSUPPORTED = no cursor channel, the picture
+  // keeps streaming; anything else = the host stopped (see rdaccel.h).
+  using StatusErrorHandler = std::function<void(rda_status, const std::string&)>;
 
   // Takes ownership of the transport. If the host cannot be created (bad
   // config), every later call fails with that error; see ok().
@@ -714,14 +718,14 @@ class Host {
       }
       if (fn) fn(detail::FromC(*ev));
     };
-    c.on_error = [](void* u, rda_status, const char* msg) {
+    c.on_error = [](void* u, rda_status st, const char* msg) {
       auto* s = static_cast<State*>(u);
-      ErrorHandler fn;
+      StatusErrorHandler fn;
       {
         std::lock_guard<std::mutex> lock(s->mu);
         fn = s->on_error;
       }
-      if (fn) fn(msg);
+      if (fn) fn(st, msg);
     };
     if (rda_host_create(detail::IntoHandle(std::move(transport)), &c, &h_) != RDA_OK) {
       create_error_ = rda_last_error();
@@ -739,11 +743,19 @@ class Host {
     std::lock_guard<std::mutex> lock(state_->mu);
     state_->on_input = std::move(fn);
   }
-  // Errors on a background thread (encoder, capture, cursor).
+  // Errors on a background thread (encoder, capture, cursor). Every one
+  // stops the host except RDA_ERR_UNSUPPORTED (no cursor channel); take the
+  // status with the second form to tell them apart.
   void SetErrorHandler(ErrorHandler fn) {
+    std::lock_guard<std::mutex> lock(state_->mu);
+    state_->on_error = fn ? StatusErrorHandler([fn = std::move(fn)](rda_status, const std::string& m) { fn(m); })
+                          : StatusErrorHandler();
+  }
+  void SetErrorHandler(StatusErrorHandler fn) {
     std::lock_guard<std::mutex> lock(state_->mu);
     state_->on_error = std::move(fn);
   }
+  void SetErrorHandler(std::nullptr_t) { SetErrorHandler(StatusErrorHandler()); }
 
   // Connection changes (transport or timer thread). Set it before the
   // viewer can connect, or check state() afterwards.
@@ -858,7 +870,7 @@ class Host {
   struct State {
     std::mutex mu;
     InputHandler on_input;
-    ErrorHandler on_error;
+    StatusErrorHandler on_error;
     StateHandler on_state;
     MessageHandler on_message;
     std::function<bool(std::span<const uint8_t>)> auth;

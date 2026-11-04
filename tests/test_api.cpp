@@ -108,6 +108,19 @@ TEST(PublicApi, HostToViewerOverLocalPipe) {
   EXPECT_EQ(host.stats().frames_encoded, static_cast<uint64_t>(kFrames));
 }
 
+// Both handler forms (and clearing it) compile and are accepted: code
+// written against the string-only form keeps building.
+TEST(PublicApi, ErrorHandlerForms) {
+  auto [host_end, viewer_end] = rdaccel::CreateLocalPipe();
+  rdaccel::Host host(std::move(host_end), rdaccel::HostConfig{});
+  ASSERT_TRUE(host.ok());
+  host.SetErrorHandler([](const std::string&) {});
+  host.SetErrorHandler([](rda_status, const std::string&) {});
+  rdaccel::Host::ErrorHandler old_style = [](const std::string&) {};
+  host.SetErrorHandler(old_style);
+  host.SetErrorHandler(nullptr);
+}
+
 TEST(PublicApi, StaticScreenIsSkipped) {
   auto [host_end, viewer_end] = rdaccel::CreateLocalPipe();
   Received got;

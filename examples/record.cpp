@@ -86,7 +86,8 @@ int main(int argc, char** argv) {
     std::mutex mu;
     std::condition_variable cv;
     bool failed = false;
-    host.SetErrorHandler([&](const std::string& e) {
+    host.SetErrorHandler([&](rda_status s, const std::string& e) {
+      if (s == RDA_ERR_UNSUPPORTED) return;  // no cursor channel: keeps recording
       std::lock_guard<std::mutex> lock(mu);
       err = e;
       failed = true;

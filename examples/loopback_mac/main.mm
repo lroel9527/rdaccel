@@ -123,7 +123,8 @@ long ArgNum(const char* key, long def) {
   cfg.fps = static_cast<int32_t>(ArgNum("fps", 60));
   cfg.bitrate_bps = ArgNum("bitrate", 8'000'000);
   _host = std::make_unique<rdaccel::Host>(std::move(hostEnd), cfg);
-  _host->SetErrorHandler([weakSelf](const std::string& e) {
+  _host->SetErrorHandler([weakSelf](rda_status s, const std::string& e) {
+    if (s == RDA_ERR_UNSUPPORTED) return;  // no cursor channel; the picture goes on
     NSString* msg = [NSString stringWithUTF8String:e.c_str()];
     // Called on the capture queue; never stop capture from there.
     dispatch_async(dispatch_get_main_queue(), ^{

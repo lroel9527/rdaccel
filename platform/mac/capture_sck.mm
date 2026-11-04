@@ -13,18 +13,45 @@
 
 using rdacore::capture::CapturedFrame;
 using rdacore::capture::FrameFn;
+using rdacore::capture::StoppedFn;
 
-@interface RDStreamOutput : NSObject <SCStreamOutput>
-- (instancetype)initWithCallback:(FrameFn)fn;
+#include <atomic>
+
+// Receives the pictures, and as the stream's delegate hears when the system
+// stops it (Screen Recording permission revoked, display disconnected, ...).
+@interface RDStreamOutput : NSObject <SCStreamOutput, SCStreamDelegate>
+- (instancetype)initWithCallback:(FrameFn)fn stopped:(StoppedFn)stopped;
+- (void)ignoreStops;
 @end
 
 @implementation RDStreamOutput {
   FrameFn _fn;
+  StoppedFn _stopped;
+  std::atomic<bool> _ignore_stops;
 }
 
-- (instancetype)initWithCallback:(FrameFn)fn {
-  if ((self = [super init])) _fn = std::move(fn);
+- (instancetype)initWithCallback:(FrameFn)fn stopped:(StoppedFn)stopped {
+  if ((self = [super init])) {
+    _fn = std::move(fn);
+    _stopped = std::move(stopped);
+    _ignore_stops = false;
+  }
   return self;
+}
+
+- (void)ignoreStops {
+  _ignore_stops = true;
+}
+
+- (void)stream:(SCStream*)stream didStopWithError:(NSError*)error {
+  if (_ignore_stops.exchange(true) || !_stopped) return;
+  std::string why = "screen capture stopped";
+  if (error) {
+    why += std::string(": ") + error.localizedDescription.UTF8String;
+    // SCStreamErrorUserDeclined (-3801): the permission was taken away.
+    if (error.code == -3801) why += " (Screen Recording permission)";
+  }
+  _stopped(why);
 }
 
 - (void)stream:(SCStream*)stream
@@ -151,8 +178,8 @@ bool SckCapturer::Start(const capture::CaptureConfig& cfg, capture::FrameFn on_f
   conf.capturesAudio = NO;
 
   impl_->queue = dispatch_queue_create("rdaccel.capture", DISPATCH_QUEUE_SERIAL);
-  impl_->output = [[RDStreamOutput alloc] initWithCallback:std::move(on_frame)];
-  impl_->stream = [[SCStream alloc] initWithFilter:filter configuration:conf delegate:nil];
+  impl_->output = [[RDStreamOutput alloc] initWithCallback:std::move(on_frame) stopped:on_stopped_];
+  impl_->stream = [[SCStream alloc] initWithFilter:filter configuration:conf delegate:impl_->output];
   NSError* err = nil;
   if (![impl_->stream addStreamOutput:impl_->output
                                  type:SCStreamOutputTypeScreen
@@ -180,6 +207,7 @@ bool SckCapturer::Start(const capture::CaptureConfig& cfg, capture::FrameFn on_f
 
 void SckCapturer::Stop() {
   if (!impl_ || !impl_->stream) return;
+  [impl_->output ignoreStops];  // stopping on purpose is not news
   dispatch_semaphore_t sem = dispatch_semaphore_create(0);
   [impl_->stream stopCaptureWithCompletionHandler:^(NSError*) {
     dispatch_semaphore_signal(sem);
