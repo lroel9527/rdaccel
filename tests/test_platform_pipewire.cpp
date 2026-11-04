@@ -78,6 +78,10 @@ class FakeScreen {
     pw_init(nullptr, nullptr);
     loop_ = pw_thread_loop_new("fake-screen", nullptr);
     context_ = pw_context_new(pw_thread_loop_get_loop(loop_), nullptr, 0);
+    if (!context_) {
+      *error = "no PipeWire client configuration (PipeWire is not installed)";
+      return false;
+    }
     pw_thread_loop_start(loop_);
     pw_thread_loop_lock(loop_);
     core_ = pw_context_connect(context_, nullptr, 0);
@@ -145,7 +149,7 @@ class FakeScreen {
     pw_thread_loop_stop(loop_);
     if (stream_) pw_stream_destroy(stream_);
     if (core_) pw_core_disconnect(core_);
-    pw_context_destroy(context_);
+    if (context_) pw_context_destroy(context_);
     pw_thread_loop_destroy(loop_);
   }
 
