@@ -159,11 +159,16 @@ TEST(RateController, SkipsFramesAndBacksOffWhenTheQueueBuilds) {
   st.queued_bytes = 20'000;
   d = rc.Update(600'000, st);
   EXPECT_EQ(rc.target_bps(), 1'700'000);
-  // Queue gone: grow by a quarter per step, up to twice the estimate.
+  // Queue gone: grow by a quarter per step, but the queue showed the
+  // estimate to be the path's rate, so the ceiling starts there (last
+  // congested at 0.6 s) and opens by 10% of it per second.
   st.queued_bytes = 0;
   rc.Update(900'000, st);
-  EXPECT_EQ(rc.target_bps(), 2'125'000);
+  EXPECT_EQ(rc.target_bps(), 2'060'000);
   for (uint64_t t = 1'200'000; t < 5'000'000; t += 300'000) rc.Update(t, st);
+  EXPECT_EQ(rc.target_bps(), 2'840'000);
+  // Twice the estimate again ten seconds after the queue.
+  for (uint64_t t = 5'100'000; t < 11'000'000; t += 300'000) rc.Update(t, st);
   EXPECT_EQ(rc.target_bps(), 4'000'000);
 }
 
