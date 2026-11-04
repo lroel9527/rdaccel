@@ -13,6 +13,8 @@
 //   * encoders do not always keep to the rate they are given (VideoToolbox
 //     overshoots at low rates): when what they produced over a second
 //     exceeds the target, the encoder is asked for proportionally less;
+//   * at the floor, frames are also skipped while the session sends more
+//     than 90% of the estimate (an encoder can only go so low per picture);
 //   * a round trip well above the lowest one seen means a queue is building
 //     inside the network (the path slowed down before the bandwidth estimate
 //     noticed), which also counts as a building queue.
@@ -36,8 +38,10 @@ class RateController {
 
   // `sent_bytes`: the encoders' output so far (HEVC payload; lossless tiles
   // are not theirs to correct), 0 = not known. It shows what they really
-  // produce.
-  Decision Update(uint64_t now_us, const TransportStats& st, uint64_t sent_bytes = 0);
+  // produce. `total_bytes`: everything the session sent so far, 0 = not
+  // known; at the floor, frames are skipped to keep it within the estimate.
+  Decision Update(uint64_t now_us, const TransportStats& st, uint64_t sent_bytes = 0,
+                  uint64_t total_bytes = 0);
 
   int64_t target_bps() const { return target_; }
   // What the encoder is asked for: the target, less what it was seen to
@@ -55,6 +59,8 @@ class RateController {
   uint64_t skipped_ = 0;  // frames skipped since the last update
   uint64_t last_queued_ = 0;
   uint64_t path_skips_ = 0;  // frames considered for skipping on a path queue
+  double budget_ = 0;        // bytes that may still go out at the floor
+  uint64_t budget_us_ = 0, budget_bytes_ = 0;  // when it was last updated, and the bytes sent then
   uint32_t min_rtt_us_ = 0;  // lowest smoothed RTT seen
   int64_t encoder_ = 0;      // last rate given to the encoder (0 = the configured one)
   double scale_ = 1;         // encoder rate = target * scale

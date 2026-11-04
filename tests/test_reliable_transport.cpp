@@ -228,6 +228,35 @@ TEST(RateController, SkipsEveryOtherFrameOnANetworkQueueAtTheFloor) {
   EXPECT_FALSE(above.Update(33'000, st).skip_frame);
 }
 
+TEST(RateController, KeepsWhatGoesOutWithinTheEstimateAtTheFloor) {
+  // An encoder that cannot go below 2 kB a picture (480 kbps at 30 fps)
+  // over a 400 kbps path, with the target at its floor: pictures are skipped
+  // so that what goes out stays within 90% of the estimate.
+  session::RateController rc(8'000'000, 300'000, 50);
+  TransportStats st;
+  st.bandwidth_bps = 400'000;
+  st.queued_bytes = 2'000;  // 40 ms: down to the floor
+  st.rtt_us = 40'000;
+  uint64_t t = 0;
+  for (int i = 0; i < 100 && rc.target_bps() > 300'000; ++i) rc.Update(t += 300'000, st);
+  ASSERT_EQ(rc.target_bps(), 300'000);
+  st.queued_bytes = 0;
+  uint64_t total = 1'000'000, sent = 0;
+  const uint64_t start = total;
+  int shown = 0;
+  for (int i = 0; i < 300; ++i) {  // 10 s
+    if (!rc.Update(t += 33'333, st, total, total).skip_frame) {
+      total += 2'000;
+      ++shown;
+    }
+  }
+  sent = total - start;
+  const double kbps = static_cast<double>(sent) * 8 / 10 / 1000;
+  EXPECT_LT(kbps, 375);
+  EXPECT_GT(kbps, 330);
+  EXPECT_GT(shown, 200);
+}
+
 TEST(RateController, AsksLessOfAnEncoderThatOvershoots) {
   session::RateController rc(8'000'000, 300'000, 50);
   TransportStats st;

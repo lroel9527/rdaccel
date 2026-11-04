@@ -5,7 +5,7 @@
 namespace rdacore::session {
 
 RateController::Decision RateController::Update(uint64_t now_us, const TransportStats& st,
-                                                uint64_t sent_bytes) {
+                                                uint64_t sent_bytes, uint64_t total_bytes) {
   Decision d;
   const int64_t drain_bps = st.bandwidth_bps > 0 ? st.bandwidth_bps : target_;
   queue_delay_us_ = drain_bps > 0 ? st.queued_bytes * 8'000'000 / static_cast<uint64_t>(drain_bps) : 0;
@@ -18,7 +18,34 @@ RateController::Decision RateController::Update(uint64_t now_us, const Transport
   // other frame only: the round trip is measured on what is sent, so with
   // nothing sent it would stay high and keep every frame back.
   const bool halve = path_queue && target_ <= min_bps_ && (++path_skips_ & 1) != 0;
-  d.skip_frame = queue_delay_us_ > max_queue_us_ || halve;
+  // Once the encoder is asked for no more than the floor (the target is
+  // there, or what it produced beyond what it was asked brought its rate
+  // there), keep what goes out within 90% of the estimate whatever it does:
+  // a frame is skipped while the bytes sent overdraw that budget.
+  // (VideoToolbox spends a near-fixed amount on each picture of a busy
+  // 1080p screen, ~490 kbps at 30 fps however low it is asked to go; only
+  // fewer pictures bring that down.) Up to 300 ms of the budget is saved.
+  // A skipped frame keeps the target at the floor (see below).
+  // Above the floor the budget stays off: the estimate is only a lower
+  // bound there, and holding the sender to it would keep it one.
+  bool over_budget = false;
+  if (total_bytes > 0 && st.bandwidth_bps > 0 &&
+      static_cast<double>(target_) * scale_ <= static_cast<double>(min_bps_)) {
+    const double rate = 0.9 * static_cast<double>(st.bandwidth_bps) / 8e6;  // bytes per us
+    const double cap = rate * 300'000;
+    if (budget_us_ == 0) {
+      budget_ = 0;  // nothing saved yet: the floor is reached after a queue
+    } else {
+      budget_ = std::min(cap, budget_ + rate * static_cast<double>(now_us - budget_us_));
+      budget_ -= static_cast<double>(total_bytes - std::min(total_bytes, budget_bytes_));
+    }
+    budget_us_ = now_us;
+    budget_bytes_ = total_bytes;
+    over_budget = budget_ < 0;
+  } else {
+    budget_us_ = 0;
+  }
+  d.skip_frame = queue_delay_us_ > max_queue_us_ || halve || over_budget;
   if (d.skip_frame) ++skipped_;
 
   constexpr uint64_t kInterval = 250'000;
