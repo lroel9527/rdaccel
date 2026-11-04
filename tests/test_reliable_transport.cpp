@@ -183,8 +183,28 @@ TEST(RateController, TargetComesDownToTwiceTheEstimate) {
   rc.Update(0, st);
   EXPECT_EQ(rc.target_bps(), 8'000'000);
   st.bandwidth_bps = 1'000'000;
-  for (uint64_t t = 250'000; t <= 4'000'000; t += 250'000) rc.Update(t, st);
-  EXPECT_EQ(rc.target_bps(), 2'000'000);
+  // The estimate fell under half of its peak: the target follows at once,
+  // below the new estimate (at 4 -> 0.4 Mbps, coming down 10% a step left
+  // it far above the path for 0.4 s).
+  rc.Update(250'000, st);
+  EXPECT_EQ(rc.target_bps(), 850'000);
+  // Then it grows again, but stays within twice the estimate.
+  for (uint64_t t = 500'000; t <= 4'000'000; t += 250'000) rc.Update(t, st);
+  EXPECT_GT(rc.target_bps(), 1'000'000);
+  EXPECT_LE(rc.target_bps(), 2'000'000);
+}
+
+TEST(RateController, FirstEstimatesRisingIsNotAFall) {
+  // Early in a session the estimate climbs from low readings; only a fall
+  // from a peak counts.
+  session::RateController rc(8'000'000, 300'000, 50);
+  TransportStats st;
+  st.rtt_us = 40'000;
+  for (int64_t bw : {500'000, 900'000, 2'000'000, 3'500'000}) {
+    st.bandwidth_bps = bw;
+    rc.Update(static_cast<uint64_t>(bw), st);
+  }
+  EXPECT_GT(rc.target_bps(), 3'500'000);
 }
 
 TEST(RateController, BacksOffWhenTheRoundTripGrows) {

@@ -48,8 +48,18 @@ RateController::Decision RateController::Update(uint64_t now_us, const Transport
   d.skip_frame = queue_delay_us_ > max_queue_us_ || halve || over_budget;
   if (d.skip_frame) ++skipped_;
 
+  // The path fell: the estimate (measured from what was delivered) is under
+  // half of what it was. The target follows at once, not 10% a step: at
+  // 4 -> 0.4 Mbps it stayed at 4.6 Mbps for 0.4 s after the estimate had
+  // fallen, and the frames of that time (a 15 kB picture, an 11 kB lossless
+  // part) took more than a second to get through.
+  bool fell = false;
+  if (st.bandwidth_bps > 0) {
+    peak_bps_ = std::max(peak_bps_, st.bandwidth_bps);
+    fell = st.bandwidth_bps * 2 < peak_bps_ && target_ > st.bandwidth_bps;
+  }
   constexpr uint64_t kInterval = 250'000;
-  if (started_ && now_us - last_update_us_ < kInterval) return d;
+  if (started_ && !fell && now_us - last_update_us_ < kInterval) return d;
   started_ = true;
   last_update_us_ = now_us;
   if (st.bandwidth_bps <= 0) return d;
@@ -59,7 +69,12 @@ RateController::Decision RateController::Update(uint64_t now_us, const Transport
   skipped_ = 0;
   const bool draining = st.queued_bytes < last_queued_;
   last_queued_ = st.queued_bytes;
-  if (skipped || path_queue || queue_delay_us_ > max_queue_us_ / 2) {
+  if (fell) {
+    congested_us_ = now_us;
+    congested_bps_ = st.bandwidth_bps;
+    peak_bps_ = st.bandwidth_bps;
+    next = std::min(target_, st.bandwidth_bps * 85 / 100);
+  } else if (skipped || path_queue || queue_delay_us_ > max_queue_us_ / 2) {
     // The queue is building (frames had to be skipped), so the sender is
     // not application limited and the estimate is the path's rate: back off
     // below it at once. Fewer bits per frame beat fewer frames. Below that,
