@@ -9,7 +9,16 @@
 set -euo pipefail
 bin=${1:?usage: smoke.sh <bin dir>}
 work=$(mktemp -d)
-trap 'kill $host_pid 2>/dev/null || true; rm -rf "$work"' EXIT
+host_pid=
+cleanup() {
+  status=$?
+  if (( status != 0 )); then
+    for f in "$work"/*.log; do echo "== $f"; cat "$f"; done
+  fi
+  [[ -n $host_pid ]] && kill $host_pid 2>/dev/null || true
+  rm -rf "$work"
+}
+trap cleanup EXIT
 od -An -tx1 -N32 /dev/urandom | tr -d ' \n' > "$work/key"
 port=$((20000 + RANDOM % 20000))
 
@@ -22,14 +31,16 @@ v --pair-code=4711 --seconds=2 --snapshot="$work/snap.ppm" | tee "$work/v1.log"
 grep -q 'session info "name=support_host' "$work/v1.log"
 grep -q 'cursor updates [1-9]' "$work/v1.log"
 test -s "$work/snap.ppm"
-if v --pair-code=wrong --seconds=1 --retries=0 > "$work/v2.log" 2>&1; then
+# Retries cover the moment the host takes to set up for the next viewer; a
+# refusal ends the viewer at once.
+if v --pair-code=wrong --seconds=1 --retries=20 > "$work/v2.log" 2>&1; then
   echo "a wrong pairing code was let in"; cat "$work/v2.log"; exit 1
 fi
 grep -q 'refused by the host: RDA_ERR_AUTH' "$work/v2.log"
 if grep -qE '^(connected|stream )' "$work/v2.log"; then
   echo "the refused viewer saw the session"; cat "$work/v2.log"; exit 1
 fi
-v --pair-code=4711 --seconds=1 --no-input | tee "$work/v3.log"
+v --pair-code=4711 --seconds=1 --retries=20 --no-input | tee "$work/v3.log"
 grep -q 'session info "name=support_host' "$work/v3.log"
 wait $host_pid
 cat "$work/host.log"
