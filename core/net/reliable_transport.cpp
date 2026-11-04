@@ -231,12 +231,22 @@ void ReliableTransport::Run() {
         in_flight_.erase(oldest);
         ++pto_count_;
         last_ack_time_ = now;
+        probe_due_ = true;
       }
     }
 
     // Send while the window and the pacer allow. A listening side has no
     // peer address before the peer's first packet: hold the data until then.
     const bool can_send = opt_.client || heard_peer_;
+    // The probe goes out even when the window is full. After the path slows
+    // down sharply (4 -> 0.4 Mbps), the bottleneck drops the tail of what is
+    // in flight, and nothing later is acknowledged to declare it lost; each
+    // timeout then took out one packet, far too little to open the window,
+    // so no probe was sent and the timeouts backed off to seconds (a 9 s
+    // stall in the simulation).
+    if (probe_due_ && can_send) {
+      if (SendOne(Now())) probe_due_ = false;
+    }
     for (; can_send;) {
       const uint64_t t = Now();
       if (bytes_in_flight_ + kMaxDatagram > Cwnd()) break;
@@ -553,6 +563,7 @@ void ReliableTransport::HandleAck(std::span<const uint8_t> payload, uint64_t now
   any_acked_ = true;
   last_ack_time_ = now;
   pto_count_ = 0;
+  probe_due_ = false;
 
   // Loss: three newer packets acknowledged, or sent well over an RTT before
   // something that was acknowledged.
