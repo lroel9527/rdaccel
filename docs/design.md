@@ -8,7 +8,7 @@
 | 带宽 | 静态画面低于 100 kbps；打字和滚动 300 kbps 到 1 Mbps；全屏视频按可用带宽自适应 |
 | 延迟 | 局域网端到端低于 50 ms；公网在网络 RTT 之上再加不超过 40 ms |
 | 文字 | 必须清晰；可以先给模糊预览，停下后很快补成无损 |
-| 平台 | macOS（Apple Silicon，VideoToolbox 硬件编解码）和 Linux（X11，FFmpeg） |
+| 平台 | macOS（Apple Silicon，VideoToolbox 硬件编解码）和 Linux（X11 / Wayland，FFmpeg） |
 | 编码 | 只用 HEVC，没有 H.264 回退 |
 
 实测数字见 [评测](benchmarks.md)。

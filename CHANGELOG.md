@@ -3,6 +3,14 @@
 版本号遵循语义化版本。1.0 之前，次版本号（0.x）变化时 C ABI 可能有不兼容改动；
 补丁版本（0.x.y）保持兼容。`find_package(rdaccel 0.4)` 只接受同一个 0.4.x。
 
+## 未发布
+
+- **Wayland 抓屏**：Linux 在 Wayland 会话下通过 xdg-desktop-portal 的 ScreenCast 接口和 PipeWire 采集屏幕
+  （GNOME、KDE、sway 等）。用合成器给的脏区；光标优先走 PipeWire 光标元数据（进光标通道），没有时画进画面；
+  授权在进程内保留，`RDACCEL_PORTAL_TOKEN_FILE` 可跨进程保留。依赖 `libpipewire-0.3`、`gio-2.0`，
+  CMake 选项 `RDACCEL_PIPEWIRE=AUTO|ON|OFF`。CI 在无头 sway + PipeWire + portal 里测试，并用公开 API 录一段 Wayland 屏幕再解码。
+- 光标在画面里（Wayland 不支持光标元数据时）不再通过错误回调报“cursor channel unavailable”。
+
 ## 0.4.0
 
 第三阶段：显示器选择、文字输入、输入注入，以及弱网（低到 0.4 Mbps）下的延迟。Mac（M 系列，VideoToolbox）复测：
