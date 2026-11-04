@@ -73,7 +73,7 @@ struct Received {
 }  // namespace
 
 TEST(PublicApi, VersionAndPlatform) {
-  EXPECT_STREQ(rdaccel::Version(), "0.3.0");
+  EXPECT_STREQ(rdaccel::Version(), "0.4.0");
   EXPECT_NE(std::string(rdaccel::PlatformName()), "");
   const auto a = rdaccel::NowMicros();
   EXPECT_GE(rdaccel::NowMicros(), a);
