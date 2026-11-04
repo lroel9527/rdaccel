@@ -164,7 +164,11 @@ typedef enum rda_input_kind {
    * surrogates). For what the viewer's keyboard layout or IME produced; the
    * host types it whatever its own layout. Send a string one character at
    * a time. rda_viewer_send_input() returns RDA_ERR_UNSUPPORTED when the
-   * host is older than 0.4 and cannot take it. */
+   * host is older than 0.4 and cannot take it. Viewers should send every
+   * printable character this way and keep key events for keys that type
+   * nothing (Enter, Backspace, arrows, shortcuts with Ctrl/Command): a
+   * printable key sent as a key event goes through the host's own input
+   * method (Pinyin, Kana, ...) when one is active. */
   RDA_INPUT_TEXT = 7
 } rda_input_kind;
 
@@ -232,8 +236,13 @@ RDA_API rda_status rda_injector_create(const rda_injector_config* config, rda_in
 RDA_API void rda_injector_destroy(rda_injector* injector); /* releases held keys and buttons */
 /* Thread-safe. Scroll deltas are wheel lines (y > 0 up, x > 0 right).
  * Keys pass through as physical keys; RDA_INPUT_TEXT types the character
- * whatever the host's layout. RDA_ERR_UNSUPPORTED for a key or character
- * the host cannot produce. */
+ * whatever the host's layout. macOS: while an input method is the current
+ * input source, text is typed with the ASCII-capable layout selected (the
+ * input method would otherwise take the characters as keystrokes), and the
+ * input method comes back after a second without text, at the next key
+ * event, or on destroy. That needs the main thread to run a run loop
+ * (AppKit, dispatch_main, CFRunLoopRun); without one, text goes in as is.
+ * RDA_ERR_UNSUPPORTED for a key or character the host cannot produce. */
 RDA_API rda_status rda_injector_inject(rda_injector* injector, const rda_input_event* ev);
 
 /* ---- connection --------------------------------------------------------- */
@@ -479,6 +488,8 @@ typedef struct rda_host_stats {
   uint64_t encode_us_total;
   uint64_t lossless_us_total;
   uint64_t resolution_changes; /* frames of a new size started a new stream */
+  uint64_t encoder_drops;      /* pictures a video encoder (full screen or area)
+                                  chose not to produce (the next one catches up) */
 } rda_host_stats;
 
 RDA_API void rda_host_config_default(rda_host_config* c);
@@ -539,9 +550,12 @@ typedef struct rda_frame_info {
 
 typedef struct rda_viewer_config {
   uint32_t struct_size;
-  /* Callbacks (all optional), each called with `user`, on the transport
-   * receive thread, one at a time (on_state: see below). Pointers are valid
-   * only during the call. */
+  /* Callbacks (all optional), each called with `user`. Pointers are valid
+   * only during the call. on_stream_info and on_frame run on the library's
+   * decode thread, one at a time; on_cursor and on_message on the transport
+   * receive thread, so the pointer never waits for a picture to decode:
+   * they may run while on_frame does (guard what they share). on_state: see
+   * below. */
   void* user;
   /* The host's screen size, when the stream starts. */
   void (*on_stream_info)(void* user, int32_t width, int32_t height);

@@ -20,8 +20,13 @@ constexpr uint64_t kMaxAckDelay = 5'000;
 constexpr uint64_t kPacingCredit = 15'000;  // us
 constexpr uint64_t kMinRttWindow = 10'000'000;
 constexpr uint64_t kBwWindowRounds = 10;
+// ... and at most this long: once the bottleneck queue fills, a round lasts
+// as long as the queue delay, and ten of them would keep a stale, higher
+// rate for seconds after the path slows down (4 -> 1 Mbps took ~2.7 s).
+constexpr uint64_t kBwWindowUs = 1'000'000;
 constexpr double kStartupGain = 2.885;
 constexpr double kProbeGains[8] = {1.25, 0.75, 1, 1, 1, 1, 1, 1};
+constexpr double kQueueDrainGain = 0.9;
 constexpr size_t kMaxAckRanges = 32;
 // Sending order: small interactive channels first, then surface commands,
 // application messages (possibly large: a pasted image), video last.
@@ -133,12 +138,27 @@ uint64_t ReliableTransport::Cwnd() const {
   if (!opt_.congestion_control) return UINT64_MAX;
   if (bw_ <= 0 || min_rtt_ == 0) return kInitialCwnd;
   const double gain = mode_ == Mode::kStartup ? kStartupGain : 2.0;
+  // Two round trips' worth: past startup, the minimum one plus the smoothed
+  // one. Where the round trip runs well above its minimum without a queue
+  // (threads that wake late hold packets and acknowledgements: 3x on macOS
+  // CI), a window of two minimum round trips could not keep the path busy,
+  // so its samples came in below the estimate, which shrank the window in
+  // turn. The pacing rate, not the window, keeps the queue short.
   // A few packets on top absorb delayed and stretched acknowledgements.
-  const auto bdp = static_cast<uint64_t>(gain * bw_ * static_cast<double>(min_rtt_));
+  double rtt = static_cast<double>(min_rtt_);
+  if (mode_ != Mode::kStartup) rtt = (rtt + static_cast<double>(std::max(srtt_, min_rtt_))) / 2;
+  const auto bdp = static_cast<uint64_t>(gain * bw_ * rtt);
   const uint64_t cwnd = std::max(bdp + 4 * kMaxDatagram, kMinCwnd);
   // Like the pacing rate, the window does not shrink below its initial
   // size before the path has been measured under load.
   return mode_ == Mode::kStartup ? std::max(cwnd, kInitialCwnd) : cwnd;
+}
+
+bool ReliableTransport::PathQueued() const {
+  // The smoothed round trip: single samples jitter by several ms where
+  // threads wake late (acknowledgements go out late too), which would
+  // shrink the window on a path with no queue at all.
+  return min_rtt_ > 0 && srtt_ > min_rtt_ + std::max<uint64_t>(min_rtt_ / 4, 5'000) + kMaxAckDelay;
 }
 
 double ReliableTransport::PacingRate() const {
@@ -153,7 +173,20 @@ void ReliableTransport::UpdatePacingRate() {
   switch (mode_) {
     case Mode::kStartup: gain = kStartupGain; break;
     case Mode::kDrain: gain = 1 / kStartupGain; break;
-    case Mode::kProbeBw: gain = kProbeGains[cycle_]; break;
+    case Mode::kProbeBw:
+      gain = kProbeGains[cycle_];
+      // Interactive traffic (cursor, input) shares the bottleneck queue
+      // with video, so a standing queue there is latency for everything.
+      // The max filter tends to sit a little above the true rate (acks
+      // arrive in bunches), which would keep the queue as long as the
+      // window allows. While the round trip shows a queue, send a little
+      // slower than the estimate until it drains. The probe up (one round
+      // in eight) still runs: samples can only show what we send, so a
+      // round trip inflated by late threads rather than a queue (macOS CI)
+      // would otherwise hold the rate below the estimate for good, and every
+      // late acknowledgement would ratchet the estimate further down.
+      if (cycle_ >= 2 && PathQueued()) gain = kQueueDrainGain;
+      break;
   }
   const double rate = gain * bw_;
   // During startup the rate only goes up: an early sample taken while the
@@ -177,14 +210,19 @@ void ReliableTransport::Run() {
     }
     if (ack_pending_ > 0 && now >= ack_deadline_) SendAck(now);
 
-    // Probe timeout: nothing acknowledged for too long, so resend everything
-    // in flight (the tail of a burst, or every packet, was lost).
+    // Probe timeout: nothing acknowledged for too long. Resend the oldest
+    // packet as a probe; its acknowledgement declares the rest lost (by the
+    // rules in HandleAck) if they were. Declaring everything lost here made
+    // a growing queue (the path slowing down) look like total loss: the
+    // late acknowledgements of the originals were then ignored, so neither
+    // the round trip nor the estimate moved, and the duplicates took most of
+    // the slower path (12 kB/s of 50 after 4 -> 0.4 Mbps).
     if (!in_flight_.empty()) {
       const uint64_t since = std::max(last_ack_time_, in_flight_.begin()->second.time);
       if (now >= since + (Pto() << std::min(pto_count_, 6))) {
-        auto lost = std::move(in_flight_);
-        in_flight_.clear();
-        for (const auto& [pn, p] : lost) MarkLost(pn, p);
+        auto oldest = in_flight_.begin();
+        MarkLost(oldest->first, oldest->second);
+        in_flight_.erase(oldest);
         ++pto_count_;
         last_ack_time_ = now;
       }
@@ -293,6 +331,11 @@ bool ReliableTransport::SendOne(uint64_t now) {
   // samples span the idle gap.
   p.app_limited = !opt_.congestion_control || bytes_in_flight_ + p.size + QueuedBytes() < Cwnd() ||
                   now - backlog_since_ < std::max<uint64_t>(min_rtt_, 1000);
+  // Window limited: no room for another packet. The window is two minimum
+  // round trips of the estimate, so where the round trip grows for other
+  // reasons than a queue (late threads on a loaded machine), its delivery
+  // rate measures the window, not the path.
+  p.cwnd_limited = opt_.congestion_control && bytes_in_flight_ + p.size + kMaxDatagram > Cwnd();
   in_flight_[pn] = p;
   bytes_in_flight_ += p.size;
   if (opt_.congestion_control) {
@@ -342,9 +385,49 @@ void ReliableTransport::OnRateSample(const SentPacket& p, uint64_t now) {
   first_sent_time_ = p.time;
   if (interval > 0 && (min_rtt_ == 0 || interval >= min_rtt_ / 2)) {
     const double rate = static_cast<double>(delivered_ - p.delivered) / static_cast<double>(interval);
-    if (!p.app_limited || rate >= bw_) bw_samples_.push_back({round_, rate});
+    // A sample may lower the estimate only when the path set its pace (the
+    // acknowledgements came back slower than the packets went out). When
+    // they came back as fast, the sample measured our own sending: below
+    // the estimate while draining a queue, or while threads woke late
+    // (macOS CI), and taking it would spiral the estimate down.
+    // Nor when the window, not the path, limited it: below the estimate it
+    // would shrink the window and so the next sample (a spiral to almost
+    // nothing on macOS CI, where the round trip ran at three times its
+    // minimum with no queue).
+    // While a queue stands at the bottleneck (the round trip far above its
+    // minimum), though, the path sets the pace whatever we sent, so then an
+    // application-limited sample counts too: a sender below the old rate
+    // would otherwise keep a stale estimate for seconds after a drop.
+    const bool path_paced = ack_elapsed > send_elapsed + send_elapsed / 8;
+    const bool queued = min_rtt_ > 0 && latest_rtt_ > 2 * min_rtt_ + 20'000;
+    if (((!p.app_limited || queued) && !p.cwnd_limited && path_paced) || rate >= bw_) {
+      bw_samples_.push_back({round_, now, rate});
+    }
   }
-  while (bw_samples_.size() > 1 && bw_samples_.front().round + kBwWindowRounds < round_) {
+  // A standing queue at the bottleneck (the round trip well above its
+  // minimum while we are backlogged) means we send faster than the path
+  // delivers: the path has slowed down. Samples from before the last round
+  // trip then describe the old path, so only the recent ones count.
+  // Only those from before the queue began, though: the ones taken while
+  // it stands describe the path as it is now and keep the full window.
+  // (Cutting the window to one round trip for as long as the round trip
+  // stayed high spiralled the estimate down where threads wake late: a
+  // round trip three times its minimum with no queue on macOS CI, a window
+  // too short for the probe up to count, and the pacing 10% below it.)
+  uint64_t oldest = now > kBwWindowUs ? now - kBwWindowUs : 0;
+  // The queue starts with the first round trip well above the minimum and
+  // ends only once the smoothed one is back near it: jitter that dips the
+  // single samples below the line must not start a new queue (and cut the
+  // window again) every few round trips.
+  if (mode_ != Mode::kProbeBw || min_rtt_ == 0 ||
+      srtt_ < min_rtt_ + std::max<uint64_t>(min_rtt_ / 2, 10'000)) {
+    queue_since_ = 0;
+  } else if (queue_since_ == 0 && latest_rtt_ > 2 * min_rtt_ + 20'000) {
+    queue_since_ = now;
+  }
+  if (queue_since_ != 0) oldest = std::max(oldest, queue_since_ > srtt_ ? queue_since_ - srtt_ : 0);
+  while (bw_samples_.size() > 1 && (bw_samples_.front().round + kBwWindowRounds < round_ ||
+                                    bw_samples_.front().time < oldest)) {
     bw_samples_.pop_front();
   }
   double best = 0;

@@ -29,6 +29,12 @@ void SetIntProp(VTSessionRef s, CFStringRef key, int64_t v) {
   CFRelease(n);
 }
 
+// The target rate. Only AverageBitRate: a DataRateLimits cap made the
+// encoder drop pictures that did not fit (a keyframe at 1.5 Mbps never did,
+// so no first picture for seconds). Overshoot is corrected by the host's
+// rate controller from what the encoder really produces.
+void SetRate(VTSessionRef s, int64_t bps) { SetIntProp(s, kVTCompressionPropertyKey_AverageBitRate, bps); }
+
 // ---------------------------------------------------------------------------
 // Encoder
 // ---------------------------------------------------------------------------
@@ -88,7 +94,7 @@ class VtHevcEncoder final : public codec::IHevcEncoder {
     // No periodic keyframes: the host asks for one when it needs it.
     SetIntProp(session_, kVTCompressionPropertyKey_MaxKeyFrameInterval, 1 << 30);
     SetIntProp(session_, kVTCompressionPropertyKey_ExpectedFrameRate, cfg.fps);
-    SetIntProp(session_, kVTCompressionPropertyKey_AverageBitRate, cfg.bitrate_bps);
+    SetRate(session_, cfg.bitrate_bps);
     SetProp(session_, kVTCompressionPropertyKey_ColorPrimaries, kCVImageBufferColorPrimaries_ITU_R_709_2);
     SetProp(session_, kVTCompressionPropertyKey_TransferFunction,
             kCVImageBufferTransferFunction_ITU_R_709_2);
@@ -116,9 +122,7 @@ class VtHevcEncoder final : public codec::IHevcEncoder {
   }
   const std::string& last_error() const override { return error_; }
 
-  void SetBitrate(int64_t bps) override {
-    SetIntProp(session_, kVTCompressionPropertyKey_AverageBitRate, bps);
-  }
+  void SetBitrate(int64_t bps) override { SetRate(session_, bps); }
 
   std::optional<codec::HevcAccessUnit> Encode(const tile::ImageView& img, uint64_t pts_us,
                                               bool force_keyframe) override {

@@ -276,7 +276,7 @@ struct Host::Impl {
         rate = std::make_unique<session::RateController>(
             config.bitrate_bps, std::min(config.min_bitrate_bps, config.bitrate_bps), config.max_queue_ms);
       }
-      const auto d = rate->Update(capture::MonotonicMicros(), st);
+      const auto d = rate->Update(capture::MonotonicMicros(), st, session->stats().video_bytes);
       if (d.new_target_bps > 0) session->SetBitrate(d.new_target_bps);
       {
         std::lock_guard<std::mutex> l(mu);

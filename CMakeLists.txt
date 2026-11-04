@@ -150,6 +150,7 @@ if(APPLE)
   target_link_libraries(rdaccel PRIVATE
     "-framework Foundation"
     "-framework AppKit"
+    "-framework Carbon"
     "-framework CoreGraphics"
     "-framework CoreMedia"
     "-framework CoreVideo"
@@ -218,7 +219,7 @@ if(RDACCEL_INSTALL)
   # `pkg-config --static` does not expand FFmpeg's own static dependencies:
   # rdaccel links the shared FFmpeg/X11 libraries, as the CMake package does.
   if(APPLE)
-    set(RDA_PC_LIBS_PRIVATE "-lz -lc++ -framework Foundation -framework AppKit -framework CoreGraphics -framework CoreMedia -framework CoreVideo -framework VideoToolbox -framework ScreenCaptureKit -framework IOSurface")
+    set(RDA_PC_LIBS_PRIVATE "-lz -lc++ -framework Foundation -framework AppKit -framework Carbon -framework CoreGraphics -framework CoreMedia -framework CoreVideo -framework VideoToolbox -framework ScreenCaptureKit -framework IOSurface")
   else()
     string(JOIN " " RDA_PC_LIBS_PRIVATE ${FFMPEG_LDFLAGS} ${X11_LDFLAGS} -lz -lstdc++ -lm -pthread)
   endif()

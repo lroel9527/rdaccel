@@ -101,7 +101,9 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   if (key) differ_.Reset();
   auto changes = differ_.Diff(frame.bgra, key ? std::span<const Rect>() : frame.dirty);
   const size_t n_tiles = static_cast<size_t>(differ_.cols()) * differ_.rows();
+  if (key) carry_video_tiles_.clear();  // the whole screen goes anyway
   if (refine_.size() != n_tiles) {
+    carry_video_tiles_.clear();
     refine_.assign(n_tiles, 0);
     refining_ = 0;
     born_.assign(n_tiles, 0);
@@ -528,8 +530,20 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       quality_[idx] = kExact;
     }
   }
-  // The viewer takes this frame's video tiles plus the ones still refining.
+  // The viewer takes this frame's video tiles plus the ones still refining,
+  // and those of a picture the encoder dropped.
   std::vector<tile::TileChange> region_tiles = video_tiles;
+  if (!carry_video_tiles_.empty()) {
+    std::vector<uint8_t> listed(n_tiles, 0);
+    for (const auto& t : region_tiles) listed[tile_index(t)] = 1;
+    for (const auto& t : carry_video_tiles_) {
+      if (!listed[tile_index(t)]) {
+        listed[tile_index(t)] = 1;
+        region_tiles.push_back(t);
+      }
+    }
+    carry_video_tiles_.clear();
+  }
   if (refining_ > 0) {
     for (int32_t row = 0; row < differ_.rows(); ++row) {
       for (int32_t col = 0; col < differ_.cols(); ++col) {
@@ -615,9 +629,19 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   if (key || !region_tiles.empty()) {
     au = encoder_->Encode({enc_input_.data(), width_, height_, enc_stride}, frame.capture_time_us,
                           key || sharpen);
-    if (!au) {
-      // The encoder dropped or failed this frame; make sure the next one fully
-      // refreshes the viewer.
+    if (!au && !key && encoder_->last_error().empty()) {
+      // The encoder chose to drop this picture (VideoToolbox does at low
+      // rates). Its references are intact and its input already holds this
+      // frame, so the next picture carries these changes: send the rest of
+      // the frame as usual and list its video tiles with the next picture.
+      // (A full refresh here made the next frame a keyframe, which made the
+      // encoder drop more: at 1 Mbps most frames were lost that way.)
+      carry_video_tiles_.insert(carry_video_tiles_.end(), region_tiles.begin(), region_tiles.end());
+      std::lock_guard<std::mutex> lock(mu_);
+      ++stats_.encoder_drops;
+    } else if (!au) {
+      // The encoder failed (or dropped a keyframe); make sure the next one
+      // fully refreshes the viewer.
       force_keyframe_ = true;
       differ_.Reset();
       std::fill(refine_.begin(), refine_.end(), 0);
@@ -784,7 +808,12 @@ bool HostSession::EncodeRegions(const capture::CapturedFrame& frame, const std::
     us += capture::MonotonicMicros() - t0;
     if (!au) {
       if (!re.enc->last_error().empty()) return false;
-      re.need_key = true;  // dropped: the area restarts with the next frame
+      // Dropped by the encoder (VideoToolbox does at low rates). Its
+      // references are intact and every picture codes the whole area, so the
+      // next one catches up; a dropped keyframe is asked for again. (Asking
+      // for a keyframe after every drop made the encoder drop more.)
+      std::lock_guard<std::mutex> lock(mu_);
+      ++stats_.encoder_drops;
       continue;
     }
     re.need_key = false;

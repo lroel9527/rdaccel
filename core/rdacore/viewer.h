@@ -38,15 +38,17 @@ struct ViewerHandlers {
 
   // A decoded full-screen picture. `changed` lists the areas that differ from
   // the previous picture (empty = everything), so a renderer can upload only
-  // those. The image is valid only during the call. Runs on the transport
-  // thread; copy the pixels if you draw on another thread.
+  // those. The image is valid only during the call. Runs on the library's
+  // decode thread (as does on_stream_info), so a slow decode or handler
+  // never delays the cursor; copy the pixels if you draw on another thread.
   std::function<void(const ImageView& bgra, std::span<const Rect> changed, const FrameInfo& info)>
       on_frame;
 
   // The host's mouse cursor (see cursor.h): called when the pointer moves,
   // hides or changes its image. Draw state.image with its hotspot at
   // (state.x, state.y) on top of the latest frame, e.g. with DrawCursor() or
-  // a hardware cursor. Runs on the transport thread, possibly between frames.
+  // a hardware cursor. Runs on the transport thread, possibly while on_frame
+  // is running: guard state the two share.
   std::function<void(const CursorState& state)> on_cursor;
 
   // Connection state: kConnected once the host answered the handshake,

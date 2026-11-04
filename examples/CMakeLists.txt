@@ -29,6 +29,9 @@ target_link_libraries(rdaccel_netsim PRIVATE rdaccel::rdaccel)
 # Host and viewer on two machines, over UDP or TCP.
 add_executable(rdaccel_serve serve.cpp)
 target_link_libraries(rdaccel_serve PRIVATE rdaccel::rdaccel)
+if(APPLE)
+  target_link_libraries(rdaccel_serve PRIVATE "-framework CoreFoundation")
+endif()
 add_executable(rdaccel_view view.cpp)
 target_link_libraries(rdaccel_view PRIVATE rdaccel::rdaccel)
 

@@ -72,6 +72,7 @@ class ReliableTransport final : public transport::ITransport {
     uint64_t time = 0;
     uint64_t delivered = 0, delivered_time = 0, first_sent_time = 0;
     bool app_limited = false;
+    bool cwnd_limited = false;  // the window was full when it was sent
   };
 
   void Run();  // sender / timer thread
@@ -85,6 +86,8 @@ class ReliableTransport final : public transport::ITransport {
   void OnRateSample(const SentPacket& p, uint64_t now);
   uint64_t QueuedBytes() const;
   uint64_t Cwnd() const;
+  // The round trip shows a standing queue at the bottleneck.
+  bool PathQueued() const;
   double PacingRate() const;  // bytes per microsecond
   void UpdatePacingRate();
   uint64_t Pto() const;
@@ -123,9 +126,11 @@ class ReliableTransport final : public transport::ITransport {
   uint64_t backlog_since_ = UINT64_MAX;  // when the send queue last became non-empty  // bytes per microsecond; 0 = initial
   struct BwSample {
     uint64_t round;
+    uint64_t time;  // when it was taken
     double bw;
   };
   std::deque<BwSample> bw_samples_;
+  uint64_t queue_since_ = 0;  // when the round trip last rose above 2x its minimum
   double full_bw_ = 0;
   int full_bw_rounds_ = 0;
   int cycle_ = 0;

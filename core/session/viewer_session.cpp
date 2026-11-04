@@ -13,6 +13,17 @@ ViewerSession::ViewerSession(transport::ITransport* transport,
   if (transport) Attach(transport);
 }
 
+ViewerSession::~ViewerSession() { Stop(); }
+
+void ViewerSession::Stop() {
+  {
+    std::lock_guard<std::mutex> lock(q_mu_);
+    stop_ = true;
+  }
+  q_cv_.notify_all();
+  if (worker_.joinable()) worker_.join();
+}
+
 void ViewerSession::Attach(transport::ITransport* transport, bool own_receiver) {
   transport_ = transport;
   if (!own_receiver) return;
@@ -60,18 +71,39 @@ void ViewerSession::OnReceive(transport::Channel ch, std::span<const uint8_t> by
     std::lock_guard<std::mutex> lock(mu_);
     stats_.bytes_received += bytes.size();
   }
-  proto::StreamParser* parser = nullptr;
-  if (ch == transport::Channel::kVideo) {
-    parser = &video_parser_;
-  } else if (ch == transport::Channel::kControl) {
-    parser = &control_parser_;
-  } else if (ch == transport::Channel::kCursor) {
-    parser = &cursor_parser_;
-  } else {
+  if (ch == transport::Channel::kCursor) {
+    // Right away: the pointer must not wait for a picture to decode.
+    cursor_parser_.Append(bytes);
+    while (auto m = cursor_parser_.Next()) Handle(std::move(*m));
     return;
   }
-  parser->Append(bytes);
-  while (auto m = parser->Next()) Handle(std::move(*m));
+  if (ch != transport::Channel::kVideo && ch != transport::Channel::kControl) return;
+  {
+    std::lock_guard<std::mutex> lock(q_mu_);
+    if (stop_) return;
+    queue_.emplace_back(ch, std::vector<uint8_t>(bytes.begin(), bytes.end()));
+    if (!worker_.joinable()) worker_ = std::thread([this] { DecodeLoop(); });
+  }
+  q_cv_.notify_one();
+}
+
+void ViewerSession::DecodeLoop() {
+  std::unique_lock<std::mutex> lock(q_mu_);
+  for (;;) {
+    q_cv_.wait(lock, [&] { return stop_ || !queue_.empty(); });
+    if (stop_) return;
+    auto [ch, bytes] = std::move(queue_.front());
+    queue_.pop_front();
+    lock.unlock();
+    Parse(ch, bytes);
+    lock.lock();
+  }
+}
+
+void ViewerSession::Parse(transport::Channel ch, std::span<const uint8_t> bytes) {
+  proto::StreamParser& parser = ch == transport::Channel::kVideo ? video_parser_ : control_parser_;
+  parser.Append(bytes);
+  while (auto m = parser.Next()) Handle(std::move(*m));
 }
 
 void ViewerSession::FeedVideoBytes(std::span<const uint8_t> bytes) {

@@ -24,6 +24,7 @@ namespace {
 class FakeEncoder final : public codec::IHevcEncoder {
  public:
   bool fail_next = false;
+  bool drop_next = false;  // drop the picture, as VideoToolbox may (no error)
   std::vector<bool> keyframe_requests;
 
   std::string name() const override { return "fake"; }
@@ -36,6 +37,10 @@ class FakeEncoder final : public codec::IHevcEncoder {
     if (fail_next) {
       fail_next = false;
       err_ = "simulated encoder failure";
+      return std::nullopt;
+    }
+    if (drop_next) {
+      drop_next = false;
       return std::nullopt;
     }
     codec::HevcAccessUnit au;
@@ -138,6 +143,45 @@ TEST(Session, FramesFlowAndStaticFramesAreSkipped) {
   EXPECT_EQ(hs.frames_skipped, 1u);
   EXPECT_EQ(hs.frames_encoded, 2u);
   EXPECT_EQ(hs.keyframes, 1u);
+}
+
+TEST(Session, ADroppedPictureIsCarriedByTheNextOneWithoutAKeyframe) {
+  auto [host_end, viewer_end] = transport::MakeLocalPipe();
+  auto enc = std::make_unique<FakeEncoder>();
+  FakeEncoder* raw = enc.get();
+  constexpr int W = 200, H = 120;
+  session::HostSession host(host_end.get(), std::move(enc), W, H, {.lossless = false, .refine_frames = 0});
+  session::ViewerSession viewer(nullptr, std::make_unique<FakeDecoder>());
+  std::mutex mu;
+  std::condition_variable cv;
+  std::vector<std::vector<Rect>> got;
+  viewer.SetFrameHandler([&](const tile::ImageView&, const std::vector<Rect>& regions, uint64_t, uint64_t) {
+    std::lock_guard<std::mutex> lock(mu);
+    got.push_back(regions);
+    cv.notify_all();
+  });
+  viewer.Attach(viewer_end.get());
+
+  std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 50);
+  capture::CapturedFrame f{{px.data(), W, H, W * 4}, {}, 0};
+  std::string err;
+  ASSERT_TRUE(host.OnFrame(f, &err));  // keyframe
+  px[(10 * W + 10) * 4] = 99;          // tile (0, 0)
+  raw->drop_next = true;
+  ASSERT_TRUE(host.OnFrame(f, &err)) << err;  // dropped: not an error
+  px[(70 * W + 150) * 4] = 99;                // tile (2, 1)
+  ASSERT_TRUE(host.OnFrame(f, &err));
+  EXPECT_EQ(raw->keyframe_requests, (std::vector<bool>{true, false, false}));
+  EXPECT_EQ(host.stats().keyframes, 1u);
+  EXPECT_EQ(host.stats().encoder_drops, 1u);
+
+  PipeStopper stop{host_end, viewer_end};
+  std::unique_lock<std::mutex> lock(mu);
+  ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(5), [&] { return got.size() == 3; }));
+  // The last picture shows both changes: the dropped frame's tile too.
+  ASSERT_EQ(got[2].size(), 2u);
+  EXPECT_EQ(got[2][0], (Rect{0, 0, 64, 64}));
+  EXPECT_EQ(got[2][1], (Rect{128, 64, 64, 56}));
 }
 
 TEST(Session, EncoderFailureIsReportedAndForcesKeyframe) {
@@ -347,6 +391,55 @@ TEST(Session, BusyAreaGetsItsOwnStreamAndASharpPictureWhenItStops) {
   EXPECT_TRUE(area_seen);
   // The final, sharp, picture covers the area's six tiles (merged per row).
   EXPECT_EQ(got.back(), (std::vector<Rect>{{64, 64, 192, 64}, {64, 128, 192, 64}}));
+}
+
+TEST(Session, ADroppedAreaPictureDoesNotForceAnAreaKeyframe) {
+  auto [host_end, viewer_end] = transport::MakeLocalPipe();
+  constexpr int W = 320, H = 256;
+  session::HostOptions opts;
+  opts.refine_frames = 0;
+  FakeEncoder* area = nullptr;
+  opts.region_encoder_factory = [&](const codec::EncoderConfig&, std::string*) {
+    auto e = std::make_unique<FakeEncoder>();
+    area = e.get();
+    return e;
+  };
+  opts.region_params.window = 4;
+  opts.region_params.min_busy = 2;
+  opts.region_params.confirm = 1;
+  opts.region_params.linger = 3;
+  session::HostSession host(host_end.get(), std::make_unique<FakeEncoder>(), W, H, opts);
+  std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 50);
+  capture::CapturedFrame f{{px.data(), W, H, W * 4}, {}, 0};
+  ASSERT_TRUE(host.OnFrame(f));
+  uint32_t seed = 1;
+  auto play = [&] {
+    for (int y = 64; y < 192; ++y) {
+      for (int x = 64; x < 256; ++x) {
+        seed = seed * 1664525u + 1013904223u;
+        std::memcpy(&px[(static_cast<size_t>(y) * W + x) * 4], &seed, 3);
+      }
+    }
+  };
+  for (int i = 0; i < 10 && !area; ++i) {
+    play();
+    ASSERT_TRUE(host.OnFrame(f));
+  }
+  ASSERT_NE(area, nullptr);
+  play();
+  ASSERT_TRUE(host.OnFrame(f));
+  area->drop_next = true;  // VideoToolbox may drop at low rates
+  play();
+  ASSERT_TRUE(host.OnFrame(f));
+  play();
+  ASSERT_TRUE(host.OnFrame(f));
+  // Only the area's first picture is a keyframe: a keyframe after each drop
+  // made VideoToolbox drop more.
+  ASSERT_GE(area->keyframe_requests.size(), 3u);
+  EXPECT_TRUE(area->keyframe_requests.front());
+  for (size_t i = 1; i < area->keyframe_requests.size(); ++i) EXPECT_FALSE(area->keyframe_requests[i]) << i;
+  EXPECT_EQ(host.stats().encoder_drops, 1u);
+  PipeStopper stop{host_end, viewer_end};
 }
 
 TEST(Session, ViewerAsksForAKeyframeAfterADecodeError) {

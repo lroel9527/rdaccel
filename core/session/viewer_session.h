@@ -4,11 +4,16 @@
 // decodes the video and lossless layers into one composed screen, and hands
 // that BGRA picture to the display.
 
+#include <condition_variable>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <thread>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "codec/lossless.h"
 #include "codec/video_codec.h"
@@ -25,13 +30,23 @@ using ViewerStats = rdacore::ViewerStats;
 class ViewerSession {
  public:
   // `on_frame` receives the composed screen after each frame plus the regions
-  // that changed (empty = whole screen) on the transport thread.
+  // that changed (empty = whole screen). Bytes from a transport are decoded
+  // on the session's own thread, so a slow decode (or a slow `on_frame`)
+  // holds up neither the transport nor the cursor: cursor messages are
+  // handled at once on the receiving thread.
   using FrameFn = std::function<void(const tile::ImageView& bgra, const std::vector<Rect>& regions,
                                      uint64_t frame_id, uint64_t capture_time_us)>;
   using HelloFn = std::function<void(const proto::Hello&)>;
 
   // `transport` may be null (file playback, or attach later with Attach()).
   ViewerSession(transport::ITransport* transport, std::unique_ptr<codec::IHevcDecoder> decoder);
+  ~ViewerSession();
+  ViewerSession(const ViewerSession&) = delete;
+  ViewerSession& operator=(const ViewerSession&) = delete;
+  // Stops the decode thread (bytes still queued are dropped, later ones
+  // ignored); call it before the transport goes away, as decoding can send
+  // keyframe requests.
+  void Stop();
 
   // Starts receiving from `transport`. Lets callers install handlers first so
   // the first frames are not lost. With `own_receiver` false the session only
@@ -59,6 +74,16 @@ class ViewerSession {
  private:
   void Handle(proto::Message&& m);
   void EnsureScreen(int32_t w, int32_t h);
+  void DecodeLoop();
+  void Parse(transport::Channel ch, std::span<const uint8_t> bytes);
+
+  // Video and control bytes waiting for the decode thread (control goes the
+  // same way so that a Hello stays ordered with the frames around it).
+  std::mutex q_mu_;
+  std::condition_variable q_cv_;
+  std::deque<std::pair<transport::Channel, std::vector<uint8_t>>> queue_;
+  bool stop_ = false;
+  std::thread worker_;  // started by the first queued bytes
 
   transport::ITransport* transport_ = nullptr;
   std::unique_ptr<codec::IHevcDecoder> decoder_;
@@ -91,7 +116,8 @@ class ViewerSession {
   std::vector<uint8_t> scratch_;
 
   // The composed screen: video regions and lossless tiles are applied to it
-  // in frame order. Only touched on the receive thread.
+  // in frame order. Only touched on the decode thread (or the caller's,
+  // for FeedVideoBytes).
   int32_t width_ = 0, height_ = 0;
   std::vector<uint8_t> screen_;
   bool have_keyframe_ = false;  // screen_ holds a whole picture

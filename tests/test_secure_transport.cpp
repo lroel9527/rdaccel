@@ -98,11 +98,11 @@ TEST(SecureTransport, CipherKnownAnswer) {
 }
 
 TEST(SecureTransport, RoundTripOnEveryChannel) {
+  Sink hs, vs;  // before the transports, whose threads deliver into it
   auto [a, b] = CreateLocalPipe();
   const auto k = Key(1);
   SecureTransport host(std::move(a), true, k);
   SecureTransport viewer(std::move(b), false, k);
-  Sink hs, vs;
   host.SetErrorHandler(hs.OnError());
   viewer.SetErrorHandler(vs.OnError());
   // Sent before the keys exist: held, then delivered in order.
@@ -128,6 +128,7 @@ TEST(SecureTransport, RoundTripOnEveryChannel) {
 }
 
 TEST(SecureTransport, CiphertextDoesNotContainThePlaintext) {
+  Sink hs, vs;  // before the transports, whose threads deliver into it
   auto [a, b] = CreateLocalPipe();
   auto tap = std::make_unique<Tap>(std::move(a));
   std::mutex mu;
@@ -139,7 +140,6 @@ TEST(SecureTransport, CiphertextDoesNotContainThePlaintext) {
   const auto k = Key(2);
   SecureTransport host(std::move(tap), true, k);
   SecureTransport viewer(std::move(b), false, k);
-  Sink hs, vs;
   host.SetReceiver(hs.Fn());
   viewer.SetReceiver(vs.Fn());
   const std::string secret = "the clipboard holds a password";
@@ -150,10 +150,10 @@ TEST(SecureTransport, CiphertextDoesNotContainThePlaintext) {
 }
 
 TEST(SecureTransport, WrongKeyIsRejected) {
+  Sink hs, vs;  // before the transports, whose threads deliver into it
   auto [a, b] = CreateLocalPipe();
   SecureTransport host(std::move(a), true, Key(3));
   SecureTransport viewer(std::move(b), false, Key(4));
-  Sink hs, vs;
   host.SetErrorHandler(hs.OnError());
   viewer.SetErrorHandler(vs.OnError());
   host.SetReceiver(hs.Fn());
@@ -167,9 +167,9 @@ TEST(SecureTransport, WrongKeyIsRejected) {
 }
 
 TEST(SecureTransport, PlaintextPeerIsRefused) {
+  Sink hs;  // before the transports, whose threads deliver into it
   auto [a, b] = CreateLocalPipe();
   SecureTransport host(std::move(a), true, Key(5));
-  Sink hs;
   host.SetErrorHandler(hs.OnError());
   host.SetReceiver(hs.Fn());
   b->SetReceiver([](Channel, std::span<const uint8_t>) {});
@@ -182,13 +182,13 @@ TEST(SecureTransport, PlaintextPeerIsRefused) {
 
 TEST(SecureTransport, TamperingAndReplayAreDetected) {
   for (int mode = 0; mode < 2; ++mode) {
+    Sink hs, vs;  // before the transports, whose threads deliver into it
     auto [a, b] = CreateLocalPipe();
     auto tap = std::make_unique<Tap>(std::move(a));
     Tap* t = tap.get();
     const auto k = Key(6);
     SecureTransport host(std::move(tap), true, k);
     SecureTransport viewer(std::move(b), false, k);
-    Sink hs, vs;
     viewer.SetErrorHandler(vs.OnError());
     host.SetReceiver(hs.Fn());
     viewer.SetReceiver(vs.Fn());

@@ -872,6 +872,7 @@ rda_status rda_host_get_stats(const rda_host* h, rda_host_stats* out) {
   c.encode_us_total = s.encode_us_total;
   c.lossless_us_total = s.lossless_us_total;
   c.resolution_changes = s.resolution_changes;
+  c.encoder_drops = s.encoder_drops;
   if (!WriteStruct(c, out)) return Fail(RDA_ERR_INVALID_ARG, "out needs struct_size");
   return RDA_OK;
   RDA_GUARD_END
@@ -891,9 +892,10 @@ size_t rda_host_encoder_name(const rda_host* h, char* buf, size_t buf_size) {
 
 struct rda_viewer {
   rda_viewer_config config;
-  std::unique_ptr<rdacore::Viewer> viewer;
-  // Callback scratch, only touched on the transport thread.
+  // Callback scratch, only touched on the decode thread. Declared before
+  // `viewer`, so it outlives the thread that uses it.
   std::vector<rda_rect> changed;
+  std::unique_ptr<rdacore::Viewer> viewer;
 };
 
 extern "C" {
