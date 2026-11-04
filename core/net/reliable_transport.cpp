@@ -129,7 +129,7 @@ void ReliableTransport::SetReceiver(ReceiveFn fn) {
 
 bool ReliableTransport::GetStats(TransportStats* out) const {
   std::lock_guard<std::mutex> lock(mu_);
-  out->bandwidth_bps = static_cast<int64_t>(bw_ * 8e6);
+  out->bandwidth_bps = static_cast<int64_t>(std::min(bw_ * 8e6, 1e15));
   out->rtt_us = static_cast<uint32_t>(srtt_);
   out->queued_bytes = QueuedBytes();
   out->bytes_in_flight = bytes_in_flight_;
@@ -171,7 +171,9 @@ uint64_t ReliableTransport::Cwnd() const {
   const uint64_t srtt = queue_since_ != 0 ? std::min(srtt_, queue_srtt_) : srtt_;
   double rtt = static_cast<double>(min_rtt_);
   if (mode_ != Mode::kStartup) rtt = (rtt + static_cast<double>(std::max(srtt, min_rtt_))) / 2;
-  const auto bdp = static_cast<uint64_t>(gain * bw_ * rtt);
+  // Capped: a nonsensical estimate (bogus acknowledgements) must not
+  // overflow the conversion.
+  const auto bdp = static_cast<uint64_t>(std::min(gain * bw_ * rtt, 1e15));
   const uint64_t cwnd = std::max(bdp + 4 * kMaxDatagram, kMinCwnd);
   // Like the pacing rate, the window does not shrink below its initial
   // size before the path has been measured under load.
@@ -619,10 +621,14 @@ void ReliableTransport::SendAck(uint64_t now) {
 
 void ReliableTransport::OnDatagram(std::span<const uint8_t> d) {
   if (d.empty()) return;
-  const uint64_t now = Now();
   std::vector<std::pair<int, std::vector<uint8_t>>> deliver;
   {
     std::lock_guard<std::mutex> lock(mu_);
+    // Read under the lock: a packet the sender thread sent while this one
+    // waited for it would otherwise be newer than `now`, and acknowledging
+    // it (only a broken or hostile peer can) would make the round trip
+    // negative, wrapping to ~2^64 us.
+    const uint64_t now = Now();
     if (closed_) return;
     if (!heard_peer_ && !opt_.client) {
       // Only the start of a connection may make its sender the peer: the
