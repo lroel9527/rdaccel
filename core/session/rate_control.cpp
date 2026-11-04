@@ -36,9 +36,13 @@ RateController::Decision RateController::Update(uint64_t now_us, const Transport
   } else {
     // While the queue stays short, the estimate only shows what we sent
     // (a lower bound of the path), so grow gradually instead of capping at
-    // it; a building queue will stop the growth.
+    // it; a building queue will stop the growth. Twice the estimate stays
+    // the ceiling, though, also on the way down: a target left at 8 Mbps
+    // after the path fell to 1 (the encoder sending less than either) would
+    // let the next busy scene overshoot the path eightfold. Down by 10% a
+    // step at most, as the first estimates of a session are still low.
     next = std::min(target_ + target_ / 4, std::max(st.bandwidth_bps * 2, min_bps_));
-    next = std::max(next, target_);
+    next = std::max(next, target_ * 9 / 10);
   }
   target_ = std::clamp(next, min_bps_, max_bps_);
 

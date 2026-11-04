@@ -425,7 +425,16 @@ void ReliableTransport::OnRateSample(const SentPacket& p, uint64_t now) {
   } else if (queue_since_ == 0 && latest_rtt_ > 2 * min_rtt_ + 20'000) {
     queue_since_ = now;
   }
-  if (queue_since_ != 0) oldest = std::max(oldest, queue_since_ > srtt_ ? queue_since_ - srtt_ : 0);
+  // Samples from before the queue describe the old path. For its first two
+  // round trips, only the last round trip counts (the first samples it
+  // takes span the change and still show part of the old rate); after that
+  // the window keeps everything since the queue began, so a round trip
+  // that stays high with no queue at all (threads that wake late) cannot
+  // keep cutting it.
+  if (queue_since_ != 0) {
+    const uint64_t recent = now > srtt_ ? now - srtt_ : 0;
+    oldest = std::max(oldest, now - queue_since_ < 2 * srtt_ ? std::max(recent, queue_since_ - std::min(queue_since_, srtt_)) : queue_since_);
+  }
   while (bw_samples_.size() > 1 && (bw_samples_.front().round + kBwWindowRounds < round_ ||
                                     bw_samples_.front().time < oldest)) {
     bw_samples_.pop_front();

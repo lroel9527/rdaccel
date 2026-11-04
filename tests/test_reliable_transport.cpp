@@ -144,11 +144,12 @@ TEST(RateController, SkipsFramesAndBacksOffWhenTheQueueBuilds) {
   TransportStats st;
   st.bandwidth_bps = 2'000'000;
   // Short queue: no skipping. The estimate only bounds what was sent so
-  // far, so it does not lower the target.
+  // far, so the target may stay above it, but not above twice it: it comes
+  // down by 10% a step.
   st.queued_bytes = 1'000;
   auto d = rc.Update(0, st);
   EXPECT_FALSE(d.skip_frame);
-  EXPECT_EQ(rc.target_bps(), 8'000'000);
+  EXPECT_EQ(rc.target_bps(), 7'200'000);
   // 100 ms of queue at 2 Mbps: skip, and drop to 85% of the estimate.
   st.queued_bytes = 25'000;
   d = rc.Update(300'000, st);
@@ -164,6 +165,21 @@ TEST(RateController, SkipsFramesAndBacksOffWhenTheQueueBuilds) {
   EXPECT_EQ(rc.target_bps(), 2'125'000);
   for (uint64_t t = 1'200'000; t < 5'000'000; t += 300'000) rc.Update(t, st);
   EXPECT_EQ(rc.target_bps(), 4'000'000);
+}
+
+TEST(RateController, TargetComesDownToTwiceTheEstimate) {
+  // The path fell from 4 to 1 Mbps while the encoder sent less than either:
+  // no queue, so no back-off, but the target must not stay at 8 Mbps (the
+  // Mac kept it there for 7 s), or the next busy scene floods the path.
+  session::RateController rc(8'000'000, 300'000, 50);
+  TransportStats st;
+  st.bandwidth_bps = 4'000'000;
+  st.rtt_us = 40'000;
+  rc.Update(0, st);
+  EXPECT_EQ(rc.target_bps(), 8'000'000);
+  st.bandwidth_bps = 1'000'000;
+  for (uint64_t t = 250'000; t <= 4'000'000; t += 250'000) rc.Update(t, st);
+  EXPECT_EQ(rc.target_bps(), 2'000'000);
 }
 
 TEST(RateController, BacksOffWhenTheRoundTripGrows) {
