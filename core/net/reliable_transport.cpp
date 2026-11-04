@@ -438,13 +438,21 @@ void ReliableTransport::OnRateSample(const SentPacket& p, uint64_t now) {
   // the window keeps everything since the queue began, so a round trip
   // that stays high with no queue at all (threads that wake late) cannot
   // keep cutting it.
-  if (queue_since_ != 0) {
-    const uint64_t recent = now > srtt_ ? now - srtt_ : 0;
-    oldest = std::max(oldest, now - queue_since_ < 2 * srtt_ ? std::max(recent, queue_since_ - std::min(queue_since_, srtt_)) : queue_since_);
-  }
   while (bw_samples_.size() > 1 && (bw_samples_.front().round + kBwWindowRounds < round_ ||
                                     bw_samples_.front().time < oldest)) {
     bw_samples_.pop_front();
+  }
+  // The cut for a queue keeps the last few samples, though, however old:
+  // where a thread wakes late (macOS CI) a round trip can pass with no
+  // acknowledgement at all, and the one sample left, taken across the
+  // stall, set the estimate to a fraction of the path (134 kbps on 1 Mbps).
+  if (queue_since_ != 0) {
+    const uint64_t recent = now > srtt_ ? now - srtt_ : 0;
+    const uint64_t cut = now - queue_since_ < 2 * srtt_
+                             ? std::max(recent, queue_since_ - std::min(queue_since_, srtt_))
+                             : queue_since_;
+    constexpr size_t kKeep = 4;
+    while (bw_samples_.size() > kKeep && bw_samples_.front().time < cut) bw_samples_.pop_front();
   }
   double best = 0;
   for (const auto& s : bw_samples_) best = std::max(best, s.bw);
