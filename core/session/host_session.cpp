@@ -21,7 +21,25 @@ std::vector<Rect> TilesToRegions(const std::vector<tile::TileChange>& changes) {
     }
     out.push_back(c.rect);
   }
-  return out;
+  // Then vertical runs of rects with the same columns: tiles split into
+  // pixel rows (the part of a tile a scroll or a dragged window uncovered)
+  // otherwise list one rect per row, and a frame with many of them sent
+  // several kB of region list (7 kB in one frame on the Mac at 0.4 Mbps).
+  std::sort(out.begin(), out.end(), [](const Rect& a, const Rect& b) {
+    return a.x != b.x ? a.x < b.x : a.w != b.w ? a.w < b.w : a.y < b.y;
+  });
+  std::vector<Rect> merged;
+  for (const Rect& r : out) {
+    if (!merged.empty()) {
+      Rect& last = merged.back();
+      if (last.x == r.x && last.w == r.w && last.y + last.h == r.y) {
+        last.h += r.h;
+        continue;
+      }
+    }
+    merged.push_back(r);
+  }
+  return merged;
 }
 
 HostSession::HostSession(transport::ITransport* transport,

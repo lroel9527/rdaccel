@@ -281,9 +281,20 @@ TEST(Session, TilesToRegionsMergesHorizontalRuns) {
   changes.push_back({0, 1, 1, 0, {0, 64, 64, 64}});
   auto regions = session::TilesToRegions(changes);
   ASSERT_EQ(regions.size(), 3u);
-  EXPECT_EQ(regions[0], (Rect{0, 0, 192, 64}));
-  EXPECT_EQ(regions[1], (Rect{320, 0, 64, 64}));
-  EXPECT_EQ(regions[2], (Rect{0, 64, 64, 64}));
+  EXPECT_EQ(regions[0], (Rect{0, 64, 64, 64}));
+  EXPECT_EQ(regions[1], (Rect{0, 0, 192, 64}));
+  EXPECT_EQ(regions[2], (Rect{320, 0, 64, 64}));
+}
+
+TEST(Session, TilesToRegionsMergesRowsOfATileAndColumnsOfTiles) {
+  // A tile split into pixel rows (what a dragged window uncovered), and the
+  // same columns in the tile below: one rect.
+  std::vector<tile::TileChange> changes;
+  for (int y = 0; y < 64; ++y) changes.push_back({1, 0, 1, 0, {70, y, 30, 1}});
+  changes.push_back({1, 1, 1, 0, {70, 64, 30, 64}});
+  auto regions = session::TilesToRegions(changes);
+  ASSERT_EQ(regions.size(), 1u);
+  EXPECT_EQ(regions[0], (Rect{70, 0, 30, 128}));
 }
 
 TEST(Synthetic, IncrementalRenderMatchesFullRender) {
@@ -390,7 +401,7 @@ TEST(Session, BusyAreaGetsItsOwnStreamAndASharpPictureWhenItStops) {
   }
   EXPECT_TRUE(area_seen);
   // The final, sharp, picture covers the area's six tiles (merged per row).
-  EXPECT_EQ(got.back(), (std::vector<Rect>{{64, 64, 192, 64}, {64, 128, 192, 64}}));
+  EXPECT_EQ(got.back(), (std::vector<Rect>{{64, 64, 192, 128}}));
 }
 
 TEST(Session, ADroppedAreaPictureDoesNotForceAnAreaKeyframe) {
