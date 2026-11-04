@@ -371,6 +371,24 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   if (!key && options_.detect_moves) {
     moves = tile::DetectMoves({prev_.data(), width_, height_, enc_stride}, frame.bgra, changes,
                               moved, residual);
+    // Copies are cheap one at a time, but content that moves while it
+    // changes (a video panning over a detailed picture) matches in a
+    // thousand strips, each a copy plus slivers to code: 6-8 kB a frame
+    // where video takes ~1 kB, which at 0.4 Mbps backed frames up for most
+    // of a second. Such matches come in many pieces per tile (a scroll
+    // brings fewer copies than tiles, a dragged window up to ~3 per tile);
+    // when they do and their copies alone would take more than half of what
+    // the lossless budget holds, the frame goes without them.
+    constexpr double kBytesPerMove = 6;
+    size_t moved_count = 0;
+    for (bool b : moved) moved_count += b;
+    const double hold = static_cast<double>(options_.bitrate_bps) / 8.0 * kLosslessBurstFrames * frame_us / 1e6;
+    if (moves.size() > 64 && moves.size() > 6 * moved_count && options_.bitrate_bps > 0 &&
+        kBytesPerMove * static_cast<double>(moves.size()) > 0.5 * hold) {
+      moves.clear();
+      moved.assign(moved.size(), false);
+      for (auto& r : residual) r.clear();
+    }
     // The encoder's picture is left as it was under moved tiles: the viewer
     // does not take video there, and unchanged pixels cost the encoder
     // nothing, while moved ones would make it code the motion.
@@ -452,6 +470,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       const bool progressive_turn = !progressive_now.empty() && progressive_now[tile_index(c)];
       const size_t n = t.colors.size();
       const int bits = n <= 1 ? 0 : n <= 2 ? 1 : n <= 4 ? 2 : n <= 16 ? 4 : 8;
+      // Plus the rect and the palette size (a plain sliver costs that alone).
       const double raw = 3.0 * static_cast<double>(n) + static_cast<double>(r.w) * r.h * bits / 8.0;
       if (!key && !progressive_turn && n > 1 && options_.bitrate_bps > 0 &&
           lossless_spent + raw * kLosslessRawShare > lossless_budget) {
