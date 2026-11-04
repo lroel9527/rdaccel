@@ -1,0 +1,13 @@
+--- a/src/screencast/screencast.c
++++ b/src/screencast/screencast.c
+@@ -196,9 +196,7 @@
+ 	wl_display_dispatch(cast->ctx->state->wl_display);
+ 	wl_display_roundtrip(cast->ctx->state->wl_display);
+ 
+-	if (cast->screencopy_frame_info[WL_SHM].format == DRM_FORMAT_INVALID ||
+-			(cast->ctx->state->screencast_version >= 3 &&
+-			 cast->screencopy_frame_info[DMABUF].format == DRM_FORMAT_INVALID)) {
++	if (cast->screencopy_frame_info[WL_SHM].format == DRM_FORMAT_INVALID) {
+ 		logprint(INFO, "wlroots: unable to receive a valid format from wlr_screencopy");
+ 		return -1;
+ 	}

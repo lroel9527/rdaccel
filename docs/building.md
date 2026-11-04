@@ -22,10 +22,13 @@ open build/bin/rdaccel_loopback.app --args --fps=60 --bitrate=8000000
 
 ```bash
 sudo apt-get install cmake g++ libavcodec-dev libavutil-dev libswscale-dev \
-    libx11-dev libxext-dev libxfixes-dev libxrandr-dev libxtst-dev zlib1g-dev
+    libx11-dev libxext-dev libxfixes-dev libxrandr-dev libxtst-dev zlib1g-dev \
+    libpipewire-0.3-dev libglib2.0-dev
 cmake -S . -B build && cmake --build build -j
 ctest --test-dir build
 ```
+
+`libpipewire-0.3-dev libglib2.0-dev` 用于 Wayland 抓屏，找到就自动编进去（`-DRDACCEL_PIPEWIRE=ON` 强制要求，`OFF` 关掉）。
 
 编码器按 NVENC、x265 的顺序自动选择；`encoder = "hevc_vaapi"` 可以用 Intel / AMD 显卡（实验性，设备用 `RDACCEL_VAAPI_DEVICE` 指定）。没有显示器时可以用 Xvfb：
 
@@ -33,6 +36,22 @@ ctest --test-dir build
 Xvfb :99 -screen 0 1280x720x24 &
 DISPLAY=:99 ./build/bin/rdaccel_record --source=screen --out=x.rdstream
 ```
+
+### Wayland
+
+Wayland 桌面（GNOME、KDE、sway、Hyprland 等）只能通过 xdg-desktop-portal 的 ScreenCast 接口抓屏，画面走 PipeWire。
+`XDG_SESSION_TYPE=wayland`（或者有 `WAYLAND_DISPLAY`、没有 `DISPLAY`）时自动走这条路；`RDACCEL_CAPTURE=x11` / `=pipewire` 可以强制指定。
+
+- 共享哪块屏由系统弹窗决定，`display_index` 只能是 0；`rda_list_displays()` 在 Wayland 下只返回一项，共享过一次之后才有尺寸。
+- 多数桌面第一次会弹窗让用户确认。同一进程里再次开始采集不再弹窗；设置 `RDACCEL_PORTAL_TOKEN_FILE=<文件>` 后，授权跨进程保留（portal 版本 4 起）。
+  `RDACCEL_PORTAL_TIMEOUT_S` 是等用户确认的秒数，默认 120。
+- 屏幕有变化才有新帧，带合成器给的脏区；静止画面由库自己补发关键帧，和 macOS 一样。
+- 光标：portal 支持“光标元数据”（GNOME、KDE）时走光标通道；不支持时（wlroots 系）直接画进画面。
+- 输入注入在 Wayland 下还不支持（XTest 只能注入到 XWayland 窗口）。
+
+无头测试环境：`tools/wayland_headless.sh 命令…` 起一个 sway（软件渲染）+ PipeWire + xdg-desktop-portal-wlr 的桌面再运行命令，
+需要 `sway pipewire wireplumber xdg-desktop-portal xdg-desktop-portal-wlr dbus-daemon`。Ubuntu 24.04 的 xdg-desktop-portal-wlr
+在没有显卡时不肯共享屏幕，`tools/build_test_xdpw.sh` 编一个去掉这条限制的版本，用 `RDA_WL_XDPW=<路径>` 指定（CI 就这样跑）。
 
 ## 示例和工具
 

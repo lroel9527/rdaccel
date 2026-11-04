@@ -6,6 +6,9 @@
 
 #include "platform.h"
 #include "linux/displays_x11.h"
+#ifdef RDACCEL_HAVE_PIPEWIRE
+#include "linux/capture_pipewire.h"
+#endif
 
 // After our headers: Xlib defines macros such as None and Status.
 #include <X11/Xlib.h>
@@ -81,6 +84,11 @@ class XFixesCursorSource final : public capture::ICursorSource {
 }  // namespace
 
 std::unique_ptr<capture::ICursorSource> CreateCursorSource(int32_t display_index, std::string* error) {
+#ifdef RDACCEL_HAVE_PIPEWIRE
+  // On Wayland the cursor comes with the screen-cast stream (XFixes would see
+  // only XWayland windows).
+  if (UseWaylandCapture()) return CreatePipeWireCursorSource(error);
+#endif
   Display* dpy = XOpenDisplay(nullptr);
   if (!dpy) {
     if (error) *error = "cannot open X display";

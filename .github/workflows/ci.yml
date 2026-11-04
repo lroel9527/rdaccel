@@ -13,10 +13,11 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxext-dev libxfixes-dev libxrandr-dev libxtst-dev xvfb zlib1g-dev
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxext-dev libxfixes-dev libxrandr-dev libxtst-dev xvfb zlib1g-dev \
+            libpipewire-0.3-dev libglib2.0-dev
       - name: Build (ASan + UBSan)
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined" -DCMAKE_C_FLAGS="-fsanitize=address,undefined"
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DRDACCEL_PIPEWIRE=ON -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined" -DCMAKE_C_FLAGS="-fsanitize=address,undefined"
           cmake --build build -j4
       - name: Test
         run: ctest --test-dir build --output-on-failure
@@ -28,6 +29,41 @@ jobs:
           xvfb-run -a -s "-screen 0 1280x720x24" ./build/bin/rdaccel_platform_tests \
             --gtest_filter='Platform*:CApi.ListDisplays*:CApi.Injector*' 2>&1 | tee x11.log
           if grep -q SKIPPED x11.log; then echo "X11 tests skipped under Xvfb"; exit 1; fi
+      - name: Headless Wayland desktop (sway + PipeWire + xdg-desktop-portal-wlr)
+        run: |
+          sudo sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends sway pipewire wireplumber xdg-desktop-portal \
+            xdg-desktop-portal-wlr dbus-daemon meson ninja-build libinih-dev libgbm-dev libdrm-dev \
+            libsystemd-dev libwayland-dev wayland-protocols
+          tools/build_test_xdpw.sh "$RUNNER_TEMP/xdpw"
+      - name: Wayland capture through the portal and PipeWire
+        env:
+          RDA_WL_XDPW: ${{ runner.temp }}/xdpw/xdg-desktop-portal-wlr
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/tests/lsan.supp
+        run: |
+          set -o pipefail
+          # The PipeWire reader against a fake screen; then each portal test in
+          # a desktop of its own (see tests/test_platform_pipewire.cpp).
+          for f in 'PipeWireFormat*:PipeWire.*' PipeWirePortal.CapturesTheWaylandScreen \
+                   PipeWirePortal.RejectsOtherDisplays PipeWirePortal.ScaledCapture; do
+            tools/wayland_headless.sh ./build/bin/rdaccel_platform_tests --gtest_filter="$f" 2>&1 | tee -a wl.log
+          done
+          if grep -q SKIPPED wl.log; then echo "Wayland tests skipped"; exit 1; fi
+      - name: Record the Wayland screen through the public API, then decode it
+        env:
+          RDA_WL_XDPW: ${{ runner.temp }}/xdpw/xdg-desktop-portal-wlr
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          cat > "$RUNNER_TEMP/wl_record.sh" <<'EOF'
+          set -e
+          # Something changing on screen: wlroots sends frames only then.
+          ( i=0; while true; do i=$((i+1)); swaymsg -q output HEADLESS-1 bg "#$(printf '%02x%02x%02x' $((i*7%256)) $((i*13%256)) $((i*29%256)))" solid_color; sleep 0.03; done ) &
+          ./build/bin/rdaccel_record --source=screen --out=wayland.rdstream --frames=30 --fps=30 --bitrate=2000000
+          kill $!
+          EOF
+          tools/wayland_headless.sh sh "$RUNNER_TEMP/wl_record.sh"
+          ./build/bin/rdaccel_play wayland.rdstream
       - name: Install, then build examples/minimal against the installed package
         env:
           ASAN_OPTIONS: detect_leaks=0
