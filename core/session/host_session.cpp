@@ -4,6 +4,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <set>
+#include <tuple>
 
 namespace rdacore::session {
 
@@ -383,6 +385,13 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     size_t moved_count = 0;
     for (bool b : moved) moved_count += b;
     const double hold = static_cast<double>(options_.bitrate_bps) / 8.0 * kLosslessBurstFrames * frame_us / 1e6;
+    if (std::getenv("RDACCEL_FRAME_PARTS") && !moves.empty()) {
+      double area = 0;
+      for (const auto& m : moves) area += static_cast<double>(m.dst.w) * m.dst.h;
+      std::fprintf(stderr, "moves t_us %llu count %zu moved_tiles %zu mean_area %.0f hold %.0f\n",
+                   static_cast<unsigned long long>(frame.capture_time_us), moves.size(), moved_count,
+                   area / static_cast<double>(moves.size()), hold);
+    }
     if (moves.size() > 64 && moves.size() > 6 * moved_count && options_.bitrate_bps > 0 &&
         kBytesPerMove * static_cast<double>(moves.size()) > 0.5 * hold) {
       moves.clear();
@@ -643,6 +652,23 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   }
   // The viewer takes this frame's video tiles plus the ones still refining,
   // and those of a picture the encoder dropped.
+  std::vector<tile::TileChange> region_tiles = video_tiles;
+  if (!carry_video_tiles_.empty()) {
+    // Every part of a dropped picture is listed again (a tile may have had
+    // several, and this frame may code another part of it), once, unless
+    // this frame lists its tile whole anyway.
+    std::vector<uint8_t> whole(n_tiles, 0);
+    std::set<std::tuple<int32_t, int32_t, int32_t, int32_t>> listed;
+    for (const auto& t : region_tiles) {
+      listed.insert({t.rect.x, t.rect.y, t.rect.w, t.rect.h});
+      if (t.rect.w == kTileSize && t.rect.h == kTileSize) whole[tile_index(t)] = 1;
+    }
+    for (const auto& t : carry_video_tiles_) {
+      if (whole[tile_index(t)]) continue;
+      if (listed.insert({t.rect.x, t.rect.y, t.rect.w, t.rect.h}).second) region_tiles.push_back(t);
+    }
+    carry_video_tiles_.clear();
+  }
   // A tile left in many video parts (the strips and rows a scroll leaves
   // between moved ones) is listed as one rect around them: each part costs
   // the region list ~6 bytes, and on a busy scroll at 0.4 Mbps frames
@@ -653,7 +679,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   {
     constexpr size_t kMaxPartsPerTile = 4;
     std::unordered_map<size_t, std::pair<size_t, Rect>> per_tile;  // parts, bounds
-    for (const auto& t : video_tiles) {
+    for (const auto& t : region_tiles) {
       auto [it, fresh] = per_tile.try_emplace(tile_index(t), 0, t.rect);
       ++it->second.first;
       if (!fresh) {
@@ -672,9 +698,9 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     }
     if (coarsened) {
       std::vector<tile::TileChange> kept;
-      kept.reserve(video_tiles.size());
+      kept.reserve(region_tiles.size());
       std::vector<uint8_t> done(n_tiles, 0);
-      for (const auto& t : video_tiles) {
+      for (const auto& t : region_tiles) {
         const size_t idx = tile_index(t);
         const auto& pb = per_tile[idx];
         if (pb.first <= kMaxPartsPerTile) {
@@ -693,20 +719,8 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
         kept.push_back(whole);
         quality_[idx] = kRough;
       }
-      video_tiles = std::move(kept);
+      region_tiles = std::move(kept);
     }
-  }
-  std::vector<tile::TileChange> region_tiles = video_tiles;
-  if (!carry_video_tiles_.empty()) {
-    std::vector<uint8_t> listed(n_tiles, 0);
-    for (const auto& t : region_tiles) listed[tile_index(t)] = 1;
-    for (const auto& t : carry_video_tiles_) {
-      if (!listed[tile_index(t)]) {
-        listed[tile_index(t)] = 1;
-        region_tiles.push_back(t);
-      }
-    }
-    carry_video_tiles_.clear();
   }
   if (refining_ > 0) {
     for (int32_t row = 0; row < differ_.rows(); ++row) {
