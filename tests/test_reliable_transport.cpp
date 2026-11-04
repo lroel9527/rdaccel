@@ -200,6 +200,34 @@ TEST(RateController, BacksOffWhenTheRoundTripGrows) {
   EXPECT_EQ(d.new_target_bps, 3'400'000);
 }
 
+TEST(RateController, SkipsEveryOtherFrameOnANetworkQueueAtTheFloor) {
+  // At its floor the target can go no lower, yet the encoder may send more
+  // than the path takes (VideoToolbox at 300 kbps over a 400 kbps link): a
+  // queue stands inside the network with the local one empty. Every other
+  // frame is skipped then, and only then.
+  session::RateController rc(8'000'000, 300'000, 50);
+  TransportStats st;
+  st.bandwidth_bps = 400'000;
+  st.queued_bytes = 2'000;  // 40 ms: down to the floor
+  st.rtt_us = 40'000;
+  uint64_t t = 0;
+  for (int i = 0; i < 100 && rc.target_bps() > 300'000; ++i) rc.Update(t += 300'000, st);
+  ASSERT_EQ(rc.target_bps(), 300'000);
+  st.queued_bytes = 0;
+  int skipped = 0;
+  st.rtt_us = 240'000;
+  for (int i = 0; i < 10; ++i) skipped += rc.Update(t += 33'000, st).skip_frame;
+  EXPECT_EQ(skipped, 5);
+  EXPECT_EQ(rc.target_bps(), 300'000);
+  // Above the floor, the target comes down instead.
+  session::RateController above(8'000'000, 300'000, 50);
+  st.bandwidth_bps = 4'000'000;
+  st.rtt_us = 40'000;
+  above.Update(0, st);
+  st.rtt_us = 240'000;
+  EXPECT_FALSE(above.Update(33'000, st).skip_frame);
+}
+
 TEST(RateController, AsksLessOfAnEncoderThatOvershoots) {
   session::RateController rc(8'000'000, 300'000, 50);
   TransportStats st;
