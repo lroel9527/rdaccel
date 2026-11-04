@@ -328,10 +328,12 @@ struct Host::Impl {
     std::string err;
     if (!session->OnFrame(f, &err)) {
       if (error) *error = err;
-      // Report the first failure and then one per second's worth of frames,
-      // so a broken encoder is visible without flooding the handler.
+      // One picture lost, the next one is a keyframe: not something the
+      // error handler reports (it reports only what stops the host). Logged
+      // the first time and then once per second's worth of frames; counted
+      // in encode_errors.
       if (encode_errors_reported++ % static_cast<uint64_t>(std::max(1, config.fps)) == 0) {
-        ReportError("encode failed: " + err);
+        log::Warn("encode failed: " + err);
       }
       return false;
     }
@@ -465,6 +467,7 @@ bool Host::StartScreenCapture(std::string* error) {
   cc.height = impl_->config.capture_height;
   cc.show_cursor = impl_->config.capture_cursor;
   Impl* impl = impl_.get();
+  cap->SetStoppedHandler([impl](const std::string& why) { impl->ReportError("capture stopped: " + why); });
   if (!cap->Start(cc, [impl](const capture::CapturedFrame& f) {
         // OnFrame reports errors through the error handler itself.
         impl->OnFrame(f, nullptr);

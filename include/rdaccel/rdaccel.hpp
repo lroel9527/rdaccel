@@ -8,8 +8,15 @@
 // interface between your program and the library is the C one: you can build
 // with another compiler or standard library than the library was built with.
 // Requires C++20. See docs/integration.md.
+//
+// Compatibility: this header promises source compatibility, not binary.
+// Within a major version code that compiles against it keeps compiling
+// (new overloads and members may appear), but its classes may change size
+// or layout, so do not pass them across a boundary between parts built
+// against different versions; pass the C handles instead.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -326,7 +333,7 @@ rda_transport* IntoHandle(std::unique_ptr<Transport> t);
 
 // Subclass this to plug in your own transport; the requirements are those of
 // rda_transport_vtable in rdaccel.h. The library's own transports (from
-// ListenUdp() etc.) are also Transports.
+// BindUdp() etc.) are also Transports.
 class Transport {
  public:
   using ReceiveFn = std::function<void(Channel, std::span<const uint8_t>)>;
@@ -461,12 +468,8 @@ inline detail::TransportPair CreateLocalPipe() {
   return {std::make_unique<detail::NativeTransport>(a), std::make_unique<detail::NativeTransport>(b)};
 }
 
-// TCP: listen blocks until one peer connects. Fixed bitrate.
-inline std::unique_ptr<Transport> ListenTcp(uint16_t port, std::string* error = nullptr) {
-  rda_transport* t = nullptr;
-  return detail::Native(rda_tcp_listen(port, &t), &t, error);
-}
-// Returns at once; the first viewer to connect becomes the peer.
+// TCP, fixed bitrate. Returns at once; the first viewer to connect becomes
+// the peer (see Host::SetStateHandler).
 inline std::unique_ptr<Transport> BindTcp(uint16_t port, std::string* error = nullptr) {
   rda_transport* t = nullptr;
   return detail::Native(rda_tcp_bind(port, &t), &t, error);
@@ -476,12 +479,7 @@ inline std::unique_ptr<Transport> ConnectTcp(const std::string& host, uint16_t p
   return detail::Native(rda_tcp_connect(host.c_str(), port, &t), &t, error);
 }
 
-// UDP with loss recovery and congestion control (adaptive bitrate). Listen
-// blocks until the peer's first packet arrives.
-inline std::unique_ptr<Transport> ListenUdp(uint16_t port, std::string* error = nullptr) {
-  rda_transport* t = nullptr;
-  return detail::Native(rda_udp_listen(port, &t), &t, error);
-}
+// UDP with loss recovery and congestion control (adaptive bitrate).
 inline std::unique_ptr<Transport> ConnectUdp(const std::string& host, uint16_t port, std::string* error = nullptr) {
   rda_transport* t = nullptr;
   return detail::Native(rda_udp_connect(host.c_str(), port, &t), &t, error);
@@ -642,6 +640,9 @@ class Host {
  public:
   using InputHandler = std::function<void(const InputEvent&)>;
   using ErrorHandler = std::function<void(const std::string&)>;
+  // With the status: RDA_ERR_UNSUPPORTED = no cursor channel, the picture
+  // keeps streaming; anything else = the host stopped (see rdaccel.h).
+  using StatusErrorHandler = std::function<void(rda_status, const std::string&)>;
 
   // Takes ownership of the transport. If the host cannot be created (bad
   // config), every later call fails with that error; see ok().
@@ -714,14 +715,14 @@ class Host {
       }
       if (fn) fn(detail::FromC(*ev));
     };
-    c.on_error = [](void* u, rda_status, const char* msg) {
+    c.on_error = [](void* u, rda_status st, const char* msg) {
       auto* s = static_cast<State*>(u);
-      ErrorHandler fn;
+      StatusErrorHandler fn;
       {
         std::lock_guard<std::mutex> lock(s->mu);
         fn = s->on_error;
       }
-      if (fn) fn(msg);
+      if (fn) fn(st, msg);
     };
     if (rda_host_create(detail::IntoHandle(std::move(transport)), &c, &h_) != RDA_OK) {
       create_error_ = rda_last_error();
@@ -739,11 +740,19 @@ class Host {
     std::lock_guard<std::mutex> lock(state_->mu);
     state_->on_input = std::move(fn);
   }
-  // Errors on a background thread (encoder, capture, cursor).
+  // Errors on a background thread (encoder, capture, cursor). Every one
+  // stops the host except RDA_ERR_UNSUPPORTED (no cursor channel); take the
+  // status with the second form to tell them apart.
   void SetErrorHandler(ErrorHandler fn) {
+    std::lock_guard<std::mutex> lock(state_->mu);
+    state_->on_error = fn ? StatusErrorHandler([fn = std::move(fn)](rda_status, const std::string& m) { fn(m); })
+                          : StatusErrorHandler();
+  }
+  void SetErrorHandler(StatusErrorHandler fn) {
     std::lock_guard<std::mutex> lock(state_->mu);
     state_->on_error = std::move(fn);
   }
+  void SetErrorHandler(std::nullptr_t) { SetErrorHandler(StatusErrorHandler()); }
 
   // Connection changes (transport or timer thread). Set it before the
   // viewer can connect, or check state() afterwards.
@@ -858,7 +867,7 @@ class Host {
   struct State {
     std::mutex mu;
     InputHandler on_input;
-    ErrorHandler on_error;
+    StatusErrorHandler on_error;
     StateHandler on_state;
     MessageHandler on_message;
     std::function<bool(std::span<const uint8_t>)> auth;

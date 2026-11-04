@@ -440,15 +440,6 @@ rda_status rda_pipe_create(rda_transport** a, rda_transport** b) {
   RDA_GUARD_END
 }
 
-rda_status rda_tcp_listen(uint16_t port, rda_transport** out) {
-  RDA_GUARD_BEGIN
-  if (!out) return Fail(RDA_ERR_INVALID_ARG, "out is required");
-  std::string err;
-  auto t = rdacore::ListenTcp(port, &err);
-  return Wrap(std::move(t), out, err, RDA_ERR_TRANSPORT, /*network=*/true);
-  RDA_GUARD_END
-}
-
 rda_status rda_tcp_connect(const char* host, uint16_t port, rda_transport** out) {
   RDA_GUARD_BEGIN
   if (!host || !out) return Fail(RDA_ERR_INVALID_ARG, "host and out are required");
@@ -463,15 +454,6 @@ rda_status rda_tcp_bind(uint16_t port, rda_transport** out) {
   if (!out) return Fail(RDA_ERR_INVALID_ARG, "out is required");
   std::string err;
   auto t = rdacore::BindTcp(port, &err);
-  return Wrap(std::move(t), out, err, RDA_ERR_TRANSPORT, /*network=*/true);
-  RDA_GUARD_END
-}
-
-rda_status rda_udp_listen(uint16_t port, rda_transport** out) {
-  RDA_GUARD_BEGIN
-  if (!out) return Fail(RDA_ERR_INVALID_ARG, "out is required");
-  std::string err;
-  auto t = rdacore::ListenUdp(port, &err);
   return Wrap(std::move(t), out, err, RDA_ERR_TRANSPORT, /*network=*/true);
   RDA_GUARD_END
 }
@@ -777,7 +759,14 @@ rda_status rda_host_create(rda_transport* transport, const rda_host_config* conf
   raw->host->SetErrorHandler([raw](const std::string& msg) {
     rdacore::log::Error(msg);
     if (raw->config.on_error) {
-      const rda_status s = Classify(msg, msg.rfind("cursor", 0) == 0 ? RDA_ERR_UNSUPPORTED : RDA_ERR_CODEC);
+      // The contract (rdaccel.h, on_error): RDA_ERR_UNSUPPORTED only for the
+      // cursor, which is not fatal; anything else means the host stopped.
+      rda_status s = RDA_ERR_CODEC;  // the encoder could not be created
+      if (msg.rfind("cursor", 0) == 0) {
+        s = RDA_ERR_UNSUPPORTED;
+      } else if (msg.rfind("capture stopped", 0) == 0) {
+        s = Contains(msg, "ermission") ? RDA_ERR_PERMISSION : RDA_ERR_CLOSED;
+      }
       raw->ready.Wait();
       raw->config.on_error(raw->config.user, s, msg.c_str());
     }

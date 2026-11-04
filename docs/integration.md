@@ -22,7 +22,7 @@ rda_host_config cfg;
 rda_host_config_default(&cfg);          /* 先填默认值，再改要改的 */
 cfg.user = my_state;
 cfg.on_input = my_on_input;
-if (rda_udp_listen(7300, &t) != RDA_OK ||
+if (rda_udp_bind(7300, &t) != RDA_OK ||
     rda_host_create(t, &cfg, &host) != RDA_OK) {   /* t 无论成败都归 host_create 管 */
   fprintf(stderr, "%s\n", rda_last_error());
 }
@@ -47,10 +47,12 @@ Host ── 采集或 SubmitFrame ── 变化检测 / 编码 ──┐    ┌�
 
 ```cpp
 std::string err;
-auto transport = rdaccel::ListenUdp(7300, &err);   // #include <rdaccel/rdaccel.hpp>   // 阻塞到对端的第一个包到达
+auto transport = rdaccel::BindUdp(7300, &err);     // #include <rdaccel/rdaccel.hpp>   // 马上返回，第一个发来数据的接收端成为对端
 rdaccel::HostConfig cfg;                           // 默认值即可，见第 5 节
 rdaccel::Host host(std::move(transport), cfg);
-host.SetErrorHandler([](const std::string& e) { /* 记日志；编码器起不来时会到这里 */ });
+host.SetErrorHandler([](rda_status s, const std::string& e) {
+  // s == RDA_ERR_UNSUPPORTED：只是光标通道不可用，画面照常；其他：Host 已经停了，销毁它（不要在回调里）
+});
 host.SetInputHandler([](const rdaccel::InputEvent& ev) { /* 注入到系统（库不做） */ });
 if (!host.StartScreenCapture(&err)) { /* macOS 上通常是没有屏幕录制权限 */ }
 ```
@@ -73,7 +75,7 @@ viewer->SendInput({rdaccel::InputKind::kMouseMove, 100, 200});
 
 ## 1.1 连接状态、应用消息、输入
 
-**连不上怎么办。** `ConnectUdp` 不阻塞，`Viewer` 创建后在 `peer_timeout_ms` 内等不到 Host 的回应就以 `RDA_ERR_TIMEOUT` 断开，这就是连接超时。`ListenTcp` / `ListenUdp` 会阻塞到对端出现；不想阻塞就用 `BindUdp` / `BindTcp`，马上创建 `Host`，用状态回调等对方连上。
+**连不上怎么办。** `ConnectUdp` 不阻塞，`Viewer` 创建后在 `peer_timeout_ms` 内等不到 Host 的回应就以 `RDA_ERR_TIMEOUT` 断开，这就是连接超时。Host 端用 `BindUdp` / `BindTcp`：马上返回，马上创建 `Host`，用状态回调等对方连上（0.5 起不再有阻塞的 `ListenUdp` / `ListenTcp`）。
 
 **连接状态。** `Viewer` 创建后先发握手（协议版本、能力位、可选的认证令牌），`Host` 检查后回应，两边进入 `kConnected`。之后双方大约每秒互发心跳，`peer_timeout_ms`（默认 10 秒，0 = 不超时）内收不到对方任何数据就判定断开。主动关闭（析构 `Viewer` / `Host`）会给对方发 Goodbye，对方立刻收到断开而不是等超时。断开是终态，要重连就重建 `Host` / `Viewer` 和传输。
 
@@ -146,10 +148,10 @@ host.SetInputHandler([&](const rdaccel::InputEvent& ev) { injector->Inject(ev); 
 
 | 传输 | 适合 | 带宽自适应 |
 | --- | --- | --- |
-| `ListenUdp` / `ConnectUdp` | 真实网络，尤其是带宽不稳定或会丢包的链路 | 有：带宽估计、按估计调码率、队列满时跳帧；光标和输入先于视频发送 |
+| `BindUdp` / `ConnectUdp` | 真实网络，尤其是带宽不稳定或会丢包的链路 | 有：带宽估计、按估计调码率、队列满时跳帧；光标和输入先于视频发送 |
 | `BindUdp` | 同上，发送端不想阻塞：立刻返回，第一个发来数据的接收端成为对端；之前送进的帧只保留最新一张，连上后从关键帧开始 | 同上 |
 | `UdpFromFd` | 你自己建好的 UDP socket（NAT 打洞之后、由启动器传进来）；成功后归库所有 | 同上 |
-| `ListenTcp` / `ConnectTcp` | 局域网、只能走 TCP 的环境 | 没有：按 `bitrate_bps` 固定码率，网络慢时延迟会越积越大 |
+| `BindTcp` / `ConnectTcp` | 局域网、只能走 TCP 的环境 | 没有：按 `bitrate_bps` 固定码率，网络慢时延迟会越积越大 |
 | `BindTcp` | 同上，发送端不想阻塞：立刻返回，第一个连上来的接收端成为对端；之前送进的帧只保留最新一张 | 同上 |
 | `CreateLocalPipe` | 同一进程（测试、回环演示） | 不需要 |
 | `CreateRecordingTransport` | 录制成 `.rdstream` 文件，之后用 `Viewer::FeedRecording` 回放 | 不需要 |
@@ -194,10 +196,12 @@ host.SetInputHandler([&](const rdaccel::InputEvent& ev) { injector->Inject(ev); 
 - 能失败的 C 函数都返回 `rda_status`：`RDA_OK` 是 0，错误是负数。常见的有 `RDA_ERR_INVALID_ARG`（参数或配置不对）、`RDA_ERR_UNSUPPORTED`（这台机器没有 HEVC 编解码器）、`RDA_ERR_PERMISSION`（macOS 没给屏幕录制权限）、`RDA_ERR_CODEC`、`RDA_ERR_TRANSPORT`、`RDA_ERR_CLOSED`、`RDA_ERR_IO`。`rda_status_str()` 给出名字，`rda_last_error()` 给出本线程上一次失败的详细原因。C++ 包装层把详细原因写进 `std::string* error`。
 - 库自己从不往终端打印（FFmpeg 的输出也接到了库的日志里）。要看日志就用 `rda_set_log(fn, user, RDA_LOG_INFO)` 或 `rdaccel::SetLogHandler(...)` 装一个接收函数。
 - `Host::stats()` 和 `Viewer::stats()` 随时可以调用，返回的都是累计值，每秒取一次求差就是速率（`examples/serve.cpp` 就是这么做的）。
+- 错误回调（C：`on_error`）只报两类事：`RDA_ERR_UNSUPPORTED` 表示光标通道不可用，画面照常传；其他状态都表示 Host 已经停止、不会再出画面，应用应该销毁它（不在回调里）。
+  `RDA_ERR_CODEC` 是编码器创建失败；`RDA_ERR_PERMISSION` / `RDA_ERR_CLOSED` 是采集中途停止（macOS 收回屏幕录制权限、显示器拔掉、Wayland 停止共享）。
 - 编码器创建失败：`SubmitFrame` 返回 false，错误处理回调收到原因，之后的帧都会被拒绝。
-- 编码偶尔失败：返回 false，下一帧自动变成全屏刷新。
+- 编码偶尔失败：返回 false，下一帧自动变成全屏刷新。这不进错误回调，只写日志并计入 `encode_errors`。
 - 接收端解码失败（或者从中途接入）：Viewer 自动向 Host 请求关键帧（最多每 250 ms 一次），Host 在下一帧发全屏刷新。`ViewerStats::keyframe_requests` 和 `HostStats::keyframe_requests` 记录次数。屏幕完全静止、没有新帧进来时（macOS 的 ScreenCaptureKit 只在画面变化时出帧，自己喂帧的程序也可能停喂），Host 在 100 ms 后用记住的最后一帧补发；因为拥塞跳过的那一帧也是这样补上，`HostStats::frames_resubmitted` 记录次数。
-- 光标读不到（比如 Linux 上没有 XFixes）：错误回调收到一条以 `cursor` 开头的消息，画面照常传输。
+- 光标读不到（比如 Linux 上没有 XFixes）：错误回调收到 `RDA_ERR_UNSUPPORTED`，画面照常传输。
 
 ## 7. 平台要求
 

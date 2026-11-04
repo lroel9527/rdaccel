@@ -22,6 +22,9 @@ struct CapturedFrame {
 };
 
 using FrameFn = std::function<void(const CapturedFrame&)>;
+// Capture ended on its own after a successful Start (permission revoked,
+// display gone, screen sharing stopped, X server gone): why.
+using StoppedFn = std::function<void(const std::string& why)>;
 
 // One display (monitor) of the desktop. Index 0 is the primary display.
 struct DisplayInfo {
@@ -53,6 +56,13 @@ class ICapturer {
   virtual bool Start(const CaptureConfig& cfg, FrameFn on_frame) = 0;
   virtual void Stop() = 0;
   virtual const std::string& last_error() const = 0;
+
+  // Set before Start. Called at most once, on a capturer thread, when
+  // capture ends by itself; not after Stop().
+  void SetStoppedHandler(StoppedFn fn) { on_stopped_ = std::move(fn); }
+
+ protected:
+  StoppedFn on_stopped_;
 };
 
 uint64_t MonotonicMicros();

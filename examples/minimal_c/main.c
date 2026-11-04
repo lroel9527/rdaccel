@@ -1,7 +1,7 @@
 /* The smallest complete rdaccel program in plain C: a host and a viewer in
  * one process, connected by an in-process pipe. The host is fed synthetic
  * frames; the viewer counts what it decodes. Across machines, replace
- * rda_pipe_create() with rda_udp_listen() on the host and rda_udp_connect()
+ * rda_pipe_create() with rda_udp_bind() on the host and rda_udp_connect()
  * on the viewer.
  *
  * Exits 0 when every frame arrived. */

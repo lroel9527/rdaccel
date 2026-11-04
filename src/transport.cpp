@@ -11,22 +11,12 @@ std::pair<std::unique_ptr<Transport>, std::unique_ptr<Transport>> CreateLocalPip
   return {std::move(a), std::move(b)};
 }
 
-std::unique_ptr<Transport> ListenTcp(uint16_t port, std::string* error) {
-  return transport::TcpTransport::Listen(port, error);
-}
-
 std::unique_ptr<Transport> BindTcp(uint16_t port, std::string* error) {
   return transport::TcpTransport::Bind(port, error);
 }
 
 std::unique_ptr<Transport> ConnectTcp(const std::string& host, uint16_t port, std::string* error) {
   return transport::TcpTransport::Connect(host, port, error);
-}
-
-std::unique_ptr<Transport> ListenUdp(uint16_t port, std::string* error) {
-  auto sock = net::ListenUdpSocket(port, error);
-  if (!sock) return nullptr;
-  return std::make_unique<net::ReliableTransport>(std::move(sock));
 }
 
 std::unique_ptr<Transport> BindUdp(uint16_t port, std::string* error) {

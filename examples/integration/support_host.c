@@ -90,12 +90,9 @@ static void on_message(void* user, uint32_t type, const uint8_t* payload, size_t
 static void on_error(void* user, rda_status status, const char* message) {
   host_app* app = (host_app*)user;
   fprintf(stderr, "host error %s: %s\n", rda_status_str(status), message);
-  /* A missing cursor channel is reported as RDA_ERR_UNSUPPORTED and the
-   * picture keeps streaming; RDA_ERR_CODEC may be fatal (encoder creation)
-   * or one dropped frame (an encode error), told apart only by the text. */
-  if (status != RDA_ERR_UNSUPPORTED && strncmp(message, "encode failed", 13) != 0) {
-    events_set_fatal(&app->events);
-  }
+  /* RDA_ERR_UNSUPPORTED: no cursor channel, the picture keeps streaming.
+   * Anything else: the host has stopped (encoder, capture). */
+  if (status != RDA_ERR_UNSUPPORTED) events_set_fatal(&app->events);
 }
 
 static int list_displays(void) {

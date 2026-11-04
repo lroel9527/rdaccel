@@ -73,7 +73,7 @@ struct Received {
 }  // namespace
 
 TEST(PublicApi, VersionAndPlatform) {
-  EXPECT_STREQ(rdaccel::Version(), "0.4.0");
+  EXPECT_STREQ(rdaccel::Version(), "0.5.0");
   EXPECT_NE(std::string(rdaccel::PlatformName()), "");
   const auto a = rdaccel::NowMicros();
   EXPECT_GE(rdaccel::NowMicros(), a);
@@ -106,6 +106,19 @@ TEST(PublicApi, HostToViewerOverLocalPipe) {
   EXPECT_GT(got.min_psnr, 30.0);
   EXPECT_EQ(viewer->stats().decode_errors, 0u);
   EXPECT_EQ(host.stats().frames_encoded, static_cast<uint64_t>(kFrames));
+}
+
+// Both handler forms (and clearing it) compile and are accepted: code
+// written against the string-only form keeps building.
+TEST(PublicApi, ErrorHandlerForms) {
+  auto [host_end, viewer_end] = rdaccel::CreateLocalPipe();
+  rdaccel::Host host(std::move(host_end), rdaccel::HostConfig{});
+  ASSERT_TRUE(host.ok());
+  host.SetErrorHandler([](const std::string&) {});
+  host.SetErrorHandler([](rda_status, const std::string&) {});
+  rdaccel::Host::ErrorHandler old_style = [](const std::string&) {};
+  host.SetErrorHandler(old_style);
+  host.SetErrorHandler(nullptr);
 }
 
 TEST(PublicApi, StaticScreenIsSkipped) {

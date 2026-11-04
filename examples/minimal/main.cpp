@@ -1,7 +1,7 @@
 // The smallest complete integration: a Host and a Viewer in one process,
 // connected by an in-process pipe, streaming the built-in test pattern.
 // Replace SubmitFrame with StartScreenCapture() to stream the real screen,
-// and the pipe with ListenTcp / ConnectTcp (or your own Transport) to go
+// and the pipe with BindTcp / ConnectTcp (or your own Transport) to go
 // across machines.
 
 #include <rdaccel/rdaccel.hpp>

@@ -135,10 +135,10 @@ int main(int argc, char** argv) {
   }
   rdaccel::Host host(std::move(transport), cfg);
   std::atomic<bool> failed{false};
-  host.SetErrorHandler([&](const std::string& e) {
+  host.SetErrorHandler([&](rda_status s, const std::string& e) {
     std::fprintf(stderr, "host: %s\n", e.c_str());
     // A missing cursor is not fatal; anything else stops the stream.
-    if (e.rfind("cursor", 0) != 0) failed = true;
+    if (s != RDA_ERR_UNSUPPORTED) failed = true;
   });
   std::atomic<bool> viewer_left{false};
   host.SetStateHandler([&](rdaccel::ConnectionState st, rda_status reason) {

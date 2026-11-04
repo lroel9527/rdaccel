@@ -43,7 +43,7 @@ extern "C" {
 /* ---- version ------------------------------------------------------------ */
 
 #define RDA_VERSION_MAJOR 0
-#define RDA_VERSION_MINOR 4
+#define RDA_VERSION_MINOR 5
 #define RDA_VERSION_PATCH 0
 #define RDA_MAKE_VERSION(major, minor, patch) \
   (((uint32_t)(major) << 16) | ((uint32_t)(minor) << 8) | (uint32_t)(patch))
@@ -323,53 +323,24 @@ RDA_API rda_status rda_transport_custom(const rda_transport_vtable* vtable, void
 /* Two connected in-process endpoints. */
 RDA_API rda_status rda_pipe_create(rda_transport** a, rda_transport** b);
 
-/* TCP. Listen blocks until one peer connects. Fixed bitrate (no stats). */
-RDA_API rda_status rda_tcp_listen(uint16_t port, rda_transport** out);
-RDA_API rda_status rda_tcp_connect(const char* host, uint16_t port, rda_transport** out);
-/* Host side without blocking: listens on `port` (IPv4 and IPv6) and returns
- * at once; the first viewer to connect becomes the peer. Watch on_state for
- * RDA_STATE_CONNECTED. */
+/* TCP, fixed bitrate (no stats). Host side: listens on `port` (IPv4 and
+ * IPv6) and returns at once; the first viewer to connect becomes the peer.
+ * Create the host right away and watch on_state for RDA_STATE_CONNECTED. */
 RDA_API rda_status rda_tcp_bind(uint16_t port, rda_transport** out);
+RDA_API rda_status rda_tcp_connect(const char* host, uint16_t port, rda_transport** out);
 
 /* UDP with loss recovery and BBR-style congestion control; reports stats, so
- * the host adapts its bitrate. Listen blocks until the peer's first packet
- * arrives. Use on real networks. */
-RDA_API rda_status rda_udp_listen(uint16_t port, rda_transport** out);
-RDA_API rda_status rda_udp_connect(const char* host, uint16_t port, rda_transport** out);
-/* Host side without blocking: binds `port` (IPv4 and IPv6) and returns at
- * once; the first viewer that sends becomes the peer. Create the host right
- * away and watch on_state for RDA_STATE_CONNECTED. */
+ * the host adapts its bitrate. Use on real networks. Host side: binds `port`
+ * (IPv4 and IPv6) and returns at once; the first viewer that sends becomes
+ * the peer. Create the host right away and watch on_state for
+ * RDA_STATE_CONNECTED. */
 RDA_API rda_status rda_udp_bind(uint16_t port, rda_transport** out);
+RDA_API rda_status rda_udp_connect(const char* host, uint16_t port, rda_transport** out);
 /* Uses your UDP socket (after NAT traversal, from a launcher, ...); taken
  * over (closed with the transport) only on success. A connected socket talks
  * to its peer; an unconnected one to the first sender, host side only.
  * viewer_side != 0 for the end that creates the viewer (must be connected). */
 RDA_API rda_status rda_udp_from_fd(int fd, int viewer_side, rda_transport** out);
-
-/* A simulated network path (tests, benchmarks), running the UDP protocol. */
-typedef struct rda_bandwidth_step {
-  int64_t at_ms; /* milliseconds after creation */
-  int64_t bandwidth_bps;
-} rda_bandwidth_step;
-
-typedef struct rda_network_conditions {
-  uint32_t struct_size;
-  int64_t bandwidth_bps; /* 0 = unlimited */
-  int32_t delay_ms;      /* one way */
-  int32_t jitter_ms;     /* extra random delay; reorders packets */
-  double loss;           /* random loss probability per packet */
-  int32_t queue_ms;      /* bottleneck buffer */
-  const rda_bandwidth_step* schedule;
-  size_t schedule_len;
-  uint32_t seed;
-} rda_network_conditions;
-
-RDA_API void rda_network_conditions_default(rda_network_conditions* c);
-/* `congestion_control` = 0 sends as fast as data comes, for comparison. */
-RDA_API rda_status rda_simulated_network_create(const rda_network_conditions* host_to_viewer,
-                                                const rda_network_conditions* viewer_to_host,
-                                                int congestion_control, rda_transport** host_end,
-                                                rda_transport** viewer_end);
 
 /* A host-side transport that writes the screen stream to a .rdstream file. */
 RDA_API rda_status rda_recording_create(const char* path, rda_transport** out);
@@ -427,7 +398,17 @@ typedef struct rda_host_config {
   void* user;
   /* Input from the viewer. Transport receive thread. */
   void (*on_input)(void* user, const rda_input_event* ev);
-  /* Errors on a background thread (encoder creation, capture, cursor). */
+  /* Something on a background thread failed. `status` says what it means:
+   *   RDA_ERR_UNSUPPORTED  no cursor channel (cursor source unavailable);
+   *                        the picture keeps streaming
+   *   anything else        the host has stopped and will send no more
+   *                        pictures; destroy it (not from this callback):
+   *     RDA_ERR_CODEC       the encoder could not be created
+   *     RDA_ERR_PERMISSION  capture stopped: permission taken away (macOS)
+   *     RDA_ERR_CLOSED      capture stopped: display gone, sharing ended
+   * A single picture that fails to encode is not reported here (it is
+   * logged and counted in rda_host_stats.encode_errors; the next one is a
+   * keyframe). Capture or cursor thread. */
   void (*on_error)(void* user, rda_status status, const char* message);
 
   /* Connection. */
@@ -621,11 +602,40 @@ RDA_API rda_status rda_viewer_feed_recording(rda_viewer* v, const uint8_t* bytes
 RDA_API rda_status rda_viewer_get_stats(const rda_viewer* v, rda_viewer_stats* out);
 RDA_API size_t rda_viewer_decoder_name(const rda_viewer* v, char* buf, size_t buf_size);
 
-/* ---- recordings and test helpers ---------------------------------------- */
+/* ---- recordings ---------------------------------------------------------- */
 
 /* Reads a whole .rdstream file. Free *bytes with rda_free(). */
 RDA_API rda_status rda_recording_read(const char* path, uint8_t** bytes, size_t* n);
 RDA_API void rda_free(void* p);
+
+/* ---- testing and benchmarks ----------------------------------------------- */
+/* Not needed in a product: a simulated network and a synthetic desktop, for
+ * an application's own tests. They are part of the stable ABI all the same. */
+
+/* A simulated network path running the UDP protocol. */
+typedef struct rda_bandwidth_step {
+  int64_t at_ms; /* milliseconds after creation */
+  int64_t bandwidth_bps;
+} rda_bandwidth_step;
+
+typedef struct rda_network_conditions {
+  uint32_t struct_size;
+  int64_t bandwidth_bps; /* 0 = unlimited */
+  int32_t delay_ms;      /* one way */
+  int32_t jitter_ms;     /* extra random delay; reorders packets */
+  double loss;           /* random loss probability per packet */
+  int32_t queue_ms;      /* bottleneck buffer */
+  const rda_bandwidth_step* schedule;
+  size_t schedule_len;
+  uint32_t seed;
+} rda_network_conditions;
+
+RDA_API void rda_network_conditions_default(rda_network_conditions* c);
+/* `congestion_control` = 0 sends as fast as data comes, for comparison. */
+RDA_API rda_status rda_simulated_network_create(const rda_network_conditions* host_to_viewer,
+                                                const rda_network_conditions* viewer_to_host,
+                                                int congestion_control, rda_transport** host_end,
+                                                rda_transport** viewer_end);
 
 /* Renders frame `index` of a deterministic synthetic desktop into `bgra`
  * (width * height * 4 bytes, stride width * 4). With `incremental` != 0 the
@@ -634,6 +644,22 @@ RDA_API void rda_free(void* p);
 RDA_API rda_status rda_test_pattern_render(uint64_t index, int32_t width, int32_t height,
                                            uint8_t* bgra, int incremental, rda_rect* rects,
                                            size_t max_rects, size_t* rect_count);
+
+/* Enums cross the ABI as 4-byte ints. Building with -fshort-enums (or
+ * anything else that makes them smaller) would break it, so refuse. */
+#if defined(__cplusplus) && __cplusplus >= 201103L
+#  define RDA_STATIC_ASSERT_(c, m) static_assert(c, m)
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+#  define RDA_STATIC_ASSERT_(c, m) _Static_assert(c, m)
+#endif
+#ifdef RDA_STATIC_ASSERT_
+RDA_STATIC_ASSERT_(sizeof(rda_status) == 4, "rdaccel: enums must be 4 bytes");
+RDA_STATIC_ASSERT_(sizeof(rda_log_level) == 4, "rdaccel: enums must be 4 bytes");
+RDA_STATIC_ASSERT_(sizeof(rda_input_kind) == 4, "rdaccel: enums must be 4 bytes");
+RDA_STATIC_ASSERT_(sizeof(rda_state) == 4, "rdaccel: enums must be 4 bytes");
+RDA_STATIC_ASSERT_(sizeof(rda_channel) == 4, "rdaccel: enums must be 4 bytes");
+#  undef RDA_STATIC_ASSERT_
+#endif
 
 #ifdef __cplusplus
 } /* extern "C" */

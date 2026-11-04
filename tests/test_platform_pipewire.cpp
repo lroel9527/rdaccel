@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -367,6 +368,54 @@ TEST(PipeWire, StartsAgain) {
     EXPECT_TRUE(rx.WaitFrames(3)) << "round " << round;
     cap.Stop();
   }
+}
+
+// The screen going away mid-stream (the portal session ended, the user
+// stopped sharing) is reported once through the stopped handler; a Stop()
+// the application asked for is not.
+TEST(PipeWire, ReportsTheScreenGoingAway) {
+  auto screen = std::make_unique<FakeScreen>();
+  std::string err;
+  if (!screen->Start(&err)) GTEST_SKIP() << err;
+  platform::PipeWireCapturer cap(screen->node());
+  std::mutex mu;
+  std::condition_variable cv;
+  int stops = 0;
+  std::string why;
+  cap.SetStoppedHandler([&](const std::string& w) {
+    std::lock_guard<std::mutex> lk(mu);
+    ++stops;
+    why = w;
+    cv.notify_all();
+  });
+  Received rx;
+  ASSERT_TRUE(cap.Start({}, rx.Fn())) << cap.last_error();
+  ASSERT_TRUE(rx.WaitFrames(2));
+  screen.reset();
+  {
+    std::unique_lock<std::mutex> lk(mu);
+    EXPECT_TRUE(cv.wait_for(lk, 10s, [&] { return stops > 0; })) << "no stop reported";
+    EXPECT_FALSE(why.empty());
+  }
+  cap.Stop();
+  std::this_thread::sleep_for(200ms);
+  std::lock_guard<std::mutex> lk(mu);
+  EXPECT_EQ(stops, 1);
+}
+
+TEST(PipeWire, AskedStopIsNotReported) {
+  FakeScreen screen;
+  std::string err;
+  if (!screen.Start(&err)) GTEST_SKIP() << err;
+  platform::PipeWireCapturer cap(screen.node());
+  std::atomic<int> stops{0};
+  cap.SetStoppedHandler([&](const std::string&) { ++stops; });
+  Received rx;
+  ASSERT_TRUE(cap.Start({}, rx.Fn())) << cap.last_error();
+  ASSERT_TRUE(rx.WaitFrames(2));
+  cap.Stop();
+  std::this_thread::sleep_for(200ms);
+  EXPECT_EQ(stops.load(), 0);
 }
 
 TEST(PipeWire, NoSuchNodeFails) {
