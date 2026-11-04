@@ -1,6 +1,6 @@
-# Mac 复测清单（M2）
+# Mac 复测清单
 
-M2 的功能都是在云端（Linux x265 + GitHub 的 macOS CI，VideoToolbox 软件编码）开发和验证的。这份清单列出必须在真实 Mac（Apple Silicon，VideoToolbox 硬件编解码）上再确认的项目：大部分由一键脚本自动跑，少数要人看一眼。
+新功能都是在云端（Linux x265 + GitHub 的 macOS CI，VideoToolbox 软件编码）开发和验证的。这份清单列出必须在真实 Mac（Apple Silicon，VideoToolbox 硬件编解码）上再确认的项目：大部分由一键脚本自动跑，少数要人看一眼。
 
 ## 静音
 
@@ -43,4 +43,4 @@ tools/mac_retest.sh --skip-screen   # 不采集真实屏幕（不需要屏幕录
 
 ## 记录结果
 
-结果回来以后，把数字更新到 README 的“当前进度”，并去掉“还要在真实 Mac 上复测”那句。
+结果回来以后，把数字更新到 [评测](benchmarks.md)。
