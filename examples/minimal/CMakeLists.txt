@@ -7,7 +7,7 @@
 cmake_minimum_required(VERSION 3.24)
 project(rdaccel_minimal LANGUAGES C CXX)
 
-find_package(rdaccel 0.3 REQUIRED)
+find_package(rdaccel 0.4 REQUIRED)
 
 add_executable(minimal main.cpp)
 target_link_libraries(minimal PRIVATE rdaccel::rdaccel)

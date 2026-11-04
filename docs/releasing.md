@@ -33,8 +33,8 @@ cmake --build build -j
 
 ## 兼容性约定
 
-- 1.0 之前：次版本（0.x）之间 C ABI 可能不兼容，所以共享库的 soname 带次版本（`librdaccel.so.0.3`、
-  `librdaccel.0.3.dylib`），`find_package(rdaccel 0.3)` 只接受 0.3.x。
+- 1.0 之前：次版本（0.x）之间 C ABI 可能不兼容，所以共享库的 soname 带次版本（`librdaccel.so.0.4`、
+  `librdaccel.0.4.dylib`），`find_package(rdaccel 0.4)` 只接受 0.4.x。
 - 1.0 之后：同一主版本内只加不改（新函数、配置结构体末尾加字段），soname 只带主版本。
 - CI 的 `abi` 作业在每个 PR 上用 libabigail 的 `abidiff` 对比基线分支和 PR 的 `librdaccel.so`（只看
   `include/rdaccel/` 声明的接口）。同一版本内出现不兼容改动（删函数、改参数、改字段位置……）时失败，需要先升版本；

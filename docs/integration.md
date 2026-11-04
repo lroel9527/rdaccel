@@ -187,7 +187,7 @@ host.SetInputHandler([&](const rdaccel::InputEvent& ev) { injector->Inject(ev); 
 | `progressive` | 开 | 首帧先发视频版、随后补成无损。要求第一张画面就逐像素准确（截图、自动化测试）时关 |
 | `encoder` | 自动 | Linux 上强制 `libx265` 或 `hevc_nvenc`；`hevc_vaapi`（Intel / AMD 显卡，实验性，不会自动选用，设备用 `RDACCEL_VAAPI_DEVICE` 指定，默认 `/dev/dri/renderD128`）打不开时退回其他编码器 |
 
-每个模块的开关和评测数据见 [README](../README.md)。
+每个模块的开关见 [架构](architecture.md#配置开关)，评测数据见 [评测](benchmarks.md)。
 
 ## 6. 统计、出错和日志
 
