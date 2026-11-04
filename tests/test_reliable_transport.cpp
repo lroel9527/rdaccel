@@ -342,12 +342,14 @@ TEST(ReliableTransport, EstimateFollowsABandwidthDrop) {
   size_t got_at_3s = 0;    // bytes delivered by 3 s, to measure the last 2 s
   std::string trace;       // the estimate and round trip every 250 ms
   uint64_t next_trace = 0;
+  std::vector<int64_t> late_estimates;  // every 250 ms from 3.5 s on
   while (capture::MonotonicMicros() - t0 < 5'000'000) {
     host.GetStats(&st);
     const uint64_t t = capture::MonotonicMicros() - t0;
     if (t >= next_trace) {
       next_trace += 250'000;
       trace += std::to_string(st.bandwidth_bps / 1000) + "k/" + std::to_string(st.rtt_us / 1000) + "ms ";
+      if (t >= 3'500'000) late_estimates.push_back(st.bandwidth_bps);
     }
     if (!caught_up && t > 2'000'000 && st.bandwidth_bps > 0 && st.bandwidth_bps < 1'300'000) caught_up = t;
     if (t >= 3'000'000 && got_at_3s == 0) {
@@ -374,9 +376,17 @@ TEST(ReliableTransport, EstimateFollowsABandwidthDrop) {
     std::lock_guard<std::mutex> lock(sink.mu);
     delivered_bps = static_cast<int64_t>(sink.got[static_cast<int>(Channel::kVideo)].size() - got_at_3s) * 8 / 2;
   }
-  std::printf("delivered %lld kbps in the last 2 s\n", static_cast<long long>(delivered_bps / 1000));
-  EXPECT_GT(st.bandwidth_bps, std::min<int64_t>(700'000, delivered_bps * 7 / 10));
-  EXPECT_GT(st.bandwidth_bps, 300'000);
+  // The estimate over the last 1.5 s, not one reading: it dips for a moment
+  // now and then (531 kbps at the very end once on macOS CI, after 782 for a
+  // second), while the failure this guards against, an estimate spiralling
+  // down, stays low.
+  ASSERT_FALSE(late_estimates.empty());
+  std::sort(late_estimates.begin(), late_estimates.end());
+  const int64_t late = late_estimates[late_estimates.size() / 2];
+  std::printf("delivered %lld kbps in the last 2 s, estimate (median of the last 1.5 s) %lld kbps\n",
+              static_cast<long long>(delivered_bps / 1000), static_cast<long long>(late / 1000));
+  EXPECT_GT(late, std::min<int64_t>(700'000, delivered_bps * 7 / 10));
+  EXPECT_GT(late, 300'000);
 }
 
 TEST(ReliableTransport, EstimateFollowsADropBelowWhatAnAppLimitedSenderSends) {
@@ -421,16 +431,29 @@ TEST(ReliableTransport, EstimateFollowsADropBelowWhatAnAppLimitedSenderSends) {
   EXPECT_LT(caught_up, 1'500'000u + 1'500'000u);
 }
 
-TEST(ReliableTransport, CursorStaysFastUnderASaturatingSender) {
-  // Video keeps the 1.5 Mbps path busy (as VideoToolbox does on the Mac);
-  // small cursor messages every 16 ms must not wait behind a standing queue
-  // inside the network: the sender's own queue lets them jump ahead.
+namespace {
+
+struct CursorRun {
+  bool ok = false;
+  double idle_p50 = 0, idle_p95 = 0, p50 = 0, p95 = 0, kbps = 0;
+  // What the load adds, over what the machine adds by itself. On Linux idle
+  // is ~20 ms and loaded 30-38; before the sender drained the network's
+  // queue, loaded was 68 at the same idle (a standing queue adds its length
+  // on any machine).
+  bool Passes() const { return ok && p50 < idle_p50 + 30 && p95 < idle_p95 + 70 && kbps > 1'200; }
+};
+
+// Video keeps the 1.5 Mbps path busy (as VideoToolbox does on the Mac);
+// small cursor messages every 16 ms must not wait behind a standing queue
+// inside the network: the sender's own queue lets them jump ahead.
+CursorRun MeasureCursorUnderLoad() {
   net::LinkConditions c;
   c.bandwidth_bps = 1'500'000;
   c.delay_ms = 20;
   c.queue_ms = 200;
   std::mutex mu;
-  std::vector<double> lat_ms;
+  std::vector<double> idle_ms, lat_ms;
+  std::atomic<bool> loaded{false};
   auto [a, b] = net::MakeSimulatedLink(c, net::LinkConditions{.delay_ms = 20});
   net::ReliableTransport host(std::move(a));
   net::ReliableTransport viewer(std::move(b), {.client = true});
@@ -443,36 +466,63 @@ TEST(ReliableTransport, CursorStaysFastUnderASaturatingSender) {
       uint64_t sent;
       std::memcpy(&sent, bytes.data() + i, 8);
       std::lock_guard<std::mutex> lock(mu);
-      lat_ms.push_back((now - sent) / 1000.0);
+      (loaded ? lat_ms : idle_ms).push_back((now - sent) / 1000.0);
     }
   });
   const auto chunk = Pattern(6'000, 5);
-  const uint64_t t0 = capture::MonotonicMicros();
-  uint64_t next_cursor = t0;
   TransportStats st;
-  while (capture::MonotonicMicros() - t0 < 6'000'000) {
-    const uint64_t now = capture::MonotonicMicros();
-    host.GetStats(&st);
-    if (st.queued_bytes < 30'000) host.Send(Channel::kVideo, chunk);
-    if (now >= next_cursor) {
-      uint8_t msg[8];
-      std::memcpy(msg, &now, 8);
-      host.Send(Channel::kCursor, msg);
-      next_cursor += 16'000;
+  // First a second of cursor messages alone, which shows what this machine
+  // adds by itself (threads that wake late: on a loaded macOS runner the
+  // round trip runs at several times the path's). Then six seconds with
+  // video saturating the path.
+  auto run = [&](uint64_t duration_us, bool video) {
+    const uint64_t t0 = capture::MonotonicMicros();
+    uint64_t next_cursor = t0;
+    while (capture::MonotonicMicros() - t0 < duration_us) {
+      const uint64_t now = capture::MonotonicMicros();
+      host.GetStats(&st);
+      if (video && st.queued_bytes < 30'000) host.Send(Channel::kVideo, chunk);
+      if (now >= next_cursor) {
+        uint8_t msg[8];
+        std::memcpy(msg, &now, 8);
+        host.Send(Channel::kCursor, msg);
+        next_cursor += 16'000;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  };
+  run(1'000'000, false);
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  loaded = true;
+  run(6'000'000, true);
   std::lock_guard<std::mutex> lock(mu);
+  if (idle_ms.size() <= 30) return {};
+  std::sort(idle_ms.begin(), idle_ms.end());
+  const double idle_p50 = idle_ms[idle_ms.size() / 2], idle_p95 = idle_ms[idle_ms.size() * 95 / 100];
   // Past the start-up phase.
   std::vector<double> v(lat_ms.begin() + std::min<size_t>(lat_ms.size(), 120), lat_ms.end());
-  ASSERT_GT(v.size(), 100u);
+  if (v.size() <= 100) return {};
   std::sort(v.begin(), v.end());
   const double p50 = v[v.size() / 2], p95 = v[v.size() * 95 / 100];
   const double kbps = static_cast<double>(video_bytes.load()) * 8 / 6.0 / 1000;
-  std::printf("cursor under load: p50 %.1f p95 %.1f ms, video %.0f kbps, rtt %u ms\n", p50, p95, kbps,
-              static_cast<unsigned>(st.rtt_us / 1000));
-  EXPECT_LT(p50, 50);  // 68 ms here before the sender drained the queue (more on loaded CI Macs)
-  EXPECT_LT(p95, 100);
+  CursorRun r{true, idle_p50, idle_p95, p50, p95, kbps};
+  std::printf("cursor idle: p50 %.1f p95 %.1f ms; under load: p50 %.1f p95 %.1f ms, video %.0f kbps, rtt %u ms\n",
+              idle_p50, idle_p95, p50, p95, kbps, static_cast<unsigned>(st.rtt_us / 1000));
+  return r;
+}
+
+}  // namespace
+
+TEST(ReliableTransport, CursorStaysFastUnderASaturatingSender) {
+  // A loaded macOS runner sometimes stalls threads for tens of ms in the
+  // middle of a run (p50 62.5 ms once, against a 50 ms limit). A standing
+  // queue fails every run, a stall rarely two in a row: so up to three runs,
+  // and the test passes on the first that meets the limits.
+  CursorRun r;
+  for (int attempt = 0; attempt < 3 && !r.Passes(); ++attempt) r = MeasureCursorUnderLoad();
+  ASSERT_TRUE(r.ok) << "too few cursor messages arrived";
+  EXPECT_LT(r.p50, r.idle_p50 + 30);
+  EXPECT_LT(r.p95, r.idle_p95 + 70);
   // Without giving up the path's capacity.
-  EXPECT_GT(kbps, 1'200);
+  EXPECT_GT(r.kbps, 1'200);
 }

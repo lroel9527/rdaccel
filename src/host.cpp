@@ -479,8 +479,9 @@ bool Host::StartScreenCapture(std::string* error) {
       impl_->cursor_running = true;
       impl_->cursor_thread = std::thread(
           [impl, s = std::move(src)]() mutable { impl->PollCursor(std::move(s)); });
-    } else {
-      // Not fatal: the screen still streams, just without a cursor.
+    } else if (!cerr.empty()) {
+      // Not fatal: the screen still streams, just without a cursor. (An
+      // empty error: the capture shows the cursor in the picture itself.)
       impl_->ReportError("cursor channel unavailable: " + cerr);
     }
   }

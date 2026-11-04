@@ -12,6 +12,11 @@
   以前对端已经在等时（`rda_udp_bind`、管道），`on_state` 可能在句柄写出之前就执行。
 - **集成示例**：`examples/integration/`，一个纯 C 的远程协助 host + viewer，按外部项目的方式（`find_package` 或 pkg-config）
   针对安装好的库构建；CI 在 Xvfb 里跑 `smoke.sh`。
+- **Wayland 抓屏**：Linux 在 Wayland 会话下通过 xdg-desktop-portal 的 ScreenCast 接口和 PipeWire 采集屏幕
+  （GNOME、KDE、sway 等）。用合成器给的脏区；光标优先走 PipeWire 光标元数据（进光标通道），没有时画进画面；
+  授权在进程内保留，`RDACCEL_PORTAL_TOKEN_FILE` 可跨进程保留。依赖 `libpipewire-0.3`、`gio-2.0`，
+  CMake 选项 `RDACCEL_PIPEWIRE=AUTO|ON|OFF`。CI 在无头 sway + PipeWire + portal 里测试，并用公开 API 录一段 Wayland 屏幕再解码。
+- 光标在画面里（Wayland 不支持光标元数据时）不再通过错误回调报“cursor channel unavailable”。
 
 ## 0.4.0
 

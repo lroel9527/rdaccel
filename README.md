@@ -6,7 +6,7 @@
 - 自带 UDP 传输：丢包重传、BBR 式拥塞控制、自适应码率，0.4 Mbps 的链路上也不超发
 - 光标走独立通道，链路占满时指针照样跟手
 - XChaCha20-Poly1305 加密（密钥由应用提供）、连接状态、认证钩子、输入事件和应用消息通道
-- 稳定的 C ABI，加一层只有头文件的 C++ 包装；支持 macOS（Apple Silicon）和 Linux（X11）
+- 稳定的 C ABI，加一层只有头文件的 C++ 包装；支持 macOS（Apple Silicon）和 Linux（X11、Wayland）
 
 ## 用法
 
@@ -86,7 +86,8 @@ KEY=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')         # 32 字节密钥，�
 ```bash
 # macOS 14+（Apple Silicon）：Xcode 命令行工具 + CMake
 # Linux：sudo apt-get install cmake g++ libavcodec-dev libavutil-dev libswscale-dev \
-#          libx11-dev libxext-dev libxfixes-dev libxrandr-dev libxtst-dev zlib1g-dev
+#          libx11-dev libxext-dev libxfixes-dev libxrandr-dev libxtst-dev zlib1g-dev \
+#          libpipewire-0.3-dev libglib2.0-dev   # 后两个用于 Wayland，可省
 cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build -j
 ctest --test-dir build
 ```
@@ -99,7 +100,7 @@ ctest --test-dir build
 include/rdaccel/   公开 API（唯一会被安装的头文件）
 src/               公开 API 的实现
 core/              内部：分块比对、编解码、会话、码率控制、传输
-platform/          内部：mac/（ScreenCaptureKit、VideoToolbox）、linux/（X11、FFmpeg）
+platform/          内部：mac/（ScreenCaptureKit、VideoToolbox）、linux/（X11、Wayland/PipeWire、FFmpeg）
 examples/          只用公开 API 的示例和工具
 docs/              文档
 tests/ fuzz/       单元测试、libFuzzer 目标

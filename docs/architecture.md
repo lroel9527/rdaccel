@@ -18,7 +18,7 @@ rdaccel 是一个“分层混合编码”的远程桌面库：先判断哪些块
  └──────────┘         码率控制 ◀── 传输统计（带宽、RTT、队列）       └──────────────────────┘
 ```
 
-1. **采集**：macOS 用 ScreenCaptureKit（带系统脏区，不采集声音），Linux 用 X11 MIT-SHM；应用也可以自己调用 `SubmitFrame` 喂 BGRA 画面。光标不画进画面，单独采样。
+1. **采集**：macOS 用 ScreenCaptureKit（带系统脏区，不采集声音），Linux 用 X11 MIT-SHM，Wayland 下用 xdg-desktop-portal + PipeWire（带合成器脏区）；应用也可以自己调用 `SubmitFrame` 喂 BGRA 画面。光标不画进画面，单独采样。
 2. **分块比对**（`core/tile/tile_diff`）：画面切成 64×64 块，逐块算内容哈希，和上一帧比较。没有块变化的帧整帧跳过。
 3. **分流**：变化块按代价从低到高试四条路。
    - **平移**（`core/tile/motion`）：变化块多时，取每块最有细节的一行做滚动哈希，在上一帧里找位置投票出位移，逐块精确比对后发拷贝指令。滚动区和窗口边缘的块按 4 像素宽的条和像素行再拆，只把新露出的像素送去编码。
@@ -90,7 +90,7 @@ core/              平台无关的内部实现（命名空间 rdacore），可�
   transport/       进程内管道、TCP、加密层
   proto/ io/ log/  线上消息、录制文件、日志
 platform/mac/      ScreenCaptureKit、VideoToolbox、光标、显示器列表、CGEvent 注入
-platform/linux/    X11 / XFixes / RandR、FFmpeg（NVENC、x265、VAAPI）、XTest 注入
+platform/linux/    X11 / XFixes / RandR、Wayland（portal + PipeWire）、FFmpeg（NVENC、x265、VAAPI）、XTest 注入
 third_party/       Monocypher
 examples/          只用公开 API 的示例和工具
 tests/ fuzz/       GoogleTest 单元测试、libFuzzer 目标

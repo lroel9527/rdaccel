@@ -2,6 +2,9 @@
 
 #include "platform.h"
 #include "linux/displays_x11.h"
+#ifdef RDACCEL_HAVE_PIPEWIRE
+#include "linux/capture_pipewire.h"
+#endif
 
 #include <X11/extensions/Xrandr.h>
 
@@ -73,6 +76,18 @@ bool X11Display(Display* dpy, int32_t index, capture::DisplayInfo& out, std::str
 }
 
 bool ListDisplays(std::vector<capture::DisplayInfo>& out, std::string* error) {
+#ifdef RDACCEL_HAVE_PIPEWIRE
+  // On Wayland the screen-sharing dialog picks the monitor, so there is one
+  // display to choose: its size is known once it has been shared.
+  if (UseWaylandCapture()) {
+    capture::DisplayInfo d;
+    d.primary = true;
+    d.name = "Wayland (chosen when sharing starts)";
+    LastPipeWireSize(d.width, d.height);
+    out.assign(1, d);
+    return true;
+  }
+#endif
   Display* dpy = XOpenDisplay(nullptr);
   if (!dpy) {
     if (error) *error = "cannot open X display (is DISPLAY set?)";
