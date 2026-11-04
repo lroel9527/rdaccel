@@ -5,6 +5,13 @@
 
 ## 未发布
 
+- **安全**：设置了 `on_auth` 时，被拒绝的接收端以前在断开前仍能收到屏幕尺寸（`on_stream_info`）和光标，
+  还会先报一次 `RDA_STATE_CONNECTED`。现在认证通过之前不发任何画面相关的数据：Host 只保留最新一帧，
+  通过后再发尺寸、光标和关键帧。没有 `on_auth` 时行为不变（录制等没有接收端的传输照旧）。
+- **回调时机**：`rda_host_create` / `rda_viewer_create` 返回之前不会调用任何回调，回调里可以直接用 create 写出的句柄。
+  以前对端已经在等时（`rda_udp_bind`、管道），`on_state` 可能在句柄写出之前就执行。
+- **集成示例**：`examples/integration/`，一个纯 C 的远程协助 host + viewer，按外部项目的方式（`find_package` 或 pkg-config）
+  针对安装好的库构建；CI 在 Xvfb 里跑 `smoke.sh`。
 - **Wayland 抓屏**：Linux 在 Wayland 会话下通过 xdg-desktop-portal 的 ScreenCast 接口和 PipeWire 采集屏幕
   （GNOME、KDE、sway 等）。用合成器给的脏区；光标优先走 PipeWire 光标元数据（进光标通道），没有时画进画面；
   授权在进程内保留，`RDACCEL_PORTAL_TOKEN_FILE` 可跨进程保留。依赖 `libpipewire-0.3`、`gio-2.0`，

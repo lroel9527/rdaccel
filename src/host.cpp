@@ -21,6 +21,36 @@
 
 namespace rdacore {
 
+namespace {
+
+// What the session and the cursor channel send on. With an auth hook it
+// passes nothing until the link has accepted the viewer, so a viewer that
+// is refused never sees the screen size, a picture or the pointer. Until
+// then PeerKnown() is false, which makes the host hold frames instead of
+// encoding them; on connect it sends the Hello, the cursor and a keyframe
+// afresh. Without a hook every viewer that completes the handshake is let
+// in, and the gate stays open from the start (recordings and other
+// transports without a viewer at the far end need that).
+class ViewerGate final : public Transport {
+ public:
+  ViewerGate(Transport* inner, bool open) : inner_(inner), open_(open) {}
+  void Open() { open_ = true; }
+  bool is_open() const { return open_.load(); }
+  bool Send(Channel ch, std::span<const uint8_t> bytes) override {
+    return open_.load() ? inner_->Send(ch, bytes) : true;
+  }
+  void SetReceiver(ReceiveFn) override {}  // the link receives
+  void Close() override {}
+  bool PeerKnown() const override { return open_.load() && inner_->PeerKnown(); }
+  bool GetStats(TransportStats* out) const override { return inner_->GetStats(out); }
+
+ private:
+  Transport* inner_;
+  std::atomic<bool> open_;
+};
+
+}  // namespace
+
 struct Host::Impl {
   HostConfig config;
 
@@ -41,6 +71,8 @@ struct Host::Impl {
   // Declared after `session` and `link`, so it is destroyed first: its
   // destructor stops the receive thread that calls into them.
   std::unique_ptr<Transport> transport;
+  // On `transport`; what the session and the cursor send on.
+  std::unique_ptr<ViewerGate> gate;
   // After `transport`, so it goes first: it sends on it.
   std::unique_ptr<session::CursorSender> cursor;
 
@@ -251,7 +283,7 @@ struct Host::Impl {
         std::lock_guard<std::mutex> l(mu);
         ++resolution_changes;
       }
-      auto next = std::make_unique<session::HostSession>(transport.get(), std::move(enc), width,
+      auto next = std::make_unique<session::HostSession>(gate.get(), std::move(enc), width,
                                                          height, opts);
       if (resized) next->AdoptStats(carried);
       if (rate && resized) next->SetBitrate(rate->target_bps());
@@ -265,7 +297,7 @@ struct Host::Impl {
     // A listening transport without a peer yet: keep the newest frame
     // (re-submitted once the viewer is there) instead of queueing pictures
     // nobody receives.
-    if (!transport->PeerKnown()) {
+    if (!gate->PeerKnown()) {
       KeepSkipped(f);
       return true;
     }
@@ -325,12 +357,18 @@ Host::Host(std::unique_ptr<Transport> transport, HostConfig config)
     transport = std::move(s);
   }
   impl_->transport = std::move(transport);
-  impl_->cursor = std::make_unique<session::CursorSender>(impl_->transport.get());
+  impl_->gate = std::make_unique<ViewerGate>(impl_->transport.get(),
+                                              /*open=*/!impl_->config.auth);
+  impl_->cursor = std::make_unique<session::CursorSender>(impl_->gate.get());
   Impl* impl = impl_.get();
   session::Link::Handlers h;
   h.on_state = [impl](ConnectionState st, ConnectionError e) {
     // A viewer that arrives mid-stream needs the Hello and a full picture.
     if (st == ConnectionState::kConnected) {
+      if (!impl->gate->is_open()) {
+        impl->gate->Open();
+        impl->cursor->Resync();
+      }
       impl->WithSession([](session::HostSession& s) {
         s.SendHello();
         s.RequestKeyframe();
