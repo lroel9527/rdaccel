@@ -62,10 +62,6 @@ class RateController {
   double budget_ = 0;        // bytes that may still go out at the floor
   uint64_t budget_us_ = 0, budget_bytes_ = 0;  // when it was last updated, and the bytes sent then
   uint32_t min_rtt_us_ = 0;  // lowest smoothed RTT seen
-  // The last time a queue built up, and the estimate then: the path's rate,
-  // which the target then stays near for a while (see Update).
-  uint64_t congested_us_ = 0;
-  int64_t congested_bps_ = 0;
   int64_t encoder_ = 0;      // last rate given to the encoder (0 = the configured one)
   double scale_ = 1;         // encoder rate = target * scale
   bool over_before_ = false;  // the last window overshot too

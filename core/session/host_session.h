@@ -201,8 +201,16 @@ class HostSession {
   // stream's history), but that cannot be told in advance.
   uint64_t last_frame_us_ = 0;                        // capture time of the previous frame
   std::array<uint64_t, 3> late_us_{};  // capture times of the last frames that came late
-  static constexpr double kLosslessBudgetFrames = 3;  // frame intervals of the bitrate, on top
+  // The budget is a bucket of bytes: it fills at kLosslessRateShare of the
+  // bitrate, holds at most kLosslessBurstFrames frame intervals of the
+  // bitrate, and is charged what the lossless part of each frame really
+  // came to (so frames the budget had to let through, such as keyframes,
+  // hold back the next ones).
+  static constexpr double kLosslessBurstFrames = 3;
+  static constexpr double kLosslessRateShare = 0.5;
   static constexpr double kLosslessRawShare = 0.5;
+  double lossless_tokens_ = 0;  // bytes, may go negative
+  bool lossless_tokens_set_ = false;
   bool progressive_active_ = false;        // a progressive keyframe is being completed
   bool sharpen_video_ = false;             // ... and was: re-send the video tiles sharp
   // Tiles sent losslessly by a progressive keyframe whose text is still in

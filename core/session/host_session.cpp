@@ -295,6 +295,18 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
                           : std::clamp(static_cast<double>(frame.capture_time_us -
                                                            std::min(frame.capture_time_us, last_frame_us_)),
                                        frame_us, 6 * frame_us);
+  {
+    const double cap = static_cast<double>(options_.bitrate_bps) / 8.0 * kLosslessBurstFrames * frame_us / 1e6;
+    if (!lossless_tokens_set_) {
+      lossless_tokens_ = cap;
+      lossless_tokens_set_ = true;
+    } else {
+      const double gap_us = static_cast<double>(frame.capture_time_us -
+                                                std::min(frame.capture_time_us, last_frame_us_));
+      lossless_tokens_ = std::min(
+          cap, lossless_tokens_ + static_cast<double>(options_.bitrate_bps) / 8.0 * kLosslessRateShare * gap_us / 1e6);
+    }
+  }
   last_frame_us_ = frame.capture_time_us;
   // Frames are being held back when several came late within a second (one
   // late frame is just the first change after a quiet spell).
@@ -374,8 +386,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   // 0.4 Mbps link, and every frame after it waits. Tiles beyond the budget
   // go as video now; once static they are sent again losslessly (refresh),
   // within the budget of those frames.
-  const double lossless_budget =
-      static_cast<double>(options_.bitrate_bps) / 8.0 * (since_us + kLosslessBudgetFrames * frame_us) / 1e6;
+  const double lossless_budget = lossless_tokens_;
   double lossless_spent = 0;  // estimated
   // Codes `r` (all or part of tile `c`) losslessly if it has few colours,
   // else through the video encoder. Returns true for video.
@@ -792,6 +803,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   stats_.region_pictures += region_pictures;
   stats_.region_encode_us_total += region_us;
   stats_.lossless_bytes += lossless_data.size();
+  lossless_tokens_ -= static_cast<double>(lossless_data.size());
   stats_.lossless_tiles += n_lossless;
   stats_.moved_tiles += moved_tiles;
   stats_.cached_tiles += n_loads;
