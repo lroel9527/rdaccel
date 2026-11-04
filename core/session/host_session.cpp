@@ -624,6 +624,59 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   }
   // The viewer takes this frame's video tiles plus the ones still refining,
   // and those of a picture the encoder dropped.
+  // A tile left in many video parts (the strips and rows a scroll leaves
+  // between moved ones) is listed as one rect around them: each part costs
+  // the region list ~6 bytes, and on a busy scroll at 0.4 Mbps frames
+  // listed over a thousand of them (6.7 kB, four times the picture). The
+  // pixels of the rect the encoder did not get yet (moved ones; lossless
+  // ones are painted over the picture anyway) are given to it now, and the
+  // tile is left rough, to be refreshed once static.
+  {
+    constexpr size_t kMaxPartsPerTile = 4;
+    std::unordered_map<size_t, std::pair<size_t, Rect>> per_tile;  // parts, bounds
+    for (const auto& t : video_tiles) {
+      auto [it, fresh] = per_tile.try_emplace(tile_index(t), 0, t.rect);
+      ++it->second.first;
+      if (!fresh) {
+        Rect& b = it->second.second;
+        const int32_t x0 = std::min(b.x, t.rect.x), y0 = std::min(b.y, t.rect.y);
+        const int32_t x1 = std::max(b.right(), t.rect.right()), y1 = std::max(b.y + b.h, t.rect.y + t.rect.h);
+        b = {x0, y0, x1 - x0, y1 - y0};
+      }
+    }
+    bool coarsened = false;
+    for (auto& [idx, pb] : per_tile) {
+      if (pb.first > kMaxPartsPerTile) {
+        coarsened = true;
+        break;
+      }
+    }
+    if (coarsened) {
+      std::vector<tile::TileChange> kept;
+      kept.reserve(video_tiles.size());
+      std::vector<uint8_t> done(n_tiles, 0);
+      for (const auto& t : video_tiles) {
+        const size_t idx = tile_index(t);
+        const auto& pb = per_tile[idx];
+        if (pb.first <= kMaxPartsPerTile) {
+          kept.push_back(t);
+          continue;
+        }
+        if (done[idx]) continue;
+        done[idx] = 1;
+        CopyRectInto(frame.bgra, pb.second, enc_input_.data(), enc_stride);
+        // Lossless parts stay flattened, as everywhere else.
+        for (const auto& lt : lossless_tiles) {
+          if (lt.rect.intersects(pb.second)) FillRect(lt.rect, lt.colors[0], enc_input_.data(), enc_stride);
+        }
+        tile::TileChange whole = t;
+        whole.rect = pb.second;
+        kept.push_back(whole);
+        quality_[idx] = kRough;
+      }
+      video_tiles = std::move(kept);
+    }
+  }
   std::vector<tile::TileChange> region_tiles = video_tiles;
   if (!carry_video_tiles_.empty()) {
     std::vector<uint8_t> listed(n_tiles, 0);
