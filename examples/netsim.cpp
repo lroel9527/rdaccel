@@ -83,6 +83,8 @@ int main(int argc, char** argv) {
   std::mutex mu;
   std::map<uint64_t, uint64_t> index_of;
   std::vector<double> latency_ms, psnr;
+  // Per second of capture time: frames shown and their worst latency (--verbose).
+  std::map<uint64_t, std::pair<int, double>> by_second;
   std::vector<uint64_t> shown_at;
   const auto warmup_frames = static_cast<uint64_t>(args.real("warmup", 3) * fps);
   double first_frame_ms = -1;
@@ -110,6 +112,9 @@ int main(int argc, char** argv) {
       // From the first capture, like the start line (not this frame's own
       // latency: the first frames may never be shown).
       if (first_frame_ms < 0) first_frame_ms = (now - start_us) / 1000.0;
+      auto& sec = by_second[index / static_cast<uint64_t>(fps)];
+      ++sec.first;
+      sec.second = std::max(sec.second, (now - info.capture_time_us) / 1000.0);
       if (index >= warmup_frames) {
         latency_ms.push_back((now - info.capture_time_us) / 1000.0);
         shown_at.push_back(now);
@@ -152,6 +157,7 @@ int main(int argc, char** argv) {
   cfg.bitrate_bps = args.num("bitrate", 8'000'000);
   cfg.adaptive_bitrate = args.num("abr", 1) != 0;
   cfg.min_bitrate_bps = args.num("min-bitrate", cfg.min_bitrate_bps);
+  cfg.lossless_max_colors_hot = static_cast<int32_t>(args.num("hot-colors", cfg.lossless_max_colors_hot));
   cfg.max_queue_ms = static_cast<int32_t>(args.num("max-queue-ms", 50));
   cfg.video_regions = args.num("regions", 1) != 0;
   cfg.progressive = args.num("progressive", 1) != 0;
@@ -235,6 +241,18 @@ int main(int argc, char** argv) {
       static_cast<unsigned long long>(hs.frames_dropped_congestion - warm_dropped), pct(0.5), pct(0.95),
       lat.empty() ? 0.0 : lat.back(), max_gap, psnr_avg, target_n ? target_sum / target_n / 1000.0 : 0.0,
       hs.bandwidth_estimate_bps / 1000.0);
+  if (args.has("verbose")) {
+    // Where the latency comes from: per second of capture time, the share
+    // of frames shown and the worst latency among them.
+    std::printf("       by second (shown %%, worst ms):");
+    for (uint64_t sec = 0; sec * fps < frames; ++sec) {
+      const auto it = by_second.find(sec);
+      const int n = it == by_second.end() ? 0 : it->second.first;
+      std::printf(" %llu:%d/%0.0f", static_cast<unsigned long long>(sec), 100 * n / fps,
+                  it == by_second.end() ? 0.0 : it->second.second);
+    }
+    std::printf("\n");
+  }
   if (!first_psnr.empty()) {
     // How the screen looks while the session starts: PSNR of what is shown
     // at about these times after the first capture.

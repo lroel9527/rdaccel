@@ -23,6 +23,7 @@
 // there), and when the area goes quiet its tiles are sent once more through
 // the normal path, so a paused video ends up sharp.
 
+#include <array>
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -153,10 +154,12 @@ class HostSession {
 
   // Tile cache bookkeeping (see OnFrame).
   static constexpr uint64_t kStableFrames = 8;
+  static constexpr uint64_t kHotHoldUs = 250'000;  // a hot tile stays hot over gaps this short
   static constexpr size_t kMaxSeen = 1 << 16;
   static constexpr size_t kMaxRecurringStores = 16;
   uint64_t frame_no_ = 0;
   std::vector<uint64_t> born_;  // per tile: frame_no_ when its content appeared
+  std::vector<uint64_t> hot_us_;  // per tile: capture time it last changed as a hot tile
   std::unordered_map<uint64_t, uint8_t> seen_;  // content hash -> times it appeared
   tile::TileCacheIndex cache_{proto::kTileCacheSlots};
 
@@ -193,6 +196,13 @@ class HostSession {
   size_t pending_cursor_ = 0;              // where the next frame continues
   double lossless_bytes_per_tile_ = 1500;  // running estimate, for the budget
   uint64_t progressive_last_us_ = 0;       // capture time of the last frame that sent some
+  // Lossless budget (see OnFrame). New content deflates to about half its
+  // raw palette + index size; content seen before costs much less (the
+  // stream's history), but that cannot be told in advance.
+  uint64_t last_frame_us_ = 0;                        // capture time of the previous frame
+  std::array<uint64_t, 3> late_us_{};  // capture times of the last frames that came late
+  static constexpr double kLosslessBudgetFrames = 3;  // frame intervals of the bitrate, on top
+  static constexpr double kLosslessRawShare = 0.5;
   bool progressive_active_ = false;        // a progressive keyframe is being completed
   bool sharpen_video_ = false;             // ... and was: re-send the video tiles sharp
   // Tiles sent losslessly by a progressive keyframe whose text is still in

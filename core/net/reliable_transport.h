@@ -111,6 +111,7 @@ class ReliableTransport final : public transport::ITransport {
   uint64_t next_send_time_ = 0;  // pacing
   uint64_t last_ack_time_ = 0;   // for the probe timeout
   int pto_count_ = 0;
+  bool probe_due_ = false;  // a probe timeout fired: send one packet whatever the window
   uint64_t packets_sent_ = 0, packets_lost_ = 0;
 
   // RTT.

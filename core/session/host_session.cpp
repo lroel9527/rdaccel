@@ -107,6 +107,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     refine_.assign(n_tiles, 0);
     refining_ = 0;
     born_.assign(n_tiles, 0);
+    hot_us_.assign(n_tiles, 0);
     quality_.assign(n_tiles, kRough);
     tile_slot_.assign(n_tiles, -1);
     tile_slot_hash_.assign(n_tiles, 0);
@@ -286,12 +287,39 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     }
   }
   if (seen_.size() > kMaxSeen) seen_.clear();
+  // Time since the previous frame, at least one frame interval: longer when
+  // the transport held frames back (or nothing changed for a while).
+  const double frame_us = 1e6 / std::max(1, options_.fps);
+  const double since_us =
+      last_frame_us_ == 0 ? frame_us
+                          : std::clamp(static_cast<double>(frame.capture_time_us -
+                                                           std::min(frame.capture_time_us, last_frame_us_)),
+                                       frame_us, 6 * frame_us);
+  last_frame_us_ = frame.capture_time_us;
+  // Frames are being held back when several came late within a second (one
+  // late frame is just the first change after a quiet spell).
+  if (since_us > 1.5 * frame_us) {
+    std::rotate(late_us_.begin(), late_us_.begin() + 1, late_us_.end());
+    late_us_.back() = frame.capture_time_us;
+  }
+  const bool holding_back =
+      late_us_.front() != 0 && frame.capture_time_us - late_us_.front() <= 1'000'000;
   std::vector<bool> hot(changes.size());
   for (size_t i = 0; i < changes.size(); ++i) {
     uint8_t& n = seen_[changes[i].hash];
     if (n < 255) ++n;
     uint64_t& born = born_[tile_index(changes[i])];
-    hot[i] = !key && frame_no_ - born <= 1;
+    // Hot: changed in the previous frame too, or, while frames are being
+    // held back, hot not long ago. A tile that is only partly video (the
+    // edge of a video window) does not change in every frame, and coded
+    // losslessly in between (up to 256 colours) it cost ~1 kB a time:
+    // 10-20 kB frames, 0.3 s of a 0.4 Mbps link each, which held back the
+    // frames after them, so more tiles missed a frame. (On a fast path the
+    // hold would only cost text that scrolls: it went as video more often.)
+    uint64_t& hot_us = hot_us_[tile_index(changes[i])];
+    hot[i] = !key && (frame_no_ - born <= 1 || (holding_back && hot_us != 0 &&
+                                                frame.capture_time_us - hot_us <= kHotHoldUs));
+    hot_us = hot[i] ? frame.capture_time_us : 0;
     born = frame_no_;
   }
 
@@ -339,6 +367,16 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     refining_ += (v > 0) - (r > 0);
     r = v;
   };
+  // What the lossless part of this frame may cost: a few frame intervals of
+  // the bitrate (more after frames were held back). Content that turns up
+  // with many colours at once (a video that paused for a moment, a window
+  // of photos) would otherwise go out in one burst: 20 kB is 0.4 s of a
+  // 0.4 Mbps link, and every frame after it waits. Tiles beyond the budget
+  // go as video now; once static they are sent again losslessly (refresh),
+  // within the budget of those frames.
+  const double lossless_budget =
+      static_cast<double>(options_.bitrate_bps) / 8.0 * (since_us + kLosslessBudgetFrames * frame_us) / 1e6;
+  double lossless_spent = 0;  // estimated
   // Codes `r` (all or part of tile `c`) losslessly if it has few colours,
   // else through the video encoder. Returns true for video.
   auto code_rect = [&](const tile::TileChange& c, const Rect& r, bool is_hot) {
@@ -370,7 +408,20 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
         video_tiles.push_back(part);
         return true;
       }
-      if (!progressive_now.empty() && progressive_now[tile_index(c)]) {
+      const bool progressive_turn = !progressive_now.empty() && progressive_now[tile_index(c)];
+      const size_t n = t.colors.size();
+      const int bits = n <= 1 ? 0 : n <= 2 ? 1 : n <= 4 ? 2 : n <= 16 ? 4 : 8;
+      const double raw = 3.0 * static_cast<double>(n) + static_cast<double>(r.w) * r.h * bits / 8.0;
+      if (!key && !progressive_turn && n > 1 && options_.bitrate_bps > 0 &&
+          lossless_spent + raw * kLosslessRawShare > lossless_budget) {
+        CopyRectInto(frame.bgra, r, enc_input_.data(), enc_stride);
+        tile::TileChange part = c;
+        part.rect = r;
+        video_tiles.push_back(part);
+        return true;
+      }
+      lossless_spent += raw * kLosslessRawShare;
+      if (progressive_turn) {
         // Flattening it now would make the encoder code the change, and at a
         // low bitrate that costs the tiles still refining around it.
         unflattened_[tile_index(c)] = 1;
