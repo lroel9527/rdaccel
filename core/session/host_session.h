@@ -208,7 +208,10 @@ class HostSession {
   // hold back the next ones).
   static constexpr double kLosslessBurstFrames = 3;
   static constexpr double kLosslessRateShare = 0.5;
-  static constexpr double kLosslessRawShare = 0.5;
+  // A tile is counted at its raw palette + index size, which deflate
+  // hardly ever exceeds, so a frame stays within the bucket; content seen
+  // before costs less, and the bucket is charged only what it cost.
+  static constexpr double kLosslessRawShare = 1.0;
   double lossless_tokens_ = 0;  // bytes, may go negative
   bool lossless_tokens_set_ = false;
   bool progressive_active_ = false;        // a progressive keyframe is being completed

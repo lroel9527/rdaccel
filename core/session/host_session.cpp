@@ -198,9 +198,13 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
         frame_us, 6 * frame_us);
     const double budget =
         static_cast<double>(options_.bitrate_bps) / 8.0 * dt_us / 1e6 * kProgressiveShare;
-    const auto n = static_cast<size_t>(
-        std::clamp(budget / std::max(lossless_bytes_per_tile_, 64.0), 1.0,
-                   static_cast<double>(kMaxProgressivePerFrame)));
+    // Within the lossless bucket too: a progressive keyframe right after a
+    // drop would otherwise send its tiles faster than the path takes them.
+    const double per_tile = std::max(lossless_bytes_per_tile_, 64.0);
+    const double fits = std::min(budget, std::max(0.0, lossless_tokens_)) / per_tile;
+    const auto n = static_cast<size_t>(std::clamp(
+        fits, lossless_tokens_ >= per_tile || lossless_tokens_ >= budget ? 1.0 : 0.0,
+        static_cast<double>(kMaxProgressivePerFrame)));
     const size_t start = pending_cursor_;
     for (size_t k = 0; k < n_tiles && progressive_sent < n && pending_lossless_count_ > 0; ++k) {
       const size_t idx = (start + k) % n_tiles;
@@ -295,18 +299,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
                           : std::clamp(static_cast<double>(frame.capture_time_us -
                                                            std::min(frame.capture_time_us, last_frame_us_)),
                                        frame_us, 6 * frame_us);
-  {
-    const double cap = static_cast<double>(options_.bitrate_bps) / 8.0 * kLosslessBurstFrames * frame_us / 1e6;
-    if (!lossless_tokens_set_) {
-      lossless_tokens_ = cap;
-      lossless_tokens_set_ = true;
-    } else {
-      const double gap_us = static_cast<double>(frame.capture_time_us -
-                                                std::min(frame.capture_time_us, last_frame_us_));
-      lossless_tokens_ = std::min(
-          cap, lossless_tokens_ + static_cast<double>(options_.bitrate_bps) / 8.0 * kLosslessRateShare * gap_us / 1e6);
-    }
-  }
+  const uint64_t prev_frame_us = last_frame_us_;
   last_frame_us_ = frame.capture_time_us;
   // Frames are being held back when several came late within a second (one
   // late frame is just the first change after a quiet spell).
@@ -316,6 +309,23 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   }
   const bool holding_back =
       late_us_.front() != 0 && frame.capture_time_us - late_us_.front() <= 1'000'000;
+  {
+    const double cap = static_cast<double>(options_.bitrate_bps) / 8.0 * kLosslessBurstFrames * frame_us / 1e6;
+    if (!lossless_tokens_set_) {
+      lossless_tokens_ = cap;
+      lossless_tokens_set_ = true;
+    } else {
+      // A progressive keyframe being completed gets its own share (the
+      // screen is usually static meanwhile), unless frames are being held
+      // back: then the path is full already.
+      const double share =
+          pending_lossless_count_ > 0 && !holding_back ? kProgressiveShare : kLosslessRateShare;
+      const double gap_us = static_cast<double>(frame.capture_time_us -
+                                                std::min(frame.capture_time_us, prev_frame_us));
+      lossless_tokens_ = std::min(
+          cap, lossless_tokens_ + static_cast<double>(options_.bitrate_bps) / 8.0 * share * gap_us / 1e6);
+    }
+  }
   std::vector<bool> hot(changes.size());
   for (size_t i = 0; i < changes.size(); ++i) {
     uint8_t& n = seen_[changes[i].hash];
