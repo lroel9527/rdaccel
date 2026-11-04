@@ -17,7 +17,9 @@
  *   - Objects are opaque pointers created by *_create / *_connect / ... and
  *     released by *_destroy.
  *   - Callbacks receive the `user` pointer given with them and run on a
- *     library thread; see docs/integration.md for which one.
+ *     library thread; see docs/integration.md for which one. None runs
+ *     before the *_create call that set it up has returned, so callbacks
+ *     may use the handle it wrote.
  *   - Pixels are BGRA, 8 bits per channel (byte order B, G, R, A in memory).
  */
 #ifndef RDACCEL_RDACCEL_H_
@@ -438,7 +440,10 @@ typedef struct rda_host_config {
   /* An application message from the viewer. Transport receive thread. */
   void (*on_message)(void* user, uint32_t type, const uint8_t* payload, size_t n);
   /* Decides whether a viewer may connect, from the token in its config;
-   * nonzero = accept. NULL = accept everyone. Transport receive thread. */
+   * nonzero = accept. NULL = accept everyone. Transport receive thread.
+   * With a hook, nothing about the screen (its size, pictures, the cursor)
+   * is sent before the viewer is accepted; the host holds the newest frame
+   * and sends it once it is. */
   int (*on_auth)(void* user, const uint8_t* token, size_t n);
 
   /* Encryption. */

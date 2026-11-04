@@ -40,6 +40,9 @@ class CursorSender {
   // changed. An image larger than proto::kMaxCursorSize is ignored.
   void SetPosition(int32_t x, int32_t y, bool visible, uint64_t time_us);
   void SetImage(const CursorImage& img);
+  // Sends the current image and position again as if for the first time
+  // (a viewer that has none of what was sent before).
+  void Resync();
 
   struct Stats {
     uint64_t positions = 0;  // CursorPos messages
@@ -57,6 +60,7 @@ class CursorSender {
   proto::CursorPos pos_;
   bool have_pos_ = false;
   std::deque<uint64_t> sent_;  // ids the viewer has, oldest first
+  proto::CursorShape shape_;   // the current image (shape_id 0 = none)
   Stats stats_;
 };
 

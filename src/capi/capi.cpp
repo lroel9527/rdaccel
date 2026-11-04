@@ -6,6 +6,8 @@
 #include "rdaccel/rdaccel.h"
 
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
@@ -589,10 +591,36 @@ void rda_transport_destroy(rda_transport* t) { delete t; }
 
 // ---- host -----------------------------------------------------------------
 
+// Holds the application's callbacks until rda_host_create() or
+// rda_viewer_create() has returned, so they always see the handle in the
+// caller's variable (a viewer can connect while create is still running).
+class CallbackGate {
+ public:
+  void Wait() {
+    if (open_.load(std::memory_order_acquire)) return;
+    std::unique_lock<std::mutex> l(mu_);
+    cv_.wait(l, [this] { return open_.load(); });
+  }
+  void Open() {
+    {
+      std::lock_guard<std::mutex> l(mu_);
+      open_ = true;
+    }
+    cv_.notify_all();
+  }
+
+ private:
+  std::mutex mu_;
+  std::condition_variable cv_;
+  std::atomic<bool> open_{false};
+};
+
 struct rda_host {
   rda_host_config config;
   std::string encoder;  // storage for config.encoder
+  CallbackGate ready;   // before `host`, which runs the callbacks
   std::unique_ptr<rdacore::Host> host;
+  ~rda_host() { ready.Open(); }  // let a waiting callback finish first
 };
 
 namespace {
@@ -721,16 +749,19 @@ rda_status rda_host_create(rda_transport* transport, const rda_host_config* conf
   h->config.encryption_key = nullptr;  // not kept: the caller's memory
   if (raw->config.on_auth) {
     hc.auth = [raw](std::span<const uint8_t> token) {
+      raw->ready.Wait();
       return raw->config.on_auth(raw->config.user, token.data(), token.size()) != 0;
     };
   }
   if (raw->config.on_state) {
     hc.on_state = [raw](rdacore::ConnectionState st, rdacore::ConnectionError e) {
+      raw->ready.Wait();
       raw->config.on_state(raw->config.user, ToC(st), ToC(e));
     };
   }
   if (raw->config.on_message) {
     hc.on_message = [raw](uint32_t type, std::span<const uint8_t> p) {
+      raw->ready.Wait();
       raw->config.on_message(raw->config.user, type, p.data(), p.size());
     };
   }
@@ -739,6 +770,7 @@ rda_status rda_host_create(rda_transport* transport, const rda_host_config* conf
   if (raw->config.on_input) {
     raw->host->SetInputHandler([raw](const rdacore::InputEvent& ev) {
       const rda_input_event c = ToC(ev);
+      raw->ready.Wait();
       raw->config.on_input(raw->config.user, &c);
     });
   }
@@ -746,10 +778,12 @@ rda_status rda_host_create(rda_transport* transport, const rda_host_config* conf
     rdacore::log::Error(msg);
     if (raw->config.on_error) {
       const rda_status s = Classify(msg, msg.rfind("cursor", 0) == 0 ? RDA_ERR_UNSUPPORTED : RDA_ERR_CODEC);
+      raw->ready.Wait();
       raw->config.on_error(raw->config.user, s, msg.c_str());
     }
   });
   *out = h.release();
+  (*out)->ready.Open();
   return RDA_OK;
   RDA_GUARD_END
 }
@@ -895,7 +929,9 @@ struct rda_viewer {
   // Callback scratch, only touched on the decode thread. Declared before
   // `viewer`, so it outlives the thread that uses it.
   std::vector<rda_rect> changed;
+  CallbackGate ready;
   std::unique_ptr<rdacore::Viewer> viewer;
+  ~rda_viewer() { ready.Open(); }
 };
 
 extern "C" {
@@ -932,7 +968,10 @@ rda_status rda_viewer_create(rda_transport* transport, const rda_viewer_config* 
 
   rdacore::ViewerHandlers h;
   if (c.on_stream_info) {
-    h.on_stream_info = [raw](int32_t w, int32_t ht) { raw->config.on_stream_info(raw->config.user, w, ht); };
+    h.on_stream_info = [raw](int32_t w, int32_t ht) {
+      raw->ready.Wait();
+      raw->config.on_stream_info(raw->config.user, w, ht);
+    };
   }
   if (c.on_frame) {
     h.on_frame = [raw](const rdacore::ImageView& img, std::span<const rdacore::Rect> changed,
@@ -946,6 +985,7 @@ rda_status rda_viewer_create(rda_transport* transport, const rda_viewer_config* 
       fi.struct_size = sizeof(fi);
       fi.frame_id = info.frame_id;
       fi.capture_time_us = info.capture_time_us;
+      raw->ready.Wait();
       raw->config.on_frame(raw->config.user, &ci, raw->changed.data(), raw->changed.size(), &fi);
     };
   }
@@ -964,16 +1004,19 @@ rda_status rda_viewer_create(rda_transport* transport, const rda_viewer_config* 
         img = {s.image->width, s.image->height, s.image->hotspot_x, s.image->hotspot_y, s.image->bgra.data()};
         cs.image = &img;
       }
+      raw->ready.Wait();
       raw->config.on_cursor(raw->config.user, &cs);
     };
   }
   if (c.on_state) {
     h.on_state = [raw](rdacore::ConnectionState st, rdacore::ConnectionError e) {
+      raw->ready.Wait();
       raw->config.on_state(raw->config.user, ToC(st), ToC(e));
     };
   }
   if (c.on_message) {
     h.on_message = [raw](uint32_t type, std::span<const uint8_t> p) {
+      raw->ready.Wait();
       raw->config.on_message(raw->config.user, type, p.data(), p.size());
     };
   }
@@ -983,6 +1026,7 @@ rda_status rda_viewer_create(rda_transport* transport, const rda_viewer_config* 
   v->viewer = rdacore::Viewer::Create(std::move(t), std::move(h), std::move(opts), &err);
   if (!v->viewer) return Fail(RDA_ERR_UNSUPPORTED, err);
   *out = v.release();
+  (*out)->ready.Open();
   return RDA_OK;
   RDA_GUARD_END
 }

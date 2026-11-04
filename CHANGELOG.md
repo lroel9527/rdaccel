@@ -3,6 +3,16 @@
 版本号遵循语义化版本。1.0 之前，次版本号（0.x）变化时 C ABI 可能有不兼容改动；
 补丁版本（0.x.y）保持兼容。`find_package(rdaccel 0.4)` 只接受同一个 0.4.x。
 
+## 未发布
+
+- **安全**：设置了 `on_auth` 时，被拒绝的接收端以前在断开前仍能收到屏幕尺寸（`on_stream_info`）和光标，
+  还会先报一次 `RDA_STATE_CONNECTED`。现在认证通过之前不发任何画面相关的数据：Host 只保留最新一帧，
+  通过后再发尺寸、光标和关键帧。没有 `on_auth` 时行为不变（录制等没有接收端的传输照旧）。
+- **回调时机**：`rda_host_create` / `rda_viewer_create` 返回之前不会调用任何回调，回调里可以直接用 create 写出的句柄。
+  以前对端已经在等时（`rda_udp_bind`、管道），`on_state` 可能在句柄写出之前就执行。
+- **集成示例**：`examples/integration/`，一个纯 C 的远程协助 host + viewer，按外部项目的方式（`find_package` 或 pkg-config）
+  针对安装好的库构建；CI 在 Xvfb 里跑 `smoke.sh`。
+
 ## 0.4.0
 
 第三阶段：显示器选择、文字输入、输入注入，以及弱网（低到 0.4 Mbps）下的延迟。Mac（M 系列，VideoToolbox）复测：

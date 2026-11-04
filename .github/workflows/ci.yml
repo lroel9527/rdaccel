@@ -46,6 +46,14 @@ jobs:
           cc -std=c99 -pedantic -fsanitize=address,undefined examples/minimal_c/main.c \
             $(pkg-config --static --cflags --libs rdaccel) -o minimal_c_pc
           ./minimal_c_pc
+      - name: Integration example (CMake and pkg-config) against the installed package, run under Xvfb
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          cmake -S examples/integration -B build-integration -DCMAKE_PREFIX_PATH="$PWD/inst" -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined" -DCMAKE_C_FLAGS="-fsanitize=address,undefined"
+          cmake --build build-integration
+          PKG_CONFIG_PATH="$PWD/inst/lib/pkgconfig" make -C examples/integration STATIC=1 CFLAGS="-O1 -fsanitize=address,undefined" LDFLAGS=
+          xvfb-run -a -s "-screen 0 1280x720x24" examples/integration/smoke.sh build-integration
       - name: Shared library exports only the C ABI
         run: |
           cmake -S . -B build-shared -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DRDACCEL_BUILD_TESTS=OFF -DRDACCEL_INSTALL_TOOLS=ON
@@ -138,6 +146,9 @@ jobs:
           cmake --install build --prefix "$PWD/inst"
           cmake -S examples/minimal -B build-minimal -DCMAKE_PREFIX_PATH="$PWD/inst"
           cmake --build build-minimal
+          cmake -S examples/integration -B build-integration -DCMAKE_PREFIX_PATH="$PWD/inst"
+          cmake --build build-integration
+          PKG_CONFIG_PATH="$PWD/inst/lib/pkgconfig" make -C examples/integration STATIC=1
       - name: Shared library exports only the C ABI
         run: |
           cmake -S . -B build-shared -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DRDACCEL_BUILD_TESTS=OFF -DRDACCEL_INSTALL_TOOLS=ON

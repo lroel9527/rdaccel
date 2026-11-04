@@ -524,6 +524,161 @@ TEST(CApi, AuthHookRejects) {
   EXPECT_FALSE(p.viewer_ev.Has(RDA_STATE_CONNECTED));
 }
 
+namespace {
+
+struct Leak {
+  std::atomic<int> stream_info{0}, frames{0}, cursor{0}, connected{0}, disconnected{0};
+  static void OnStreamInfo(void* u, int32_t, int32_t) { ++static_cast<Leak*>(u)->stream_info; }
+  static void OnFrame(void* u, const rda_image*, const rda_rect*, size_t, const rda_frame_info*) {
+    ++static_cast<Leak*>(u)->frames;
+  }
+  static void OnCursor(void* u, const rda_cursor_state*) { ++static_cast<Leak*>(u)->cursor; }
+  static void OnState(void* u, rda_state s, rda_status) {
+    if (s == RDA_STATE_CONNECTED) ++static_cast<Leak*>(u)->connected;
+    if (s == RDA_STATE_DISCONNECTED) ++static_cast<Leak*>(u)->disconnected;
+  }
+};
+
+int Refuse(void*, const uint8_t*, size_t) { return 0; }
+int Accept(void*, const uint8_t*, size_t) { return 1; }
+
+}  // namespace
+
+// A viewer the auth hook refuses learns nothing about the screen: not its
+// size, not a picture, not the pointer, even when the host has been
+// streaming (into a transport that holds the bytes) before it came.
+TEST(CApi, RefusedViewerSeesNothingOfTheScreen) {
+  rda_transport *a = nullptr, *b = nullptr;
+  ASSERT_EQ(rda_pipe_create(&a, &b), RDA_OK);
+  rda_host_config hc;
+  rda_host_config_default(&hc);
+  hc.on_auth = &Refuse;
+  rda_host* host = nullptr;
+  ASSERT_EQ(rda_host_create(a, &hc, &host), RDA_OK) << rda_last_error();
+  std::vector<uint8_t> px;
+  rda_rect rects[16];
+  size_t nr = 0;
+  px.resize(static_cast<size_t>(kW) * kH * 4);
+  for (uint64_t i = 0; i < 3; ++i) {
+    ASSERT_EQ(rda_test_pattern_render(i, kW, kH, px.data(), i > 0, rects, 16, &nr), RDA_OK);
+    const rda_image img{px.data(), kW, kH, kW * 4};
+    ASSERT_EQ(rda_host_submit_frame(host, &img, rda_now_us(), nullptr, 0), RDA_OK) << rda_last_error();
+  }
+  std::vector<uint8_t> cur(16 * 16 * 4, 0xff);
+  const rda_cursor_image ci{16, 16, 0, 0, cur.data()};
+  ASSERT_EQ(rda_host_set_cursor_image(host, &ci), RDA_OK);
+  rda_host_set_cursor(host, 10, 20, 1, 0);
+
+  Leak got;
+  rda_viewer_config vc;
+  rda_viewer_config_default(&vc);
+  vc.user = &got;
+  vc.on_stream_info = &Leak::OnStreamInfo;
+  vc.on_frame = &Leak::OnFrame;
+  vc.on_cursor = &Leak::OnCursor;
+  vc.on_state = &Leak::OnState;
+  rda_viewer* viewer = nullptr;
+  ASSERT_EQ(rda_viewer_create(b, &vc, &viewer), RDA_OK) << rda_last_error();
+  ASSERT_TRUE(WaitUntil([&] { return got.disconnected.load() > 0; }));
+  EXPECT_EQ(rda_viewer_get_state(viewer), RDA_STATE_DISCONNECTED);
+  rda_host_set_cursor(host, 30, 40, 1, 0);
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));  // anything late
+  rda_viewer_destroy(viewer);
+  rda_host_destroy(host);
+  EXPECT_EQ(got.connected.load(), 0);
+  EXPECT_EQ(got.stream_info.load(), 0);
+  EXPECT_EQ(got.frames.load(), 0);
+  EXPECT_EQ(got.cursor.load(), 0);
+}
+
+// The same host, accepted: it gets the size, a full picture and the cursor
+// that were current before it connected.
+TEST(CApi, ViewerArrivingLateGetsScreenAndCursor) {
+  rda_transport *a = nullptr, *b = nullptr;
+  ASSERT_EQ(rda_pipe_create(&a, &b), RDA_OK);
+  rda_host_config hc;
+  rda_host_config_default(&hc);
+  hc.on_auth = &Accept;
+  rda_host* host = nullptr;
+  ASSERT_EQ(rda_host_create(a, &hc, &host), RDA_OK) << rda_last_error();
+  std::vector<uint8_t> px(static_cast<size_t>(kW) * kH * 4);
+  rda_rect rects[16];
+  size_t nr = 0;
+  ASSERT_EQ(rda_test_pattern_render(0, kW, kH, px.data(), 0, rects, 16, &nr), RDA_OK);
+  const rda_image img{px.data(), kW, kH, kW * 4};
+  ASSERT_EQ(rda_host_submit_frame(host, &img, rda_now_us(), nullptr, 0), RDA_OK) << rda_last_error();
+  std::vector<uint8_t> cur(16 * 16 * 4, 0xff);
+  const rda_cursor_image ci{16, 16, 0, 0, cur.data()};
+  ASSERT_EQ(rda_host_set_cursor_image(host, &ci), RDA_OK);
+  rda_host_set_cursor(host, 10, 20, 1, 0);
+
+  Leak got;
+  rda_viewer_config vc;
+  rda_viewer_config_default(&vc);
+  vc.user = &got;
+  vc.on_stream_info = &Leak::OnStreamInfo;
+  vc.on_frame = &Leak::OnFrame;
+  vc.on_cursor = &Leak::OnCursor;
+  vc.on_state = &Leak::OnState;
+  rda_viewer* viewer = nullptr;
+  ASSERT_EQ(rda_viewer_create(b, &vc, &viewer), RDA_OK) << rda_last_error();
+  // No new frame: the host re-sends the one it kept.
+  EXPECT_TRUE(WaitUntil([&] { return got.frames.load() > 0 && got.cursor.load() > 0; }));
+  EXPECT_EQ(got.connected.load(), 1);
+  EXPECT_EQ(got.stream_info.load(), 1);
+  rda_viewer_destroy(viewer);
+  rda_host_destroy(host);
+}
+
+namespace {
+
+struct HandleSeen {
+  rda_viewer** viewer = nullptr;
+  rda_host** host = nullptr;
+  std::atomic<int> null_seen{0}, calls{0};
+  static void OnViewerState(void* u, rda_state, rda_status) {
+    auto* h = static_cast<HandleSeen*>(u);
+    ++h->calls;
+    if (!*h->viewer) ++h->null_seen;
+  }
+  static void OnHostState(void* u, rda_state, rda_status) {
+    auto* h = static_cast<HandleSeen*>(u);
+    ++h->calls;
+    if (!*h->host) ++h->null_seen;
+  }
+};
+
+}  // namespace
+
+// Callbacks may use the handle from the variable create writes: none runs
+// before create has returned, even when the peer is already there.
+TEST(CApi, CallbacksSeeTheHandleCreateReturned) {
+  for (int round = 0; round < 20; ++round) {
+    rda_transport *a = nullptr, *b = nullptr;
+    ASSERT_EQ(rda_pipe_create(&a, &b), RDA_OK);
+    rda_viewer* viewer = nullptr;
+    rda_host* host = nullptr;
+    HandleSeen seen;
+    seen.viewer = &viewer;
+    seen.host = &host;
+    rda_viewer_config vc;
+    rda_viewer_config_default(&vc);
+    vc.user = &seen;
+    vc.on_state = &HandleSeen::OnViewerState;
+    // The viewer's hello is waiting in the pipe before the host exists.
+    ASSERT_EQ(rda_viewer_create(b, &vc, &viewer), RDA_OK);
+    rda_host_config hc;
+    rda_host_config_default(&hc);
+    hc.user = &seen;
+    hc.on_state = &HandleSeen::OnHostState;
+    ASSERT_EQ(rda_host_create(a, &hc, &host), RDA_OK);
+    ASSERT_TRUE(WaitUntil([&] { return seen.calls.load() >= 2; }));
+    rda_viewer_destroy(viewer);
+    rda_host_destroy(host);
+    EXPECT_EQ(seen.null_seen.load(), 0) << "round " << round;
+  }
+}
+
 TEST(CApi, KeyCodes) {
   EXPECT_EQ(rda_keycode_from_mac(0x00), 0x04u);
   EXPECT_EQ(rda_keycode_to_evdev(0x04), 30u);

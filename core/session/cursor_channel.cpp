@@ -89,21 +89,31 @@ void CursorSender::SetImage(const CursorImage& img) {
   const uint64_t id = CursorImageId(img);
   std::lock_guard<std::mutex> lock(mu_);
   if (id == pos_.shape_id) return;
+  shape_.shape_id = id;
+  shape_.hotspot_x = img.hotspot_x;
+  shape_.hotspot_y = img.hotspot_y;
+  shape_.width = static_cast<uint32_t>(img.width);
+  shape_.height = static_cast<uint32_t>(img.height);
+  shape_.bgra = img.bgra;
   if (std::find(sent_.begin(), sent_.end(), id) == sent_.end()) {
-    proto::CursorShape s;
-    s.shape_id = id;
-    s.hotspot_x = img.hotspot_x;
-    s.hotspot_y = img.hotspot_y;
-    s.width = static_cast<uint32_t>(img.width);
-    s.height = static_cast<uint32_t>(img.height);
-    s.bgra = img.bgra;
     ++stats_.images;
-    SendLocked(s);
+    SendLocked(shape_);
     sent_.push_back(id);
     if (sent_.size() > kCursorCacheSize) sent_.pop_front();
   }
   pos_.shape_id = id;
   // Tell the viewer right away, with the last known position.
+  if (have_pos_) SendPosLocked();
+}
+
+void CursorSender::Resync() {
+  std::lock_guard<std::mutex> lock(mu_);
+  sent_.clear();
+  if (shape_.shape_id) {
+    ++stats_.images;
+    SendLocked(shape_);
+    sent_.push_back(shape_.shape_id);
+  }
   if (have_pos_) SendPosLocked();
 }
 
