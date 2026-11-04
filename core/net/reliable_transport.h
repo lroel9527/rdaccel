@@ -130,6 +130,7 @@ class ReliableTransport final : public transport::ITransport {
     double bw;
   };
   std::deque<BwSample> bw_samples_;
+  uint64_t queue_srtt_ = 0;   // the smoothed round trip when it began
   uint64_t queue_since_ = 0;  // when the round trip last rose above 2x its minimum
   double full_bw_ = 0;
   int full_bw_rounds_ = 0;

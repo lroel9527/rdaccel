@@ -144,9 +144,15 @@ uint64_t ReliableTransport::Cwnd() const {
   // CI), a window of two minimum round trips could not keep the path busy,
   // so its samples came in below the estimate, which shrank the window in
   // turn. The pacing rate, not the window, keeps the queue short.
+  // While a queue stands, though, the smoothed round trip is held where it
+  // was when the queue began: the queue raises the round trip, which would
+  // widen the window, which lets the queue grow further (with acknowledge-
+  // ments in bunches the estimate runs above the path, and the pacing rate
+  // then cannot drain it: cursor latency doubled on a loaded macOS runner).
   // A few packets on top absorb delayed and stretched acknowledgements.
+  const uint64_t srtt = queue_since_ != 0 ? std::min(srtt_, queue_srtt_) : srtt_;
   double rtt = static_cast<double>(min_rtt_);
-  if (mode_ != Mode::kStartup) rtt = (rtt + static_cast<double>(std::max(srtt_, min_rtt_))) / 2;
+  if (mode_ != Mode::kStartup) rtt = (rtt + static_cast<double>(std::max(srtt, min_rtt_))) / 2;
   const auto bdp = static_cast<uint64_t>(gain * bw_ * rtt);
   const uint64_t cwnd = std::max(bdp + 4 * kMaxDatagram, kMinCwnd);
   // Like the pacing rate, the window does not shrink below its initial
@@ -424,6 +430,7 @@ void ReliableTransport::OnRateSample(const SentPacket& p, uint64_t now) {
     queue_since_ = 0;
   } else if (queue_since_ == 0 && latest_rtt_ > 2 * min_rtt_ + 20'000) {
     queue_since_ = now;
+    queue_srtt_ = srtt_;
   }
   // Samples from before the queue describe the old path. For its first two
   // round trips, only the last round trip counts (the first samples it
