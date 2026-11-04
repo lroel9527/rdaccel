@@ -6,7 +6,7 @@
 //   rdaccel_netsim [--background=SCREEN.ppm] [--scenario=video] [--seconds=10] [--fps=30]
 //                  [--bandwidth=4000000] [--delay=20] [--jitter=0] [--loss=0] [--queue-ms=200]
 //                  [--drop-to=BPS --drop-at=SECONDS]   bandwidth change mid-run
-//                  [--bitrate=8000000] [--cc=1] [--abr=1] [--max-queue-ms=50] [--regions=1] [--progressive=1]
+//                  [--bitrate=8000000] [--min-bitrate=300000] [--cc=1] [--abr=1] [--max-queue-ms=50] [--regions=1] [--progressive=1]
 //                  [--warmup=3]   seconds left out of the steady-state numbers
 //                  [--cursor=1]   also move the mouse pointer (cursor channel) and
 //                                 report how long positions take to arrive
@@ -151,6 +151,7 @@ int main(int argc, char** argv) {
   cfg.fps = fps;
   cfg.bitrate_bps = args.num("bitrate", 8'000'000);
   cfg.adaptive_bitrate = args.num("abr", 1) != 0;
+  cfg.min_bitrate_bps = args.num("min-bitrate", cfg.min_bitrate_bps);
   cfg.max_queue_ms = static_cast<int32_t>(args.num("max-queue-ms", 50));
   cfg.video_regions = args.num("regions", 1) != 0;
   cfg.progressive = args.num("progressive", 1) != 0;

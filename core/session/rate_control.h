@@ -54,6 +54,7 @@ class RateController {
   uint64_t queue_delay_us_ = 0;
   uint64_t skipped_ = 0;  // frames skipped since the last update
   uint64_t last_queued_ = 0;
+  uint64_t path_skips_ = 0;  // frames considered for skipping on a path queue
   uint32_t min_rtt_us_ = 0;  // lowest smoothed RTT seen
   int64_t encoder_ = 0;      // last rate given to the encoder (0 = the configured one)
   double scale_ = 1;         // encoder rate = target * scale

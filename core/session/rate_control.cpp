@@ -9,7 +9,16 @@ RateController::Decision RateController::Update(uint64_t now_us, const Transport
   Decision d;
   const int64_t drain_bps = st.bandwidth_bps > 0 ? st.bandwidth_bps : target_;
   queue_delay_us_ = drain_bps > 0 ? st.queued_bytes * 8'000'000 / static_cast<uint64_t>(drain_bps) : 0;
-  d.skip_frame = queue_delay_us_ > max_queue_us_;
+  if (st.rtt_us > 0 && (min_rtt_us_ == 0 || st.rtt_us < min_rtt_us_)) min_rtt_us_ = st.rtt_us;
+  const bool path_queue = min_rtt_us_ > 0 && st.rtt_us > 2 * min_rtt_us_ + max_queue_us_;
+  // A queue inside the network counts too once the target is at its floor:
+  // an encoder that sends more than the path takes even there (VideoToolbox
+  // at 300 kbps sends ~500) would otherwise keep that queue standing, with
+  // the transport's own queue empty (the window lets it all out). Every
+  // other frame only: the round trip is measured on what is sent, so with
+  // nothing sent it would stay high and keep every frame back.
+  const bool halve = path_queue && target_ <= min_bps_ && (++path_skips_ & 1) != 0;
+  d.skip_frame = queue_delay_us_ > max_queue_us_ || halve;
   if (d.skip_frame) ++skipped_;
 
   constexpr uint64_t kInterval = 250'000;
@@ -23,8 +32,6 @@ RateController::Decision RateController::Update(uint64_t now_us, const Transport
   skipped_ = 0;
   const bool draining = st.queued_bytes < last_queued_;
   last_queued_ = st.queued_bytes;
-  if (st.rtt_us > 0 && (min_rtt_us_ == 0 || st.rtt_us < min_rtt_us_)) min_rtt_us_ = st.rtt_us;
-  const bool path_queue = min_rtt_us_ > 0 && st.rtt_us > 2 * min_rtt_us_ + max_queue_us_;
   if (skipped || path_queue || queue_delay_us_ > max_queue_us_ / 2) {
     // The queue is building (frames had to be skipped), so the sender is
     // not application limited and the estimate is the path's rate: back off
@@ -36,9 +43,13 @@ RateController::Decision RateController::Update(uint64_t now_us, const Transport
   } else {
     // While the queue stays short, the estimate only shows what we sent
     // (a lower bound of the path), so grow gradually instead of capping at
-    // it; a building queue will stop the growth.
+    // it; a building queue will stop the growth. Twice the estimate stays
+    // the ceiling, though, also on the way down: a target left at 8 Mbps
+    // after the path fell to 1 (the encoder sending less than either) would
+    // let the next busy scene overshoot the path eightfold. Down by 10% a
+    // step at most, as the first estimates of a session are still low.
     next = std::min(target_ + target_ / 4, std::max(st.bandwidth_bps * 2, min_bps_));
-    next = std::max(next, target_);
+    next = std::max(next, target_ * 9 / 10);
   }
   target_ = std::clamp(next, min_bps_, max_bps_);
 
