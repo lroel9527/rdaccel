@@ -160,7 +160,35 @@ std::unique_ptr<TcpTransport> TcpTransport::Bind(uint16_t port, std::string* err
     ::close(ls);
     return nullptr;
   }
-  return std::unique_ptr<TcpTransport>(new TcpTransport(Listening{}, ls));
+  sockaddr_storage bound{};
+  socklen_t blen = sizeof(bound);
+  uint16_t actual = port;
+  if (::getsockname(ls, reinterpret_cast<sockaddr*>(&bound), &blen) == 0) {
+    actual = bound.ss_family == AF_INET6 ? ntohs(reinterpret_cast<sockaddr_in6*>(&bound)->sin6_port)
+                                         : ntohs(reinterpret_cast<sockaddr_in*>(&bound)->sin_port);
+  }
+  auto t = std::unique_ptr<TcpTransport>(new TcpTransport(Listening{}, ls));
+  t->bound_port_ = actual;
+  return t;
+}
+
+std::unique_ptr<ITransport> TcpTransport::NextPeer(std::string* error) {
+  if (bound_port_ == 0) {
+    if (error) *error = "a connecting transport has only its own peer";
+    return nullptr;
+  }
+  // The listening socket closed when the peer was accepted (others are
+  // refused meanwhile); listen again on the same port.
+  Close();
+  if (reader_.joinable()) reader_.join();
+  {
+    std::lock_guard<std::mutex> lock(fd_mu_);
+    if (fd_ >= 0) ::close(fd_);
+    fd_ = -1;
+  }
+  if (listen_fd_ >= 0) ::close(listen_fd_);
+  listen_fd_ = -1;
+  return Bind(bound_port_, error);
 }
 
 TcpTransport::TcpTransport(int fd) : fd_(fd), reader_([this] { ReadLoop(); }) {}

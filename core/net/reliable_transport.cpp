@@ -62,21 +62,39 @@ ReliableTransport::ReliableTransport(std::unique_ptr<DatagramSocket> socket, Rel
 }
 
 ReliableTransport::~ReliableTransport() {
-  // Linger briefly so the last control bytes (a Goodbye) reach the peer:
-  // wait until they are acknowledged, at most kLingerUs.
-  {
-    constexpr uint64_t kLingerUs = 300'000;
-    const uint64_t deadline = Now() + kLingerUs;
-    const auto& control = out_[static_cast<size_t>(transport::Channel::kControl)];
-    std::unique_lock<std::mutex> lock(mu_);
-    while (!closed_ && heard_peer_ && !control.buf.empty() && Now() < deadline) {
-      lock.unlock();
-      std::this_thread::sleep_for(std::chrono::milliseconds(2));
-      lock.lock();
-    }
-  }
+  Linger();
   Close();
   if (worker_.joinable()) worker_.join();
+}
+
+void ReliableTransport::Linger() {
+  // Linger briefly so the last control bytes (a Goodbye) reach the peer:
+  // wait until they are acknowledged, at most kLingerUs.
+  constexpr uint64_t kLingerUs = 300'000;
+  const uint64_t deadline = Now() + kLingerUs;
+  const auto& control = out_[static_cast<size_t>(transport::Channel::kControl)];
+  std::unique_lock<std::mutex> lock(mu_);
+  while (!closed_ && heard_peer_ && !control.buf.empty() && Now() < deadline) {
+    lock.unlock();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    lock.lock();
+  }
+}
+
+std::unique_ptr<transport::ITransport> ReliableTransport::NextPeer(std::string* error) {
+  if (opt_.client) {
+    if (error) *error = "a connecting transport has only its own peer";
+    return nullptr;
+  }
+  Linger();
+  Close();
+  if (worker_.joinable()) worker_.join();
+  auto next = socket_->NextPeer();
+  if (!next) {
+    if (error) *error = "this socket has a fixed peer";
+    return nullptr;
+  }
+  return std::make_unique<ReliableTransport>(std::move(next), opt_);
 }
 
 void ReliableTransport::Close() {
@@ -606,6 +624,21 @@ void ReliableTransport::OnDatagram(std::span<const uint8_t> d) {
   {
     std::lock_guard<std::mutex> lock(mu_);
     if (closed_) return;
+    if (!heard_peer_ && !opt_.client) {
+      // Only the start of a connection may make its sender the peer: the
+      // client's hello, or the first control bytes. Anything else (a port
+      // scan, a late packet from the viewer before) must not take the place
+      // of the next viewer, so its sender is forgotten, where the socket can.
+      bool starts = d[0] == kHello;
+      if (d[0] == kData) {
+        proto::ByteReader h(d.subspan(1));
+        uint64_t pn = 0, off = 0;
+        uint8_t ch = 0;
+        starts = h.varint(pn) && h.u8(ch) && h.varint(off) &&
+                 ch == static_cast<uint8_t>(transport::Channel::kControl) && off == 0;
+      }
+      if (!starts && socket_->ForgetPeer()) return;
+    }
     if (!heard_peer_) {
       heard_peer_ = true;
       cv_.notify_all();  // data held for the peer can go now

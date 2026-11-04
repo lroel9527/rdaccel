@@ -77,7 +77,9 @@ viewer->SendInput({rdaccel::InputKind::kMouseMove, 100, 200});
 
 **连不上怎么办。** `ConnectUdp` 不阻塞，`Viewer` 创建后在 `peer_timeout_ms` 内等不到 Host 的回应就以 `RDA_ERR_TIMEOUT` 断开，这就是连接超时。Host 端用 `BindUdp` / `BindTcp`：马上返回，马上创建 `Host`，用状态回调等对方连上（0.5 起不再有阻塞的 `ListenUdp` / `ListenTcp`）。
 
-**连接状态。** `Viewer` 创建后先发握手（协议版本、能力位、可选的认证令牌），`Host` 检查后回应，两边进入 `kConnected`。之后双方大约每秒互发心跳，`peer_timeout_ms`（默认 10 秒，0 = 不超时）内收不到对方任何数据就判定断开。主动关闭（析构 `Viewer` / `Host`）会给对方发 Goodbye，对方立刻收到断开而不是等超时。断开是终态，要重连就重建 `Host` / `Viewer` 和传输。
+**连接状态。** `Viewer` 创建后先发握手（协议版本、能力位、可选的认证令牌），`Host` 检查后回应，两边进入 `kConnected`。之后双方大约每秒互发心跳，`peer_timeout_ms`（默认 10 秒，0 = 不超时）内收不到对方任何数据就判定断开。主动关闭（析构 `Viewer` / `Host`）会给对方发 Goodbye，对方立刻收到断开而不是等超时。`Viewer` 断开是终态，要重连就重建 `Viewer` 和传输。
+
+**一个 Host 依次服务多个接收端。** `keep_serving`（默认开）时，用 `BindUdp` / `BindTcp`（或未连接的 `UdpFromFd` 套接字）的 `Host` 在接收端离开、超时、被 `on_auth` 拒绝或密钥不对之后，先报 `kDisconnected`（带原因），再报 `kConnecting`，在同一个端口等下一个接收端。抓屏一直在跑；下一个接收端从关键帧开始，拿到完整的画面、光标和 Hello；统计数字跨接收端累计。同一时间只服务一个接收端：服务期间别的接收端连不进来（UDP 收不到回应，TCP 被拒绝），重试即可。只发了杂包、不握手的对端（端口扫描之类）占不住位置：不像本协议开头的包直接忽略，像的在 `peer_timeout_ms` 内不握手就断开。管道、录制、自定义传输和已连接的套接字没有“下一个对端”，第一次断开仍是终态；`keep_serving = false` 也一样。
 
 ```cpp
 host.SetStateHandler([](rdaccel::ConnectionState s, rda_status reason) {

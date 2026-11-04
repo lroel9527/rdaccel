@@ -2,15 +2,16 @@
  * the way an outside application would use rdaccel: plain C, only
  * <rdaccel/rdaccel.h>, built against the installed library.
  *
- * It serves one viewer at a time, one after the other, on a UDP port:
+ * One host serves one viewer at a time, one after the other, on a UDP port:
  *   - everything is encrypted with a key both sides keep in a file;
  *   - a viewer must present the pairing code (the auth token) to get in;
  *   - the screen (or one display of it) is captured by the library;
  *   - the viewer's mouse and keyboard are played into this machine with
  *     the library's injector (--inject);
  *   - clipboard text from the viewer is kept; pings are answered;
- *   - when the viewer leaves, the host is torn down and a fresh one waits
- *     for the next viewer.
+ *   - when the viewer leaves (or is refused, or has the wrong key), the same
+ *     host waits for the next one (keep_serving, the default); the screen
+ *     capture keeps running.
  *
  *   support_host --key-file=PATH [--port=7300] [--pair-code=CODE]
  *                [--display=0] [--inject] [--sessions=0] [--fps=30]
@@ -48,6 +49,8 @@ static void on_state(void* user, rda_state state, rda_status reason) {
     printf("viewer connected\n");
   } else if (state == RDA_STATE_DISCONNECTED) {
     printf("viewer gone: %s\n", rda_status_str(reason));
+  } else if (state == RDA_STATE_CONNECTING) {
+    printf("waiting for the next viewer\n");
   }
   fflush(stdout);
   events_set_state(&app->events, state, reason);
@@ -110,14 +113,16 @@ static int list_displays(void) {
   return 0;
 }
 
-/* One viewer, start to end. Returns 0 to keep serving, 1 to stop. */
-static int serve_one(host_app* app, uint16_t port, const uint8_t key[32], int fps) {
+/* Serves viewers until `sessions` have come and gone (0 = until a signal)
+ * or the host stops. Returns the exit code. */
+static int serve(host_app* app, uint16_t port, const uint8_t key[32], int fps, int sessions) {
   rda_transport* t = NULL;
   rda_host_config cfg;
   rda_host_stats last, now;
   rda_status s;
   uint64_t t0;
-  int quit = 0;
+  int done = 0, code = 0;
+  unsigned long inputs_before = 0, injected_before = 0, failures_before = 0;
 
   events_init(&app->events);
   s = rda_udp_bind(port, &t);
@@ -136,6 +141,7 @@ static int serve_one(host_app* app, uint16_t port, const uint8_t key[32], int fp
   cfg.on_input = on_input;
   cfg.on_message = on_message;
   cfg.on_error = on_error;
+  /* cfg.keep_serving = 1 (the default): one host for every viewer. */
 
   /* The callbacks use app->host. rda_host_create() writes it before any
    * callback runs (see the header). */
@@ -159,10 +165,32 @@ static int serve_one(host_app* app, uint16_t port, const uint8_t key[32], int fp
   memset(&last, 0, sizeof last);
   last.struct_size = sizeof last;
   t0 = rda_now_us();
-  for (;;) {
-    int ended = events_wait_end(&app->events, 2000);
-    if (g_stop) quit = 1;
-    if (ended || quit) break;
+  while (!g_stop) {
+    if (events_wait_disconnects(&app->events, done + 1, 2000)) {
+      if (app->events.fatal) {
+        code = 1;
+        break;
+      }
+      ++done;
+      {
+        char enc[64];
+        now.struct_size = sizeof now;
+        rda_host_get_stats(app->host, &now);
+        rda_host_encoder_name(app->host, enc, sizeof enc);
+        /* Stats count over the host's life, across viewers. */
+        printf("session over: encoder %s, %llu frames so far, %.2f MB, %lu inputs (%lu injected, "
+               "%lu failed)\n",
+               enc, (unsigned long long)now.frames_encoded, now.bytes_sent / 1e6,
+               app->inputs - inputs_before, app->injected - injected_before,
+               app->inject_failures - failures_before);
+        fflush(stdout);
+        inputs_before = app->inputs;
+        injected_before = app->injected;
+        failures_before = app->inject_failures;
+      }
+      if (sessions > 0 && done >= sessions) break;
+      continue;
+    }
     if (rda_host_get_state(app->host) != RDA_STATE_CONNECTED) continue;
     now.struct_size = sizeof now;
     rda_host_get_stats(app->host, &now);
@@ -174,22 +202,11 @@ static int serve_one(host_app* app, uint16_t port, const uint8_t key[32], int fp
     fflush(stdout);
     last = now;
   }
-  if (app->events.fatal) quit = 1;
-  {
-    char enc[64];
-    now.struct_size = sizeof now;
-    rda_host_get_stats(app->host, &now);
-    rda_host_encoder_name(app->host, enc, sizeof enc);
-    printf("session over: encoder %s, %llu frames, %.2f MB, %lu inputs (%lu injected, %lu failed)\n",
-           enc, (unsigned long long)now.frames_encoded, now.bytes_sent / 1e6, app->inputs,
-           app->injected, app->inject_failures);
-  }
   /* Not from a callback: main thread. */
   rda_host_destroy(app->host);
   app->host = NULL;
   events_destroy(&app->events);
-  app->inputs = app->injected = app->inject_failures = 0;
-  return quit;
+  return code;
 }
 
 int main(int argc, char** argv) {
@@ -199,7 +216,7 @@ int main(int argc, char** argv) {
   uint16_t port = (uint16_t)atoi(arg_value(argc, argv, "--port", "7300"));
   int sessions = atoi(arg_value(argc, argv, "--sessions", "0"));
   int fps = atoi(arg_value(argc, argv, "--fps", "30"));
-  int served = 0;
+  int code;
 
   if (!check_library_version()) return 1;
   if (getenv("SUPPORT_LOG")) rda_set_log(log_to_stderr, NULL, RDA_LOG_INFO);
@@ -231,14 +248,11 @@ int main(int argc, char** argv) {
   signal(SIGTERM, on_signal);
 
   printf("support_host on rdaccel %s (%s)\n", rda_version_string(), rda_platform_name());
-  while (!g_stop) {
-    if (serve_one(&app, port, key, fps)) break;
-    if (sessions > 0 && ++served >= sessions) break;
-  }
+  code = serve(&app, port, key, fps, sessions);
   if (app.injector) rda_injector_destroy(app.injector);
   pthread_mutex_lock(&app.clip_mu);
   if (app.clipboard[0]) printf("last clipboard text: \"%s\"\n", app.clipboard);
   pthread_mutex_unlock(&app.clip_mu);
   pthread_mutex_destroy(&app.clip_mu);
-  return 0;
+  return code;
 }

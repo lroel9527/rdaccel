@@ -69,10 +69,24 @@ class Transport {
   // False while a listening transport does not know its peer yet (nothing
   // sent would arrive); the Host then holds frames instead of encoding them.
   virtual bool PeerKnown() const { return true; }
+  // Someone is at the other end, though perhaps not a viewer yet (a wrapper
+  // such as encryption may still be agreeing keys). The host gives up on a
+  // listening transport's peer that does not complete the handshake.
+  virtual bool PeerPresent() const { return PeerKnown(); }
 
   virtual bool GetStats(TransportStats* out) const {
     (void)out;
     return false;
+  }
+
+  // For a host-side transport whose peer is whoever comes first (BindUdp,
+  // BindTcp): once that peer has gone, closes this transport and returns a
+  // fresh one on the same port that waits for the next peer. The host calls
+  // it to serve viewers one after another. Null (with `error`) when the
+  // peer is fixed (the default); this transport may be closed even then.
+  virtual std::unique_ptr<Transport> NextPeer(std::string* error) {
+    if (error) *error = "this transport cannot take another peer";
+    return nullptr;
   }
 };
 

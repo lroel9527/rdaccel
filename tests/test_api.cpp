@@ -4,7 +4,9 @@
 #include <rdaccel/rdaccel.hpp>
 
 #include <gtest/gtest.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <chrono>
@@ -737,4 +739,163 @@ TEST(PublicApi, WrongKeyDisconnectsBothSides) {
   EXPECT_EQ(viewer_reason.load(), RDA_ERR_AUTH);
   EXPECT_EQ(host_reason.load(), RDA_ERR_AUTH);
   EXPECT_EQ(viewer->stats().frames_decoded, 0u);
+}
+
+// ---- one viewer after another (HostConfig::keep_serving) --------------------
+
+namespace {
+
+// The host's state changes, in order.
+struct StateLog {
+  std::mutex mu;
+  std::vector<std::pair<rdaccel::ConnectionState, rda_status>> seen;
+  void Attach(rdaccel::Host& host) {
+    host.SetStateHandler([this](rdaccel::ConnectionState s, rda_status r) {
+      std::lock_guard<std::mutex> l(mu);
+      seen.emplace_back(s, r);
+    });
+  }
+  // Waits until the host has gone back to waiting after `disconnects`
+  // disconnects; returns the reason of the last one (0 on time out).
+  int WaitWaiting(rdaccel::Host& host, size_t disconnects) {
+    for (int i = 0; i < 1000; ++i) {
+      {
+        std::lock_guard<std::mutex> l(mu);
+        size_t d = 0;
+        int last = 0;
+        for (auto& [s, r] : seen) {
+          if (s == rdaccel::ConnectionState::kDisconnected) {
+            ++d;
+            last = r;
+          }
+        }
+        if (d >= disconnects && !seen.empty() && seen.back().first == rdaccel::ConnectionState::kConnecting &&
+            host.state() == rdaccel::ConnectionState::kConnecting) {
+          return last;
+        }
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return 0;
+  }
+};
+
+std::unique_ptr<rdaccel::Viewer> Connect(bool tcp, uint16_t port, std::vector<uint8_t> key,
+                                         std::vector<uint8_t> token = {}) {
+  std::string err;
+  rdaccel::ViewerOptions vo;
+  vo.allow_plaintext = key.empty();
+  vo.encryption_key = std::move(key);
+  vo.auth_token = std::move(token);
+  auto t = tcp ? rdaccel::ConnectTcp("127.0.0.1", port, &err) : rdaccel::ConnectUdp("127.0.0.1", port, &err);
+  return rdaccel::Viewer::Create(std::move(t), {}, vo, &err);
+}
+
+void ServesViewersOneAfterAnother(bool tcp, uint16_t port) {
+  std::string err;
+  const std::vector<uint8_t> key(32, 0x3c);
+  rdaccel::HostConfig cfg;
+  cfg.encryption_key = key;
+  rdaccel::Host host(tcp ? rdaccel::BindTcp(port, &err) : rdaccel::BindUdp(port, &err), cfg);
+  ASSERT_TRUE(host.ok()) << err;
+  StateLog log;
+  log.Attach(host);
+  uint64_t encoded = 0;
+  for (int round = 0; round < 3; ++round) {
+    auto viewer = Connect(tcp, port, key);
+    ASSERT_NE(viewer, nullptr);
+    ASSERT_TRUE(StreamUntil(host, *viewer, 5)) << "viewer " << round;
+    EXPECT_EQ(host.state(), rdaccel::ConnectionState::kConnected);
+    EXPECT_EQ(viewer->stats().decode_errors, 0u) << "viewer " << round;
+    EXPECT_GT(host.stats().frames_encoded, encoded) << "stats go on counting";
+    encoded = host.stats().frames_encoded;
+    viewer.reset();  // leaves with a Goodbye
+    EXPECT_EQ(log.WaitWaiting(host, static_cast<size_t>(round) + 1), RDA_ERR_CLOSED) << "viewer " << round;
+  }
+}
+
+}  // namespace
+
+TEST(PublicApi, UdpHostServesViewersOneAfterAnother) { ServesViewersOneAfterAnother(false, 47321); }
+TEST(PublicApi, TcpHostServesViewersOneAfterAnother) { ServesViewersOneAfterAnother(true, 47322); }
+
+TEST(PublicApi, WrongKeyOrRefusedViewerDoesNotEndTheHost) {
+  std::string err;
+  const std::vector<uint8_t> key(32, 0x4d);
+  rdaccel::HostConfig cfg;
+  cfg.encryption_key = key;
+  cfg.auth = [](std::span<const uint8_t> t) { return std::string(t.begin(), t.end()) == "1234"; };
+  rdaccel::Host host(rdaccel::BindUdp(47323, &err), cfg);
+  ASSERT_TRUE(host.ok()) << err;
+  StateLog log;
+  log.Attach(host);
+  {
+    auto wrong_key = Connect(false, 47323, std::vector<uint8_t>(32, 0x4e), {'1', '2', '3', '4'});
+    ASSERT_NE(wrong_key, nullptr);
+    EXPECT_EQ(log.WaitWaiting(host, 1), RDA_ERR_AUTH);
+  }
+  {
+    auto refused = Connect(false, 47323, key, {'0', '0', '0', '0'});
+    ASSERT_NE(refused, nullptr);
+    EXPECT_EQ(log.WaitWaiting(host, 2), RDA_ERR_AUTH);
+    EXPECT_EQ(refused->stats().frames_decoded, 0u);
+  }
+  auto good = Connect(false, 47323, key, {'1', '2', '3', '4'});
+  ASSERT_NE(good, nullptr);
+  ASSERT_TRUE(StreamUntil(host, *good, 5));
+  EXPECT_EQ(good->stats().decode_errors, 0u);
+}
+
+TEST(PublicApi, StraySendersDoNotTakeTheViewersPlace) {
+  std::string err;
+  rdaccel::HostConfig cfg;
+  cfg.allow_plaintext = true;
+  cfg.peer_timeout_ms = 400;
+  rdaccel::Host host(rdaccel::BindUdp(47324, &err), cfg);
+  ASSERT_TRUE(host.ok()) << err;
+  StateLog log;
+  log.Attach(host);
+  auto send_raw = [](std::vector<uint8_t> bytes) {
+    const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(47324);
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    ::sendto(fd, bytes.data(), bytes.size(), 0, reinterpret_cast<sockaddr*>(&a), sizeof(a));
+    ::close(fd);
+  };
+  // Not this protocol at all (a port scan): ignored at once.
+  send_raw({'G', 'E', 'T', ' ', '/'});
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  {
+    auto viewer = Connect(false, 47324, {});
+    ASSERT_NE(viewer, nullptr);
+    ASSERT_TRUE(StreamUntil(host, *viewer, 3));
+  }
+  ASSERT_EQ(log.WaitWaiting(host, 1), RDA_ERR_CLOSED);
+  // Looks like the protocol but never says hello: dropped after the timeout.
+  send_raw({3});
+  EXPECT_EQ(log.WaitWaiting(host, 2), RDA_ERR_TIMEOUT);
+  auto viewer = Connect(false, 47324, {});
+  ASSERT_NE(viewer, nullptr);
+  ASSERT_TRUE(StreamUntil(host, *viewer, 3));
+}
+
+TEST(PublicApi, WithoutKeepServingTheFirstDisconnectIsFinal) {
+  std::string err;
+  rdaccel::HostConfig cfg;
+  cfg.allow_plaintext = true;
+  cfg.keep_serving = false;
+  rdaccel::Host host(rdaccel::BindUdp(47325, &err), cfg);
+  ASSERT_TRUE(host.ok()) << err;
+  {
+    auto viewer = Connect(false, 47325, {});
+    ASSERT_NE(viewer, nullptr);
+    ASSERT_TRUE(StreamUntil(host, *viewer, 3));
+  }
+  for (int i = 0; i < 400 && host.state() != rdaccel::ConnectionState::kDisconnected; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  EXPECT_EQ(host.state(), rdaccel::ConnectionState::kDisconnected);
 }

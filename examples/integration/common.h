@@ -80,13 +80,14 @@ static inline int check_library_version(void) {
   return 1;
 }
 
-/* A one-shot event the library's threads signal and main() waits on. */
+/* What the library's threads signal and main() waits on. */
 typedef struct {
   pthread_mutex_t mu;
   pthread_cond_t cv;
-  int state;      /* last rda_state seen */
-  rda_status why; /* reason of the last change */
-  int fatal;      /* a background error that ends the session */
+  int state;       /* last rda_state seen */
+  rda_status why;  /* reason of the last change */
+  int fatal;       /* a background error that ends the session */
+  int disconnects; /* how many times RDA_STATE_DISCONNECTED was seen */
 } session_events;
 
 static inline void events_init(session_events* e) {
@@ -95,6 +96,7 @@ static inline void events_init(session_events* e) {
   e->state = RDA_STATE_CONNECTING;
   e->why = RDA_OK;
   e->fatal = 0;
+  e->disconnects = 0;
 }
 
 static inline void events_destroy(session_events* e) {
@@ -106,6 +108,7 @@ static inline void events_set_state(session_events* e, rda_state s, rda_status w
   pthread_mutex_lock(&e->mu);
   e->state = (int)s;
   e->why = why;
+  if (s == RDA_STATE_DISCONNECTED) e->disconnects++;
   pthread_cond_broadcast(&e->cv);
   pthread_mutex_unlock(&e->mu);
 }
@@ -134,6 +137,28 @@ static inline int events_wait_end(session_events* e, int ms) {
     if (pthread_cond_timedwait(&e->cv, &e->mu, &ts) != 0) break;
   }
   ended = e->state == RDA_STATE_DISCONNECTED || e->fatal;
+  pthread_mutex_unlock(&e->mu);
+  return ended;
+}
+
+/* Waits up to `ms` for disconnect number `n` (counted from 1) or a fatal
+ * error; returns 1 if one happened. A host that keeps serving goes back to
+ * waiting after each disconnect, so the state alone does not tell. */
+static inline int events_wait_disconnects(session_events* e, int n, int ms) {
+  struct timespec ts;
+  int ended;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  ts.tv_sec += ms / 1000;
+  ts.tv_nsec += (long)(ms % 1000) * 1000000L;
+  if (ts.tv_nsec >= 1000000000L) {
+    ts.tv_sec += 1;
+    ts.tv_nsec -= 1000000000L;
+  }
+  pthread_mutex_lock(&e->mu);
+  while (e->disconnects < n && !e->fatal) {
+    if (pthread_cond_timedwait(&e->cv, &e->mu, &ts) != 0) break;
+  }
+  ended = e->disconnects >= n || e->fatal;
   pthread_mutex_unlock(&e->mu);
   return ended;
 }

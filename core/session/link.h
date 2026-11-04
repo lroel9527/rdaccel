@@ -108,6 +108,11 @@ class Link {
   LinkError error_ = LinkError::kNone;
 
   std::atomic<uint64_t> last_rx_us_{0};
+  // Host on a listening transport (no peer at Start): when a peer turned up.
+  // One that has not said ViewerHello within peer_timeout_ms is dropped, so
+  // a stray sender cannot keep the place of the viewer.
+  bool listening_ = false;
+  uint64_t peer_since_us_ = 0;  // timer thread only
   proto::StreamParser control_parser_, input_parser_, message_parser_;
   std::mutex send_mu_;  // keeps a chunked AppMessage contiguous
 

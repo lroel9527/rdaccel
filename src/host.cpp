@@ -8,6 +8,8 @@
 #include <condition_variable>
 #include <cstring>
 #include <mutex>
+#include <optional>
+#include <shared_mutex>
 #include <thread>
 
 #include "capture/capturer.h"
@@ -36,15 +38,29 @@ class ViewerGate final : public Transport {
   ViewerGate(Transport* inner, bool open) : inner_(inner), open_(open) {}
   void Open() { open_ = true; }
   bool is_open() const { return open_.load(); }
+  // The next viewer's transport (the old one is still alive during the call).
+  void Retarget(Transport* inner, bool open) {
+    std::unique_lock<std::shared_mutex> l(mu_);
+    inner_ = inner;
+    open_ = open;
+  }
   bool Send(Channel ch, std::span<const uint8_t> bytes) override {
+    std::shared_lock<std::shared_mutex> l(mu_);
     return open_.load() ? inner_->Send(ch, bytes) : true;
   }
   void SetReceiver(ReceiveFn) override {}  // the link receives
   void Close() override {}
-  bool PeerKnown() const override { return open_.load() && inner_->PeerKnown(); }
-  bool GetStats(TransportStats* out) const override { return inner_->GetStats(out); }
+  bool PeerKnown() const override {
+    std::shared_lock<std::shared_mutex> l(mu_);
+    return open_.load() && inner_->PeerKnown();
+  }
+  bool GetStats(TransportStats* out) const override {
+    std::shared_lock<std::shared_mutex> l(mu_);
+    return inner_->GetStats(out);
+  }
 
  private:
+  mutable std::shared_mutex mu_;
   Transport* inner_;
   std::atomic<bool> open_;
 };
@@ -65,9 +81,15 @@ struct Host::Impl {
     if (session) f(*session);
   }
   std::unique_ptr<capture::ICapturer> capturer;
-  // Handshake, keepalive, messages. Calls into the session; destroyed after
-  // the transport (whose receive thread calls it).
-  std::unique_ptr<session::Link> link;
+  // Handshake, keepalive, messages, for the current viewer. Calls into the
+  // session; destroyed after the transport (whose receive thread calls it).
+  // Replaced for each viewer (see ServeNext); read it through CurrentLink().
+  std::shared_ptr<session::Link> link;
+  mutable std::mutex link_mu;
+  std::shared_ptr<session::Link> CurrentLink() const {
+    std::lock_guard<std::mutex> l(link_mu);
+    return link;
+  }
   // Declared after `session` and `link`, so it is destroyed first: its
   // destructor stops the receive thread that calls into them.
   std::unique_ptr<Transport> transport;
@@ -148,7 +170,7 @@ struct Host::Impl {
       } else {
         continue;
       }
-      if (link->disconnected()) continue;  // nobody to send to
+      if (CurrentLink()->disconnected()) continue;  // nobody to send to
       capture::CapturedFrame f;
       f.bgra = {px.data(), s->width(), s->height(), s->width() * 4};
       f.capture_time_us = now;
@@ -205,10 +227,160 @@ struct Host::Impl {
     if (fn) fn(msg);
   }
 
+  void NotifyState(ConnectionState st, ConnectionError e) {
+    StateHandler fn;
+    {
+      std::lock_guard<std::mutex> l(mu);
+      fn = on_state;
+    }
+    if (fn) fn(st, e);
+  }
+
+  session::Link::Handlers LinkHandlers() {
+    Impl* impl = this;
+    session::Link::Handlers h;
+    h.on_state = [impl](ConnectionState st, ConnectionError e) {
+      // A viewer that arrives mid-stream needs the Hello and a full picture.
+      if (st == ConnectionState::kConnected) {
+        const bool was_closed = !impl->gate->is_open();
+        if (was_closed) impl->gate->Open();
+        if (impl->resync_cursor.exchange(false) || was_closed) impl->cursor->Resync();
+        impl->WithSession([](session::HostSession& s) {
+          s.SendHello();
+          s.RequestKeyframe();
+        });
+      }
+      impl->NotifyState(st, e);
+      // After the application has heard of it: then wait for the next one.
+      if (st == ConnectionState::kDisconnected && impl->config.keep_serving) {
+        {
+          std::lock_guard<std::mutex> l(impl->serve_mu);
+          impl->serve_due = true;
+        }
+        impl->serve_cv.notify_all();
+      }
+    };
+    h.on_message = [impl](uint32_t type, std::span<const uint8_t> payload) {
+      MessageHandler fn;
+      {
+        std::lock_guard<std::mutex> l(impl->mu);
+        fn = impl->on_message;
+      }
+      if (fn) fn(type, payload);
+    };
+    h.on_other = [impl](const proto::Message& m) { impl->OnPeerMessage(m); };
+    h.on_auth = config.auth;
+    return h;
+  }
+
+  // Makes `t` the current transport, with a new link on it, and starts it.
+  // Returns the transport and link it replaces, for the caller to destroy
+  // (transport first: its receive thread calls the link). The gate must
+  // already point at `t`.
+  std::pair<std::unique_ptr<Transport>, std::shared_ptr<session::Link>> Attach(
+      std::unique_ptr<Transport> t, bool announce) {
+    auto* secure = dynamic_cast<transport::SecureTransport*>(t.get());
+    session::LinkOptions lo;
+    lo.peer_timeout_ms = config.peer_timeout_ms;
+    auto l = std::make_shared<session::Link>(session::Link::Role::kHost, t.get(), lo, LinkHandlers());
+    if (secure) {
+      secure->SetErrorHandler([lp = l.get()](ConnectionError e, const std::string& msg) {
+        log::Warn("host: " + msg);
+        lp->Abort(e);
+      });
+    }
+    std::unique_ptr<Transport> old_t = std::move(transport);
+    transport = std::move(t);
+    std::shared_ptr<session::Link> old_l;
+    {
+      std::lock_guard<std::mutex> g(link_mu);
+      old_l = std::move(link);
+      link = l;
+    }
+    // Before anything from the new viewer can arrive (the receiver is not
+    // set yet), so the application sees the states in order.
+    if (announce) NotifyState(ConnectionState::kConnecting, ConnectionError::kNone);
+    transport->SetReceiver(
+        [lp = l.get()](Channel ch, std::span<const uint8_t> bytes) { lp->OnReceive(ch, bytes); });
+    l->Start();
+    return {std::move(old_t), std::move(old_l)};
+  }
+
+  // One viewer after another (config.keep_serving): when the viewer has gone
+  // (left, timed out, refused, wrong key), the transport is asked for the
+  // next peer on the same port. Capture and the encoder's input keep going;
+  // the next viewer gets a session of its own, from a keyframe.
+  std::thread serve_thread;
+  std::mutex serve_mu;
+  std::condition_variable serve_cv;
+  bool serve_due = false, serve_stop = false;
+  std::atomic<bool> resync_cursor{false};
+  std::optional<HostStats> carry_next;  // under submit_mu
+
+  void ServeLoop() {
+    std::unique_lock<std::mutex> lock(serve_mu);
+    for (;;) {
+      serve_cv.wait(lock, [&] { return serve_due || serve_stop; });
+      if (serve_stop) return;
+      serve_due = false;
+      lock.unlock();
+      ServeNext();
+      lock.lock();
+    }
+  }
+
+  void ServeNext() {
+    std::lock_guard<std::mutex> lock(submit_mu);  // no frames meanwhile
+    auto old_link = CurrentLink();
+    if (!old_link->disconnected()) return;
+    old_link->Shutdown();  // its timer thread is gone after this
+    std::string err;
+    // Closes the old transport (its receive thread is gone after this).
+    auto next = transport->NextPeer(&err);
+    if (!next) {
+      log::Info("host: not waiting for another viewer (" + err + ")");
+      return;
+    }
+    // The next viewer starts from nothing: a new session (from the newest
+    // frame, kept here), a new bitrate estimate.
+    std::vector<uint8_t> px;
+    int32_t w = 0, h = 0;
+    std::unique_ptr<session::HostSession> old_session;
+    {
+      std::lock_guard<std::mutex> s(session_mu);
+      if (session) {
+        carry_next = session->stats();
+        px = skipped_px.empty() ? session->last_frame() : std::move(skipped_px);
+        w = session->width();
+        h = session->height();
+      }
+      old_session = std::move(session);
+    }
+    old_session.reset();  // before the gate points at the next viewer
+    skipped_px.clear();
+    rate.reset();
+    {
+      std::lock_guard<std::mutex> m(mu);
+      net = {};
+      target_bitrate_bps = 0;
+    }
+    resync_cursor = true;
+    gate->Retarget(next.get(), /*open=*/!config.auth);
+    auto [old_t, old_l] = Attach(std::move(next), /*announce=*/true);
+    old_t.reset();
+    old_l.reset();
+    if (!px.empty() && !failed) {
+      capture::CapturedFrame f;
+      f.bgra = {px.data(), w, h, w * 4};
+      f.capture_time_us = capture::MonotonicMicros();
+      OnFrameLocked(f, nullptr);
+    }
+  }
+
   bool OnFrame(const capture::CapturedFrame& f, std::string* error) {
     std::lock_guard<std::mutex> lock(submit_mu);
-    if (link->disconnected()) {
-      if (error) *error = std::string("disconnected: ") + session::LinkErrorText(link->error());
+    if (auto l = CurrentLink(); l->disconnected()) {
+      if (error) *error = std::string("disconnected: ") + session::LinkErrorText(l->error());
       return false;
     }
     return OnFrameLocked(f, error);
@@ -285,7 +457,12 @@ struct Host::Impl {
       }
       auto next = std::make_unique<session::HostSession>(gate.get(), std::move(enc), width,
                                                          height, opts);
-      if (resized) next->AdoptStats(carried);
+      if (resized) {
+        next->AdoptStats(carried);
+      } else if (carry_next) {  // the next viewer: the counts go on
+        next->AdoptStats(*carry_next);
+        carry_next.reset();
+      }
       if (rate && resized) next->SetBitrate(rate->target_bps());
       std::unique_ptr<session::HostSession> old;
       {
@@ -346,7 +523,6 @@ Host::Host(std::unique_ptr<Transport> transport, HostConfig config)
   impl_->config = std::move(config);
   impl_->on_state = std::move(impl_->config.on_state);
   impl_->on_message = std::move(impl_->config.on_message);
-  transport::SecureTransport* secure = nullptr;
   if (!impl_->config.encryption_key.empty()) {
     if (impl_->config.encryption_key.size() != transport::kSecureKeySize) {
       throw std::invalid_argument("encryption_key must be 32 bytes");
@@ -355,61 +531,26 @@ Host::Host(std::unique_ptr<Transport> transport, HostConfig config)
         std::move(transport), /*is_host=*/true,
         std::span<const uint8_t, transport::kSecureKeySize>(impl_->config.encryption_key.data(),
                                                             transport::kSecureKeySize));
-    secure = s.get();
     transport = std::move(s);
   }
-  impl_->transport = std::move(transport);
-  impl_->gate = std::make_unique<ViewerGate>(impl_->transport.get(),
-                                              /*open=*/!impl_->config.auth);
+  impl_->gate = std::make_unique<ViewerGate>(transport.get(), /*open=*/!impl_->config.auth);
   impl_->cursor = std::make_unique<session::CursorSender>(impl_->gate.get());
-  Impl* impl = impl_.get();
-  session::Link::Handlers h;
-  h.on_state = [impl](ConnectionState st, ConnectionError e) {
-    // A viewer that arrives mid-stream needs the Hello and a full picture.
-    if (st == ConnectionState::kConnected) {
-      if (!impl->gate->is_open()) {
-        impl->gate->Open();
-        impl->cursor->Resync();
-      }
-      impl->WithSession([](session::HostSession& s) {
-        s.SendHello();
-        s.RequestKeyframe();
-      });
-    }
-    StateHandler fn;
-    {
-      std::lock_guard<std::mutex> l(impl->mu);
-      fn = impl->on_state;
-    }
-    if (fn) fn(st, e);
-  };
-  h.on_message = [impl](uint32_t type, std::span<const uint8_t> payload) {
-    MessageHandler fn;
-    {
-      std::lock_guard<std::mutex> l(impl->mu);
-      fn = impl->on_message;
-    }
-    if (fn) fn(type, payload);
-  };
-  h.on_other = [impl](const proto::Message& m) { impl->OnPeerMessage(m); };
-  h.on_auth = impl_->config.auth;
-  session::LinkOptions lo;
-  lo.peer_timeout_ms = impl_->config.peer_timeout_ms;
-  impl_->link = std::make_unique<session::Link>(session::Link::Role::kHost, impl_->transport.get(), lo,
-                                                std::move(h));
-  if (secure) {
-    secure->SetErrorHandler([impl](ConnectionError e, const std::string& msg) {
-      log::Warn("host: " + msg);
-      impl->link->Abort(e);
-    });
+  impl_->Attach(std::move(transport), /*announce=*/false);
+  if (impl_->config.keep_serving) {
+    impl_->serve_thread = std::thread([impl = impl_.get()] { impl->ServeLoop(); });
   }
-  impl_->transport->SetReceiver(
-      [impl](Channel ch, std::span<const uint8_t> bytes) { impl->link->OnReceive(ch, bytes); });
-  impl_->link->Start();
   impl_->idle_thread = std::thread([impl = impl_.get()] { impl->IdleLoop(); });
 }
 
 Host::~Host() {
+  if (impl_->serve_thread.joinable()) {
+    {
+      std::lock_guard<std::mutex> lock(impl_->serve_mu);
+      impl_->serve_stop = true;
+    }
+    impl_->serve_cv.notify_all();
+    impl_->serve_thread.join();
+  }
   StopScreenCapture();
   {
     std::lock_guard<std::mutex> lock(impl_->idle_mu);
@@ -417,7 +558,7 @@ Host::~Host() {
   }
   impl_->idle_cv.notify_all();
   impl_->idle_thread.join();
-  impl_->link->Shutdown();  // Goodbye while the transport still works
+  impl_->CurrentLink()->Shutdown();  // Goodbye while the transport still works
   impl_->cursor.reset();
   // Stop the receive thread before the link and session go away.
   impl_->transport.reset();
@@ -428,7 +569,7 @@ void Host::SetStateHandler(StateHandler fn) {
   impl_->on_state = std::move(fn);
 }
 
-ConnectionState Host::state() const { return impl_->link->state(); }
+ConnectionState Host::state() const { return impl_->CurrentLink()->state(); }
 
 void Host::SetMessageHandler(MessageHandler fn) {
   std::lock_guard<std::mutex> lock(impl_->mu);
@@ -436,7 +577,7 @@ void Host::SetMessageHandler(MessageHandler fn) {
 }
 
 bool Host::SendMessage(uint32_t type, std::span<const uint8_t> payload, std::string* error) {
-  return impl_->link->SendMessage(type, payload, error);
+  return impl_->CurrentLink()->SendMessage(type, payload, error);
 }
 
 void Host::SetInputHandler(InputHandler fn) {
