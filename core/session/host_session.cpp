@@ -1,6 +1,8 @@
 #include "session/host_session.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace rdacore::session {
@@ -798,6 +800,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   std::vector<uint8_t> bytes;
   proto::EncodeTo(proto::FrameBegin{id, frame.capture_time_us}, bytes);
   size_t video_bytes = 0;
+  size_t part_ps = 0, part_rects = 0, part_video_msg = 0;
   if (au) {
     proto::VideoData vd;
     vd.frame_id = id;
@@ -808,7 +811,11 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     // take flattened lossless tiles from any other picture.
     if (!key) vd.regions = TilesToRegions(region_tiles);
     video_bytes = vd.nal_data.size();
+    for (const auto& p : vd.parameter_sets) part_ps += p.size();
+    part_rects = vd.regions.size();
+    const size_t before = bytes.size();
     proto::EncodeTo(vd, bytes);
+    part_video_msg = bytes.size() - before;
   }
   // Area pictures go on top of the full-screen one.
   bytes.insert(bytes.end(), region_bytes.begin(), region_bytes.end());
@@ -816,6 +823,16 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     proto::EncodeTo(proto::LosslessData{id, key, lossless_data}, bytes);
   }
   proto::EncodeTo(proto::FrameEnd{id}, bytes);
+  // Test only: RDACCEL_FRAME_PARTS=1 prints what each frame is made of.
+  static const bool print_parts = std::getenv("RDACCEL_FRAME_PARTS") != nullptr;
+  if (print_parts) {
+    std::fprintf(stderr,
+                 "parts id %llu t_us %llu total %zu video_msg %zu nal %zu param_sets %zu rects %zu "
+                 "lossless %zu (tiles %zu stores %zu moves %zu loads %zu) area_bytes %zu\n",
+                 static_cast<unsigned long long>(id), static_cast<unsigned long long>(frame.capture_time_us),
+                 bytes.size(), part_video_msg, video_bytes, part_ps, part_rects, lossless_data.size(),
+                 n_lossless, ops.stores.size(), ops.moves.size(), n_loads, region_bytes.size());
+  }
   transport_->Send(transport::Channel::kVideo, bytes);
 
   std::lock_guard<std::mutex> lock(mu_);
