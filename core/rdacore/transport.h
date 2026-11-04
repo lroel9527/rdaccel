@@ -79,9 +79,7 @@ class Transport {
 // Two connected in-process endpoints: what one sends, the other receives.
 std::pair<std::unique_ptr<Transport>, std::unique_ptr<Transport>> CreateLocalPipe();
 
-// TCP. Listen blocks until one peer connects. Both return null and set
-// `error` on failure.
-std::unique_ptr<Transport> ListenTcp(uint16_t port, std::string* error = nullptr);
+// TCP. Both return null and set `error` on failure.
 std::unique_ptr<Transport> ConnectTcp(const std::string& host, uint16_t port,
                                       std::string* error = nullptr);
 // Host side without blocking: listens on `port` (IPv4 and IPv6) and returns
@@ -91,9 +89,7 @@ std::unique_ptr<Transport> BindTcp(uint16_t port, std::string* error = nullptr);
 // UDP with its own loss recovery (selective acknowledgements and resends,
 // one ordered stream per channel, so lost video never delays input) and
 // BBR-style congestion control that keeps queues short. Reports TransportStats,
-// so the Host adapts its bitrate. Listen blocks until the peer's first packet
-// arrives. Both ends must use it.
-std::unique_ptr<Transport> ListenUdp(uint16_t port, std::string* error = nullptr);
+// so the Host adapts its bitrate. Both ends must use it.
 std::unique_ptr<Transport> ConnectUdp(const std::string& host, uint16_t port,
                                       std::string* error = nullptr);
 // Host side without blocking: binds `port` (IPv4 and IPv6) and returns at

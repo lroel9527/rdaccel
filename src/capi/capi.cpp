@@ -440,15 +440,6 @@ rda_status rda_pipe_create(rda_transport** a, rda_transport** b) {
   RDA_GUARD_END
 }
 
-rda_status rda_tcp_listen(uint16_t port, rda_transport** out) {
-  RDA_GUARD_BEGIN
-  if (!out) return Fail(RDA_ERR_INVALID_ARG, "out is required");
-  std::string err;
-  auto t = rdacore::ListenTcp(port, &err);
-  return Wrap(std::move(t), out, err, RDA_ERR_TRANSPORT, /*network=*/true);
-  RDA_GUARD_END
-}
-
 rda_status rda_tcp_connect(const char* host, uint16_t port, rda_transport** out) {
   RDA_GUARD_BEGIN
   if (!host || !out) return Fail(RDA_ERR_INVALID_ARG, "host and out are required");
@@ -463,15 +454,6 @@ rda_status rda_tcp_bind(uint16_t port, rda_transport** out) {
   if (!out) return Fail(RDA_ERR_INVALID_ARG, "out is required");
   std::string err;
   auto t = rdacore::BindTcp(port, &err);
-  return Wrap(std::move(t), out, err, RDA_ERR_TRANSPORT, /*network=*/true);
-  RDA_GUARD_END
-}
-
-rda_status rda_udp_listen(uint16_t port, rda_transport** out) {
-  RDA_GUARD_BEGIN
-  if (!out) return Fail(RDA_ERR_INVALID_ARG, "out is required");
-  std::string err;
-  auto t = rdacore::ListenUdp(port, &err);
   return Wrap(std::move(t), out, err, RDA_ERR_TRANSPORT, /*network=*/true);
   RDA_GUARD_END
 }

@@ -8,6 +8,12 @@
 // interface between your program and the library is the C one: you can build
 // with another compiler or standard library than the library was built with.
 // Requires C++20. See docs/integration.md.
+//
+// Compatibility: this header promises source compatibility, not binary.
+// Within a major version code that compiles against it keeps compiling
+// (new overloads and members may appear), but its classes may change size
+// or layout, so do not pass them across a boundary between parts built
+// against different versions; pass the C handles instead.
 #pragma once
 
 #include <cstddef>
@@ -327,7 +333,7 @@ rda_transport* IntoHandle(std::unique_ptr<Transport> t);
 
 // Subclass this to plug in your own transport; the requirements are those of
 // rda_transport_vtable in rdaccel.h. The library's own transports (from
-// ListenUdp() etc.) are also Transports.
+// BindUdp() etc.) are also Transports.
 class Transport {
  public:
   using ReceiveFn = std::function<void(Channel, std::span<const uint8_t>)>;
@@ -462,12 +468,8 @@ inline detail::TransportPair CreateLocalPipe() {
   return {std::make_unique<detail::NativeTransport>(a), std::make_unique<detail::NativeTransport>(b)};
 }
 
-// TCP: listen blocks until one peer connects. Fixed bitrate.
-inline std::unique_ptr<Transport> ListenTcp(uint16_t port, std::string* error = nullptr) {
-  rda_transport* t = nullptr;
-  return detail::Native(rda_tcp_listen(port, &t), &t, error);
-}
-// Returns at once; the first viewer to connect becomes the peer.
+// TCP, fixed bitrate. Returns at once; the first viewer to connect becomes
+// the peer (see Host::SetStateHandler).
 inline std::unique_ptr<Transport> BindTcp(uint16_t port, std::string* error = nullptr) {
   rda_transport* t = nullptr;
   return detail::Native(rda_tcp_bind(port, &t), &t, error);
@@ -477,12 +479,7 @@ inline std::unique_ptr<Transport> ConnectTcp(const std::string& host, uint16_t p
   return detail::Native(rda_tcp_connect(host.c_str(), port, &t), &t, error);
 }
 
-// UDP with loss recovery and congestion control (adaptive bitrate). Listen
-// blocks until the peer's first packet arrives.
-inline std::unique_ptr<Transport> ListenUdp(uint16_t port, std::string* error = nullptr) {
-  rda_transport* t = nullptr;
-  return detail::Native(rda_udp_listen(port, &t), &t, error);
-}
+// UDP with loss recovery and congestion control (adaptive bitrate).
 inline std::unique_ptr<Transport> ConnectUdp(const std::string& host, uint16_t port, std::string* error = nullptr) {
   rda_transport* t = nullptr;
   return detail::Native(rda_udp_connect(host.c_str(), port, &t), &t, error);

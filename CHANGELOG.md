@@ -5,6 +5,13 @@
 
 ## 未发布
 
+版本号升到 0.5.0：去掉了两个 C 函数，ABI 不兼容 0.4（soname `librdaccel.so.0.5`，`find_package(rdaccel 0.5)`）。
+
+- **去掉阻塞的 `rda_tcp_listen` / `rda_udp_listen`**（C++ 的 `ListenTcp` / `ListenUdp`）：它们一直阻塞到对端出现，
+  期间既不能取消也收不到状态回调。改用 `rda_tcp_bind` / `rda_udp_bind`（`BindTcp` / `BindUdp`）：马上返回，
+  马上创建 Host，用 `on_state` 等对方连上；Host 在对方连上之前保留最新一帧。
+- **头文件**：模拟网络和合成桌面单独归到“testing and benchmarks”一节（仍属稳定 ABI）；用 `-fshort-enums`
+  之类让枚举不是 4 字节的编译选项会直接编译失败；`rdaccel.hpp` 写明只承诺源码兼容。
 - **安全**：设置了 `on_auth` 时，被拒绝的接收端以前在断开前仍能收到屏幕尺寸（`on_stream_info`）和光标，
   还会先报一次 `RDA_STATE_CONNECTED`。现在认证通过之前不发任何画面相关的数据：Host 只保留最新一帧，
   通过后再发尺寸、光标和关键帧。没有 `on_auth` 时行为不变（录制等没有接收端的传输照旧）。

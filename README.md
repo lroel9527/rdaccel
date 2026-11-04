@@ -31,7 +31,7 @@ rdaccel 是给其他程序集成的库，只有一个 CMake 目标 `rdaccel::rda
 ```cpp
 #include <rdaccel/rdaccel.hpp>
 
-auto [host_end, viewer_end] = rdaccel::CreateLocalPipe();  // 跨机器换成 ListenUdp / ConnectUdp
+auto [host_end, viewer_end] = rdaccel::CreateLocalPipe();  // 跨机器换成 BindUdp / ConnectUdp
 
 rdaccel::ViewerHandlers handlers;
 handlers.on_frame = [](const rdaccel::ImageView& bgra, std::span<const rdaccel::Rect> changed,
@@ -49,7 +49,7 @@ host.StartScreenCapture();  // 或者每帧调用 host.SubmitFrame(...)
 # 1) 安装后 find_package（或 pkg-config）
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 cmake --install build --prefix /opt/rdaccel
-# CMake：find_package(rdaccel 0.4 REQUIRED) + target_link_libraries(app PRIVATE rdaccel::rdaccel)
+# CMake：find_package(rdaccel 0.5 REQUIRED) + target_link_libraries(app PRIVATE rdaccel::rdaccel)
 # 其他构建系统：PKG_CONFIG_PATH=/opt/rdaccel/lib/pkgconfig pkg-config --cflags --libs rdaccel
 #   （静态库加 --static，会带上 FFmpeg/X11 等依赖）
 
