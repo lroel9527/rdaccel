@@ -51,7 +51,9 @@ EOF
   if [ "$status" -ne 0 ] && [ -n "${RDA_WL_KEEP_LOGS:-}" ]; then
     for f in "$work"/*.log; do echo "==> $f"; tail -n 40 "$f"; done
   fi
-  rm -rf "$work"
+  # xdg-document-portal may leave a FUSE mount behind in the runtime dir.
+  fusermount3 -u "$work/run/doc" 2>/dev/null || fusermount -u "$work/run/doc" 2>/dev/null || true
+  rm -rf "$work" 2>/dev/null || true
   exit "$status"
 fi
 
