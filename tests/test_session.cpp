@@ -206,6 +206,52 @@ TEST(Session, EncoderFailureIsReportedAndForcesKeyframe) {
   EXPECT_EQ(host.stats().frames_encoded, 2u);
 }
 
+TEST(Session, LosslessStaysWithinItsBudgetOnASlowLink) {
+  // At 0.4 Mbps, many-colour (but palette-able) content appearing in every
+  // frame must not go out losslessly faster than the budget refills: once a
+  // frame overdrew, later frames send such tiles as video. (Per frame, it
+  // was up to four times the bitrate, in 10-15 kB bursts.)
+  auto [host_end, viewer_end] = transport::MakeLocalPipe();
+  constexpr int W = 640, H = 384, kFps = 30;
+  constexpr int64_t kBitrate = 400'000;
+  session::HostSession host(host_end.get(), std::make_unique<FakeEncoder>(), W, H,
+                            {.refine_frames = 0, .progressive = false, .fps = kFps,
+                             .bitrate_bps = kBitrate});
+  std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 50);
+  uint32_t seed = 1;
+  auto next = [&] { return (seed = seed * 1103515245u + 12345u) >> 16; };
+  uint64_t t = 1'000'000;
+  host.OnFrame({{px.data(), W, H, W * 4}, {}, t});  // keyframe
+  const uint64_t after_key = host.stats().lossless_bytes;
+  constexpr int kFrames = 60;
+  for (int f = 0; f < kFrames; ++f) {
+    t += 1'000'000 / kFps;
+    // A third of the tiles get new 200-colour content each frame (so none
+    // is hot: each changes every third frame).
+    for (int ty = 0; ty < H / 64; ++ty) {
+      for (int tx = 0; tx < W / 64; ++tx) {
+        if ((tx + ty + f) % 3 != 0) continue;
+        for (int y = 0; y < 64; ++y) {
+          for (int x = 0; x < 64; ++x) {
+            uint8_t* p = &px[(static_cast<size_t>(ty * 64 + y) * W + tx * 64 + x) * 4];
+            const uint32_t c = next() % 200;
+            p[0] = static_cast<uint8_t>(c);
+            p[1] = static_cast<uint8_t>(c * 7);
+            p[2] = static_cast<uint8_t>(c * 13);
+          }
+        }
+      }
+    }
+    host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+  }
+  const double seconds = static_cast<double>(kFrames) / kFps;
+  const double sent = static_cast<double>(host.stats().lossless_bytes - after_key);
+  // Half the bitrate, plus what the bucket holds (three frame intervals).
+  const double allowed = kBitrate / 8.0 * (0.5 * seconds + 3.0 / kFps);
+  EXPECT_LE(sent, allowed * 1.1) << sent << " bytes lossless in " << seconds << " s";
+  PipeStopper stop{host_end, viewer_end};
+}
+
 TEST(Session, FewColourTilesGoLosslessAndSkipTheEncoder) {
   auto [host_end, viewer_end] = transport::MakeLocalPipe();
   constexpr int W = 200, H = 120;
