@@ -197,7 +197,14 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   // must keep filling it or they would wait for the next change.
   {
     const double frame_us = 1e6 / std::max(1, options_.fps);
-    const double cap = static_cast<double>(options_.bitrate_bps) / 8.0 * kLosslessBurstFrames * frame_us / 1e6;
+    // Nothing changed at all (a still screen, typically the Host re-sending
+    // the last frame every 100 ms because something is owed): the video
+    // sends nothing, so the owed tiles may use most of the link, and the
+    // bucket holds one re-send's worth.
+    const bool still = changes.empty() && !key && !holding_back_;
+    const double burst_us = still ? std::max(kLosslessBurstFrames * frame_us, 100'000.0)
+                                  : kLosslessBurstFrames * frame_us;
+    const double cap = static_cast<double>(options_.bitrate_bps) / 8.0 * burst_us / 1e6;
     if (!lossless_tokens_set_) {
       lossless_tokens_ = cap;
       lossless_tokens_set_ = true;
@@ -211,14 +218,15 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       // more than the link, and showing every frame beats showing them exact
       // while they fly past.
       const double share = moving_ ? kLosslessMovingShare
-                           : progressive_active_ && !holding_back_ ? kProgressiveShare
-                                                                                     : kLosslessRateShare;
+                           : (progressive_active_ || still) && !holding_back_ ? kProgressiveShare
+                                                                              : kLosslessRateShare;
       const double gap_us = static_cast<double>(frame.capture_time_us -
                                                 std::min(frame.capture_time_us, lossless_tokens_us_));
       lossless_tokens_ = std::min(
           cap, lossless_tokens_ + static_cast<double>(options_.bitrate_bps) / 8.0 * share * gap_us / 1e6);
     }
     lossless_tokens_us_ = frame.capture_time_us;
+    lossless_cap_ = cap;
   }
   // Tiles the viewer shows at first-pass video quality (or copies of such)
   // that have been static for a while get sent again properly.
@@ -271,8 +279,13 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     // drop would otherwise send its tiles faster than the path takes them.
     const double per_tile = std::max(lossless_bytes_per_tile_, 64.0);
     const double fits = std::min(budget, std::max(0.0, lossless_tokens_)) / per_tile;
+    // At least one once the bucket holds a tile's worth, or the frame's
+    // share, or is full: on a slow link one tile of detailed text can cost
+    // more than the bucket holds, and waiting for more would wait forever.
+    const bool one = lossless_tokens_ >= per_tile || lossless_tokens_ >= budget ||
+                     lossless_tokens_ >= 0.999 * lossless_cap_;
     const auto n = static_cast<size_t>(std::clamp(
-        fits, lossless_tokens_ >= per_tile || lossless_tokens_ >= budget ? 1.0 : 0.0,
+        fits, one ? 1.0 : 0.0,
         static_cast<double>(kMaxProgressivePerFrame)));
     const size_t start = pending_cursor_;
     for (size_t k = 0; k < n_tiles && progressive_sent < n && pending_lossless_count_ > 0; ++k) {
