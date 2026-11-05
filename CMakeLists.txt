@@ -11,7 +11,7 @@ project(rdaccel VERSION 1.0.0 LANGUAGES C CXX)
 # Pre-release label ("rc1"), empty for a release. The full version, as the
 # library, the packages and the tag (v1.0.0-rc1) show it, is
 # PROJECT_VERSION[-RDACCEL_PRERELEASE].
-set(RDACCEL_PRERELEASE "rc1")
+set(RDACCEL_PRERELEASE "")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

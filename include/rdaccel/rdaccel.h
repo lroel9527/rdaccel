@@ -47,7 +47,7 @@ extern "C" {
 #define RDA_VERSION_PATCH 0
 /* "rc1" and so on for a pre-release, "" for a release. rda_version() does
  * not include it; rda_version_string() does ("1.0.0-rc1"). */
-#define RDA_VERSION_PRERELEASE "rc1"
+#define RDA_VERSION_PRERELEASE ""
 #define RDA_MAKE_VERSION(major, minor, patch) \
   (((uint32_t)(major) << 16) | ((uint32_t)(minor) << 8) | (uint32_t)(patch))
 #define RDA_VERSION RDA_MAKE_VERSION(RDA_VERSION_MAJOR, RDA_VERSION_MINOR, RDA_VERSION_PATCH)
