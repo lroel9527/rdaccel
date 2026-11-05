@@ -4,13 +4,14 @@
 //
 //   rdaccel_serve [--udp=PORT | --tcp=PORT] [--source=screen|synthetic] [--seconds=0]
 //                 (--key=<64 hex digits> | --plaintext)
-//                 [--size=WxH] [--fps=60] [--bitrate=8000000] [--display=0] [--inject]
+//                 [--size=WxH] [--fps=60] [--bitrate=8000000] [--display=0] [--inject] [--once]
 //   rdaccel_serve --list-displays
 //
 // UDP (the default, port 7300) has congestion control and adaptive bitrate;
-// TCP sends at the configured bitrate. --size is the test pattern's size, or
-// with --source=screen the size the screen is captured at (default: native). --seconds=0 runs until the viewer
-// disconnects or the process is killed. --inject plays the viewer's mouse and
+// TCP sends at the configured bitrate. When a viewer leaves, the host waits
+// for the next one on the same port (--once: exit instead). --size is the test pattern's size, or
+// with --source=screen the size the screen is captured at (default: native). --seconds=0 runs until the process is
+// killed (or, with --once, until the viewer disconnects). --inject plays the viewer's mouse and
 // keyboard into this machine (macOS: needs the Accessibility permission).
 // Uses only the public API.
 
@@ -113,6 +114,8 @@ int main(int argc, char** argv) {
     return 2;
   }
   cfg.fps = fps;
+  const bool once = args.has("once");
+  cfg.keep_serving = !once;
   cfg.bitrate_bps = args.num("bitrate", 8'000'000);
   cfg.display_index = static_cast<int32_t>(args.num("display", 0));
   if (source == "screen" && args.has("size")) {
@@ -145,7 +148,11 @@ int main(int argc, char** argv) {
     if (st == rdaccel::ConnectionState::kConnected) std::printf("viewer said hello\n");
     if (st == rdaccel::ConnectionState::kDisconnected) {
       std::printf("viewer left: %s\n", rda_status_str(reason));
-      viewer_left = true;
+      if (once) {
+        viewer_left = true;
+      } else {
+        std::printf("waiting for the next viewer ...\n");
+      }
     }
     std::fflush(stdout);
   });

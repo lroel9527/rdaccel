@@ -64,6 +64,7 @@ Wayland 桌面（GNOME、KDE、sway、Hyprland 等）只能通过 xdg-desktop-po
 | `rdaccel_bench` | 离线场景评测（idle、打字、滚动、拖窗、视频、暂停、指针） |
 | `rdaccel_netsim` | Host 和 Viewer 同进程，中间是模拟网络（限速、时延、丢包、带宽骤降） |
 | `rdaccel_loopback` | macOS 窗口程序，本机回环 |
+| `rdaccel_remote` | macOS 窗口程序，跨机器远程控制：显示对方屏幕，把本窗口的鼠标、滚轮、键盘发过去（对方 `rdaccel_serve --inject`） |
 | `examples/minimal`、`examples/minimal_c` | 独立 CMake 工程，演示 `find_package` 集成 |
 | `tools/make_desktop.py` | 生成评测用的 1920×1080 仿真桌面 |
 
@@ -74,6 +75,16 @@ KEY=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')    # 32 字节密钥，两边
 ./build/bin/rdaccel_serve --udp=7300 --key=$KEY      # 被控机
 ./build/bin/rdaccel_view 10.0.0.2 --udp=7300 --key=$KEY --seconds=30 --dump=last.ppm   # 控制端
 ```
+
+要在窗口里看并直接操作对方（控制端是 Mac）：被控机加 `--inject`（macOS 被控机需要“辅助功能”权限），控制端换成
+
+```bash
+./build/bin/rdaccel_remote 10.0.0.2 --udp=7300 --key=$KEY
+```
+
+键盘按物理键发送，打什么字由被控机自己的键盘布局和输入法决定，Command 快捷键也发给对方；关窗口退出。
+标题栏每秒显示帧率、码率、解码时间和“input→update”：从本机发出输入到收到下一张有变化的画面的时间，只用本机时钟，
+包含网络往返、采集、编码和解码。
 
 录一段码流看码率：
 
