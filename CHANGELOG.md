@@ -8,6 +8,7 @@
 - **`rdaccel_remote`**（macOS）：带窗口的跨机器接收端，显示对方屏幕和光标，把鼠标、滚轮、键盘（含 Command 快捷键）发给
   `rdaccel_serve --inject`；窗口失去焦点时松开还按着的键。标题栏显示“input→update”：本机发出输入到下一张有变化的画面的时间。
   只是示例，库和 C ABI 没有变化。
+- `rdaccel_serve`：接收端离开后在同一端口等下一个（`keep_serving`），不再退出；`--once` 恢复原来的行为。
 
 ## 1.0.0-rc1
 

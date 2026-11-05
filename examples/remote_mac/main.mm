@@ -120,11 +120,11 @@ uint32_t ButtonOf(NSEvent* e) {
   _cursorHidden = YES;
 }
 - (void)mouseExited:(NSEvent*)e {
-  if (_cursorHidden) [NSCursor unhide];
-  _cursorHidden = NO;
+  [self showLocalCursor];
 }
 - (void)showLocalCursor {
-  [self mouseExited:nil];
+  if (_cursorHidden) [NSCursor unhide];
+  _cursorHidden = NO;
 }
 
 - (void)pointer:(NSEvent*)e kind:(rdaccel::InputKind)kind {
@@ -319,6 +319,7 @@ uint32_t ButtonOf(NSEvent* e) {
 // Main thread. Sizes the window to the stream once, at most 85% of the screen.
 - (void)streamSizeChanged:(int32_t)w height:(int32_t)h {
   const bool first = _streamW == 0;
+  if (w == _streamW && h == _streamH) return;
   _streamW = w;
   _streamH = h;
   std::printf("stream %dx%d\n", w, h);
