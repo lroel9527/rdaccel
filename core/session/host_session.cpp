@@ -338,8 +338,14 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       // A progressive keyframe being completed gets its own share (the
       // screen is usually static meanwhile), unless frames are being held
       // back: then the path is full already.
-      const double share =
-          pending_lossless_count_ > 0 && !holding_back ? kProgressiveShare : kLosslessRateShare;
+      // While the screen keeps moving (a scroll, a drag), lossless gets less,
+      // so what is uncovered goes as video first and turns sharp once the
+      // screen stops (refresh): at 0.4 Mbps a scroll's new rows of text alone
+      // need more than the link, and showing every frame beats showing them
+      // exact while they fly past.
+      const double share = moving_ ? kLosslessMovingShare
+                           : pending_lossless_count_ > 0 && !holding_back ? kProgressiveShare
+                                                                          : kLosslessRateShare;
       const double gap_us = static_cast<double>(frame.capture_time_us -
                                                 std::min(frame.capture_time_us, prev_frame_us));
       lossless_tokens_ = std::min(
@@ -436,6 +442,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   // within the budget of those frames.
   const double lossless_budget = lossless_tokens_;
   double lossless_spent = 0;  // estimated
+  bool over_lossless_budget = false;
   // Codes `r` (all or part of tile `c`) losslessly if it has few colours,
   // else through the video encoder. Returns true for video.
   auto code_rect = [&](const tile::TileChange& c, const Rect& r, bool is_hot) {
@@ -474,6 +481,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       const double raw = 3.0 * static_cast<double>(n) + static_cast<double>(r.w) * r.h * bits / 8.0;
       if (!key && !progressive_turn && n > 1 && options_.bitrate_bps > 0 &&
           lossless_spent + raw * kLosslessRawShare > lossless_budget) {
+        over_lossless_budget = true;
         CopyRectInto(frame.bgra, r, enc_input_.data(), enc_stride);
         tile::TileChange part = c;
         part.rect = r;
@@ -913,6 +921,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   lossless_tokens_ -= static_cast<double>(lossless_data.size());
   stats_.lossless_tiles += n_lossless;
   stats_.moved_tiles += moved_tiles;
+  moving_ = moved_tiles > 0 && over_lossless_budget;
   stats_.cached_tiles += n_loads;
   stats_.refreshed_tiles += refresh.size() - progressive_sent;
   stats_.progressive_tiles += progressive_sent;

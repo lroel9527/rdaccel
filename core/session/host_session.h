@@ -223,6 +223,11 @@ class HostSession {
   // meanwhile; changes still go first, and the transport's queue limit holds
   // latency down if the estimate is off.
   static constexpr double kProgressiveShare = 0.8;
+  // Lossless share while content is moving and the link is tight (the
+  // previous frame had moved tiles and sent lossless tiles as video for want
+  // of budget). A fast link never runs out, so nothing changes there.
+  static constexpr double kLosslessMovingShare = 0.2;
+  bool moving_ = false;
   static constexpr size_t kMaxProgressivePerFrame = 64;
   uint64_t next_frame_id_ = 1;
   std::atomic<bool> force_keyframe_{true};
