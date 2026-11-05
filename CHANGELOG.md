@@ -3,6 +3,12 @@
 版本号遵循语义化版本。从 1.0 起，同一主版本内 C ABI 只加不改（新函数、结构体末尾加字段），
 `find_package(rdaccel 1.0)` 接受任何 1.x。1.0 之前次版本号（0.x）变化时 C ABI 可能有不兼容改动。
 
+## 未发布
+
+- **macOS 最低版本**：从源码构建时默认的 `CMAKE_OSX_DEPLOYMENT_TARGET`（14.0）以前不生效，产物跟随构建机的系统版本
+  （在 macOS 27 上构建的程序拷到 macOS 14–26 上跑不起来）。现在默认值在 `project()` 之前设好，已有的构建目录也会补上；
+  `-DCMAKE_OSX_DEPLOYMENT_TARGET=` 或环境变量 `MACOSX_DEPLOYMENT_TARGET` 仍然优先。发布包本来就在 macOS 14 上构建，不受影响。
+
 ## 1.0.0-rc1
 
 1.0 的候选版：C ABI 从这一版起冻结，1.x 之内只加不改。soname 改为 `librdaccel.so.1` / `librdaccel.1.dylib`，
