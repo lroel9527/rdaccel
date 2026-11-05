@@ -49,7 +49,7 @@ host.StartScreenCapture();  // 或者每帧调用 host.SubmitFrame(...)
 # 1) 安装后 find_package（或 pkg-config）
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 cmake --install build --prefix /opt/rdaccel
-# CMake：find_package(rdaccel 0.5 REQUIRED) + target_link_libraries(app PRIVATE rdaccel::rdaccel)
+# CMake：find_package(rdaccel 1.0 REQUIRED) + target_link_libraries(app PRIVATE rdaccel::rdaccel)
 # 其他构建系统：PKG_CONFIG_PATH=/opt/rdaccel/lib/pkgconfig pkg-config --cflags --libs rdaccel
 #   （静态库加 --static，会带上 FFmpeg/X11 等依赖）
 

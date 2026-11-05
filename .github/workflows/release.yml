@@ -45,7 +45,7 @@ jobs:
       - name: Tag matches the version
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          v=$(sed -n 's/^project(rdaccel VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          v=$(tools/version.sh)
           test "v$v" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME but CMakeLists.txt says $v"; exit 1; }
       - name: Build (${{ matrix.kind }} library${{ matrix.kind == 'shared' && ' + tools' || '' }})
         run: |
@@ -112,7 +112,7 @@ jobs:
           if [ "$GITHUB_REF_TYPE" = tag ]; then
             tag=$GITHUB_REF_NAME
           else
-            tag=v$(sed -n 's/^project(rdaccel VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+            tag=v$(tools/version.sh)
             if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
               echo "tag $tag already exists; push it instead of running this by hand"; exit 1
             fi
@@ -120,4 +120,6 @@ jobs:
           v=${tag#v}
           awk -v v="$v" '$0 ~ "^## " v "$" {p=1; next} /^## / {p=0} p' CHANGELOG.md > notes.md
           test -s notes.md || { echo "CHANGELOG.md has no ## $v section"; exit 1; }
-          gh release create "$tag" dist/* --draft --target "$GITHUB_SHA" --title "rdaccel $v" --notes-file notes.md
+          pre=
+          case "$v" in *-*) pre=--prerelease ;; esac  # 1.0.0-rc1 and the like
+          gh release create "$tag" dist/* --draft $pre --target "$GITHUB_SHA" --title "rdaccel $v" --notes-file notes.md

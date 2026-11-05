@@ -5,11 +5,13 @@
 
 ## 步骤
 
-1. 改 `CMakeLists.txt` 和 `rdaccel.h` 里的版本号，`tests/test_capi.cpp` 和 `tests/test_api.cpp` 的版本断言，`examples/minimal` 和 README 里
+1. 改 `CMakeLists.txt` 和 `rdaccel.h` 里的版本号（候选版另外把 `RDACCEL_PRERELEASE` 和 `RDA_VERSION_PRERELEASE`
+   设成 `rc1` 之类，正式版设成空字符串；两处必须一致），，`tests/test_capi.cpp` 和 `tests/test_api.cpp` 的版本断言，`examples/minimal` 和 README 里
    `find_package(rdaccel x.y)` 的版本。
-2. 在 `CHANGELOG.md` 顶部写 `## x.y.z` 一节（发布说明直接取这一节）。
+2. 在 `CHANGELOG.md` 顶部写 `## x.y.z` 一节（候选版是 `## x.y.z-rc1`；发布说明直接取这一节）。
+   完整版本号（标签去掉 `v`）用 `tools/version.sh` 看。
 3. 合并到 main，确认 CI 全绿。
-4. 打标签并推送：`git tag vx.y.z && git push origin vx.y.z`。推不了标签时（比如只能推分支的环境），
+4. 打标签并推送：`git tag vx.y.z && git push origin vx.y.z`（候选版是 `vx.y.z-rc1`，release 会标成 pre-release）。推不了标签时（比如只能推分支的环境），
    在 main 上手动运行 `release` 工作流并勾选 `release`：效果相同，标签 `vx.y.z` 在发布草稿时打在那个提交上。
 5. `release` 工作流在 Linux（ubuntu-24.04, x86_64）和 macOS（14）上各构建共享库 + 工具、静态库两种包，
    macOS 的包是通用二进制（arm64 + x86_64，逐个文件用 `lipo` 检查），每个包都会拿 `examples/minimal` 编译运行一遍自检，
@@ -34,9 +36,9 @@ cmake --build build -j
 
 ## 兼容性约定
 
-- 1.0 之前：次版本（0.x）之间 C ABI 可能不兼容，所以共享库的 soname 带次版本（`librdaccel.so.0.4`、
-  `librdaccel.0.4.dylib`），`find_package(rdaccel 0.4)` 只接受 0.4.x。
-- 1.0 之后：同一主版本内只加不改（新函数、配置结构体末尾加字段），soname 只带主版本。
+- 1.0 起：同一主版本内只加不改（新函数、配置结构体末尾加字段），soname 只带主版本（`librdaccel.so.1`、
+  `librdaccel.1.dylib`），`find_package(rdaccel 1.0)` 接受任何 1.x。`rdaccel.hpp` 只承诺源码兼容。
+- 1.0 之前：次版本（0.x）之间 C ABI 可能不兼容，soname 带次版本（`librdaccel.so.0.5`）。
 - CI 的 `abi` 作业在每个 PR 上用 libabigail 的 `abidiff` 对比基线分支和 PR 的 `librdaccel.so`（只看
   `include/rdaccel/` 声明的接口）。同一版本内出现不兼容改动（删函数、改参数、改字段位置……）时失败，需要先升版本；
   兼容的改动（加函数、结构体末尾加字段）只写进作业摘要。本地：`tools/abi_check.sh origin/main`。
