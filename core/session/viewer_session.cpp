@@ -73,8 +73,15 @@ void ViewerSession::OnReceive(transport::Channel ch, std::span<const uint8_t> by
   }
   if (ch == transport::Channel::kCursor) {
     // Right away: the pointer must not wait for a picture to decode.
+    // Only cursor messages: this runs on the transport's thread, alongside
+    // the decode worker, so anything else here (a peer can put any message
+    // on any channel) would race the worker over the frame state.
     cursor_parser_.Append(bytes);
-    while (auto m = cursor_parser_.Next()) Handle(std::move(*m));
+    while (auto m = cursor_parser_.Next()) {
+      if (std::holds_alternative<proto::CursorShape>(*m) || std::holds_alternative<proto::CursorPos>(*m)) {
+        Handle(std::move(*m));
+      }
+    }
     return;
   }
   if (ch != transport::Channel::kVideo && ch != transport::Channel::kControl) return;
@@ -103,7 +110,12 @@ void ViewerSession::DecodeLoop() {
 void ViewerSession::Parse(transport::Channel ch, std::span<const uint8_t> bytes) {
   proto::StreamParser& parser = ch == transport::Channel::kVideo ? video_parser_ : control_parser_;
   parser.Append(bytes);
-  while (auto m = parser.Next()) Handle(std::move(*m));
+  while (auto m = parser.Next()) {
+    // Cursor messages belong to the cursor channel, handled on the
+    // transport's thread; here (the decode worker) they would race it.
+    if (std::holds_alternative<proto::CursorShape>(*m) || std::holds_alternative<proto::CursorPos>(*m)) continue;
+    Handle(std::move(*m));
+  }
 }
 
 void ViewerSession::FeedVideoBytes(std::span<const uint8_t> bytes) {

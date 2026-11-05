@@ -95,9 +95,12 @@ int main(int argc, char** argv) {
     int64_t target, estimate;
     uint32_t rtt_us;
     double shown_ms = -1;
+    double psnr = -1;   // of the picture shown for it
+    double exact = -1;  // % of its pixels shown exactly
   };
   std::vector<TraceRow> trace;
   const std::string trace_path = args.str("trace", "");
+  const bool tracing = !trace_path.empty();
   const auto warmup_frames = static_cast<uint64_t>(args.real("warmup", 3) * fps);
   double first_frame_ms = -1;
   std::vector<std::pair<double, double>> first_psnr;  // (ms since start, PSNR) during warm-up
@@ -136,21 +139,34 @@ int main(int argc, char** argv) {
     // Quality on a sample of frames, to keep the viewer thread real time;
     // more often during warm-up, to see how fast the first picture sharpens.
     const bool warm = index < warmup_frames;
-    if (warm ? index % 5 == 0 || first_psnr.empty() : index % 10 == 0) {
+    const bool sampled = warm ? index % 5 == 0 || first_psnr.empty() : index % 10 == 0;
+    // With --trace, every shown frame (the trace's psnr column).
+    if (sampled || tracing) {
       Render(scene, sc->fn, index, ref);
       double se = 0;
+      uint64_t exact = 0;  // pixels shown exactly (lossless, or untouched)
       for (int y = 0; y < img.height; ++y) {
         const uint8_t* a = img.data + static_cast<size_t>(y) * img.stride;
         const uint8_t* b = ref.data() + static_cast<size_t>(y) * w * 4;
-        for (int x = 0; x < img.width * 4; ++x) {
-          if ((x & 3) == 3) continue;
-          const int d = a[x] - b[x];
-          se += d * d;
+        for (int x = 0; x < img.width; ++x) {
+          int same = 1;
+          for (int c = 0; c < 3; ++c) {
+            const int d = a[x * 4 + c] - b[x * 4 + c];
+            se += d * d;
+            same &= d == 0;
+          }
+          exact += static_cast<uint64_t>(same);
         }
       }
-      const double mse = se / (static_cast<double>(img.width) * img.height * 3);
+      const double px = static_cast<double>(img.width) * img.height;
+      const double mse = se / (px * 3);
       const double p = mse == 0 ? 99.0 : 10.0 * std::log10(255.0 * 255.0 / mse);
       std::lock_guard<std::mutex> lock(mu);
+      if (index < trace.size()) {
+        trace[index].psnr = p;
+        trace[index].exact = 100.0 * static_cast<double>(exact) / px;
+      }
+      if (!sampled) return;
       if (warm) {
         first_psnr.push_back({(now - start_us) / 1000.0, p});
       } else {
@@ -250,13 +266,13 @@ int main(int argc, char** argv) {
   std::lock_guard<std::mutex> lock(mu);
   if (!trace_path.empty()) {
     if (FILE* f = std::fopen(trace_path.c_str(), "w")) {
-      std::fprintf(f, "frame,t_ms,video_bytes,lossless_bytes,sent_bytes,skipped,keyframe,target_kbps,estimate_kbps,rtt_ms,shown_latency_ms\n");
+      std::fprintf(f, "frame,t_ms,video_bytes,lossless_bytes,sent_bytes,skipped,keyframe,target_kbps,estimate_kbps,rtt_ms,shown_latency_ms,psnr,exact_pct\n");
       for (size_t k = 0; k < trace.size(); ++k) {
         const TraceRow& r = trace[k];
-        std::fprintf(f, "%zu,%.1f,%llu,%llu,%llu,%d,%d,%.0f,%.0f,%.1f,%.1f\n", k, r.t_ms,
+        std::fprintf(f, "%zu,%.1f,%llu,%llu,%llu,%d,%d,%.0f,%.0f,%.1f,%.1f,%.2f,%.1f\n", k, r.t_ms,
                      static_cast<unsigned long long>(r.video_b), static_cast<unsigned long long>(r.lossless_b),
                      static_cast<unsigned long long>(r.bytes_b), r.dropped ? 1 : 0, r.key ? 1 : 0,
-                     r.target / 1000.0, r.estimate / 1000.0, r.rtt_us / 1000.0, r.shown_ms);
+                     r.target / 1000.0, r.estimate / 1000.0, r.rtt_us / 1000.0, r.shown_ms, r.psnr, r.exact);
       }
       std::fclose(f);
     } else {

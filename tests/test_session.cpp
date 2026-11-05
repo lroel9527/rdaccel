@@ -252,6 +252,90 @@ TEST(Session, LosslessStaysWithinItsBudgetOnASlowLink) {
   PipeStopper stop{host_end, viewer_end};
 }
 
+TEST(Session, TilesTheBudgetSentAsVideoTurnExactOnceStill) {
+  // Content beyond the lossless budget goes as video; once the screen is
+  // still it must be sent again losslessly (refresh is off by default, and
+  // nothing else would). The fake decoder shows black, so any tile left at
+  // video quality differs from the screen.
+  auto [host_end, viewer_end] = transport::MakeLocalPipe();
+  constexpr int W = 640, H = 384, kFps = 30;
+  constexpr int64_t kBitrate = 400'000;
+  session::HostSession host(host_end.get(), std::make_unique<FakeEncoder>(), W, H,
+                            {.refine_frames = 0, .progressive = false, .fps = kFps,
+                             .bitrate_bps = kBitrate});
+  session::ViewerSession viewer(nullptr, std::make_unique<FakeDecoder>());
+  std::mutex mu;
+  std::condition_variable cv;
+  std::vector<uint8_t> shown;
+  uint64_t last_id = 0;
+  viewer.SetFrameHandler([&](const tile::ImageView& img, const std::vector<Rect>&, uint64_t id,
+                             uint64_t) {
+    std::lock_guard<std::mutex> lock(mu);
+    shown.resize(static_cast<size_t>(img.width) * img.height * 4);
+    for (int y = 0; y < img.height; ++y) {
+      std::memcpy(shown.data() + static_cast<size_t>(y) * img.width * 4,
+                  img.data + static_cast<size_t>(y) * img.stride, static_cast<size_t>(img.width) * 4);
+    }
+    last_id = id;
+    cv.notify_all();
+  });
+  viewer.Attach(viewer_end.get());
+
+  std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 50);
+  for (size_t i = 3; i < px.size(); i += 4) px[i] = 255;
+  uint32_t seed = 1;
+  auto next = [&] { return (seed = seed * 1103515245u + 12345u) >> 16; };
+  uint64_t t = 1'000'000;
+  host.OnFrame({{px.data(), W, H, W * 4}, {}, t});  // keyframe
+  for (int f = 0; f < 30; ++f) {
+    t += 1'000'000 / kFps;
+    for (int ty = 0; ty < H / 64; ++ty) {
+      for (int tx = 0; tx < W / 64; ++tx) {
+        if ((tx + ty + f) % 3 != 0) continue;
+        for (int y = 0; y < 64; ++y) {
+          for (int x = 0; x < 64; ++x) {
+            uint8_t* p = &px[(static_cast<size_t>(ty * 64 + y) * W + tx * 64 + x) * 4];
+            const uint32_t c = next() % 200;
+            p[0] = static_cast<uint8_t>(c);
+            p[1] = static_cast<uint8_t>(c * 7);
+            p[2] = static_cast<uint8_t>(c * 13);
+          }
+        }
+      }
+    }
+    host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+  }
+  // Still for 15 s: the ~60 tiles owed, of noise at ~4.5 kB each, take about
+  // 9 s at 80% of 0.4 Mbps.
+  for (int f = 0; f < 15 * kFps; ++f) {
+    t += 1'000'000 / kFps;
+    host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+  }
+  const uint64_t frames = host.stats().frames_encoded;
+  PipeStopper stop{host_end, viewer_end};
+  std::unique_lock<std::mutex> lock(mu);
+  ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(5), [&] { return last_id >= frames; }));
+  size_t wrong = 0;
+  for (size_t i = 0; i < px.size(); i += 4) {
+    if (std::memcmp(&px[i], &shown[i], 3) != 0) ++wrong;
+  }
+  std::string bad;
+  for (int ty = 0; ty < H / 64; ++ty) {
+    for (int tx = 0; tx < W / 64; ++tx) {
+      size_t n = 0;
+      for (int y = 0; y < 64; ++y) {
+        for (int x = 0; x < 64; ++x) {
+          const size_t i = (static_cast<size_t>(ty * 64 + y) * W + tx * 64 + x) * 4;
+          if (std::memcmp(&px[i], &shown[i], 3) != 0) ++n;
+        }
+      }
+      if (n) bad += " (" + std::to_string(tx) + "," + std::to_string(ty) + "):" + std::to_string(n);
+    }
+  }
+  EXPECT_EQ(wrong, 0u) << "pixels still at video quality in tiles" << bad;
+  EXPECT_GT(host.stats().lossless_bytes, 0u);
+}
+
 TEST(Session, FewColourTilesGoLosslessAndSkipTheEncoder) {
   auto [host_end, viewer_end] = transport::MakeLocalPipe();
   constexpr int W = 200, H = 120;
