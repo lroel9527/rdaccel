@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.24)
-project(rdaccel VERSION 0.5.0 LANGUAGES C CXX)
+project(rdaccel VERSION 1.0.0 LANGUAGES C CXX)
+# Pre-release label ("rc1"), empty for a release. The full version, as the
+# library, the packages and the tag (v1.0.0-rc1) show it, is
+# PROJECT_VERSION[-RDACCEL_PRERELEASE].
+set(RDACCEL_PRERELEASE "rc1")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -31,6 +35,16 @@ string(REGEX REPLACE ".*MAJOR ([0-9]+).*MINOR ([0-9]+).*PATCH ([0-9]+).*" "\\1.\
        RDA_HEADER_VERSION "${RDA_VERSION_LINES}")
 if(NOT RDA_HEADER_VERSION STREQUAL PROJECT_VERSION)
   message(FATAL_ERROR "rdaccel.h says ${RDA_HEADER_VERSION}, CMakeLists.txt says ${PROJECT_VERSION}")
+endif()
+file(STRINGS include/rdaccel/rdaccel.h RDA_PRERELEASE_LINE REGEX "^#define RDA_VERSION_PRERELEASE ")
+string(REGEX REPLACE ".*\"(.*)\".*" "\\1" RDA_HEADER_PRERELEASE "${RDA_PRERELEASE_LINE}")
+if(NOT RDA_HEADER_PRERELEASE STREQUAL RDACCEL_PRERELEASE)
+  message(FATAL_ERROR "rdaccel.h says pre-release \"${RDA_HEADER_PRERELEASE}\", CMakeLists.txt says \"${RDACCEL_PRERELEASE}\"")
+endif()
+if(RDACCEL_PRERELEASE)
+  set(RDACCEL_FULL_VERSION "${PROJECT_VERSION}-${RDACCEL_PRERELEASE}")
+else()
+  set(RDACCEL_FULL_VERSION "${PROJECT_VERSION}")
 endif()
 
 if(PROJECT_IS_TOP_LEVEL)
@@ -145,7 +159,7 @@ target_include_directories(rdaccel
     ${CMAKE_CURRENT_SOURCE_DIR}/core
     ${CMAKE_CURRENT_SOURCE_DIR}/platform
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/monocypher)
-target_compile_definitions(rdaccel PRIVATE RDACCEL_VERSION_STRING="${PROJECT_VERSION}")
+target_compile_definitions(rdaccel PRIVATE RDACCEL_VERSION_STRING="${RDACCEL_FULL_VERSION}")
 find_package(Threads REQUIRED)
 find_package(ZLIB REQUIRED)
 target_link_libraries(rdaccel PRIVATE Threads::Threads ZLIB::ZLIB)
@@ -214,7 +228,7 @@ if(RDACCEL_INSTALL)
     ${CMAKE_CURRENT_BINARY_DIR}/rdaccelConfig.cmake
     INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/rdaccel)
   write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/rdaccelConfigVersion.cmake
-    COMPATIBILITY SameMinorVersion)
+    COMPATIBILITY SameMajorVersion)
   install(FILES
     ${CMAKE_CURRENT_BINARY_DIR}/rdaccelConfig.cmake
     ${CMAKE_CURRENT_BINARY_DIR}/rdaccelConfigVersion.cmake
@@ -267,10 +281,10 @@ if(RDACCEL_INSTALL)
   set(CPACK_PACKAGE_NAME rdaccel)
   set(CPACK_PACKAGE_VENDOR rdaccel)
   set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Low-latency remote desktop streaming library (HEVC)")
-  set(CPACK_PACKAGE_FILE_NAME "rdaccel-${PROJECT_VERSION}-${RDA_OS}-${RDA_ARCH}")
+  set(CPACK_PACKAGE_FILE_NAME "rdaccel-${RDACCEL_FULL_VERSION}-${RDA_OS}-${RDA_ARCH}")
   set(CPACK_RESOURCE_FILE_LICENSE ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE)
   set(CPACK_SOURCE_GENERATOR TGZ)
-  set(CPACK_SOURCE_PACKAGE_FILE_NAME "rdaccel-${PROJECT_VERSION}")
+  set(CPACK_SOURCE_PACKAGE_FILE_NAME "rdaccel-${RDACCEL_FULL_VERSION}")
   set(CPACK_SOURCE_IGNORE_FILES "/[.]git/" "/build[^/]*/" "/inst[^/]*/" "^${CMAKE_CURRENT_SOURCE_DIR}/corpus/" "/crashes/")
   include(CPack)
 endif()

@@ -75,7 +75,7 @@ viewer->SendInput({rdaccel::InputKind::kMouseMove, 100, 200});
 
 ## 1.1 连接状态、应用消息、输入
 
-**连不上怎么办。** `ConnectUdp` 不阻塞，`Viewer` 创建后在 `peer_timeout_ms` 内等不到 Host 的回应就以 `RDA_ERR_TIMEOUT` 断开，这就是连接超时。Host 端用 `BindUdp` / `BindTcp`：马上返回，马上创建 `Host`，用状态回调等对方连上（0.5 起不再有阻塞的 `ListenUdp` / `ListenTcp`）。
+**连不上怎么办。** `ConnectUdp` 不阻塞，`Viewer` 创建后在 `peer_timeout_ms` 内等不到 Host 的回应就以 `RDA_ERR_TIMEOUT` 断开，这就是连接超时。Host 端用 `BindUdp` / `BindTcp`：马上返回，马上创建 `Host`，用状态回调等对方连上（1.0 起不再有阻塞的 `ListenUdp` / `ListenTcp`）。
 
 **连接状态。** `Viewer` 创建后先发握手（协议版本、能力位、可选的认证令牌），`Host` 检查后回应，两边进入 `kConnected`。之后双方大约每秒互发心跳，`peer_timeout_ms`（默认 10 秒，0 = 不超时）内收不到对方任何数据就判定断开。主动关闭（析构 `Viewer` / `Host`）会给对方发 Goodbye，对方立刻收到断开而不是等超时。`Viewer` 断开是终态，要重连就重建 `Viewer` 和传输。
 

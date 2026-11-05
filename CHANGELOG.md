@@ -1,11 +1,19 @@
 # 更新记录
 
-版本号遵循语义化版本。1.0 之前，次版本号（0.x）变化时 C ABI 可能有不兼容改动；
-补丁版本（0.x.y）保持兼容。`find_package(rdaccel 0.4)` 只接受同一个 0.4.x。
+版本号遵循语义化版本。从 1.0 起，同一主版本内 C ABI 只加不改（新函数、结构体末尾加字段），
+`find_package(rdaccel 1.0)` 接受任何 1.x。1.0 之前次版本号（0.x）变化时 C ABI 可能有不兼容改动。
 
-## 未发布
+## 1.0.0-rc1
 
-版本号升到 0.5.0：去掉了两个 C 函数，ABI 不兼容 0.4（soname `librdaccel.so.0.5`，`find_package(rdaccel 0.5)`）。
+1.0 的候选版：C ABI 从这一版起冻结，1.x 之内只加不改。soname 改为 `librdaccel.so.1` / `librdaccel.1.dylib`，
+`find_package(rdaccel 1.0)` 接受任何 1.x。和 0.4 相比 ABI 不兼容：去掉了两个阻塞的 C 函数，
+`on_error` 的状态码有了约定，`rda_host_config` 末尾加了 `keep_serving`。在 Mac 和 Linux 上实测之后发 1.0.0。
+
+- **0.4 Mbps 的链路**（#32）：无损块按真实字节扣一个按半个码率充值的桶，渐进细化也从桶里扣；
+  估计带宽骤降时目标码率立刻跟到估计的 85%；区域列表纵向合并、一个块拆成很多视频碎片时只列外框；
+  匹配碎成很多块的帧不做拷贝。netsim 4 → 0.4 Mbps 降速瞬间最差延迟约 200 ms（之前 0.5–1.2 s），
+  4 → 1 Mbps 送达 91–94% 的帧。`netsim --trace`、`RDACCEL_FRAME_PARTS=1` 和 `tools/netsim_trace_summary.py` 用来看每帧由什么组成。
+- **UDP 传输**：收包时间改在加锁之后读取。以前伪造的确认可以让往返时间回绕成约 2^64 微秒（fuzz 找到）。
 
 - **一个 Host 依次服务多个接收端**（`rda_host_config.keep_serving`，默认 1）：接收端离开、超时、被 `on_auth` 拒绝或密钥不对之后，
   `rda_udp_bind` / `rda_tcp_bind` 上的 Host 报 `RDA_STATE_DISCONNECTED`（带原因）再报 `RDA_STATE_CONNECTING`，在同一个端口等下一个；

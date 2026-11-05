@@ -5,7 +5,7 @@ includedir=@RDA_PC_INCLUDEDIR@
 Name: rdaccel
 Description: Low-latency remote desktop streaming library (HEVC)
 URL: https://github.com/lroel9527/rdaccel
-Version: @PROJECT_VERSION@
+Version: @RDACCEL_FULL_VERSION@
 Cflags: -I${includedir}
 Libs: -L${libdir} -lrdaccel
 Libs.private: @RDA_PC_LIBS_PRIVATE@
