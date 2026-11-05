@@ -71,7 +71,7 @@ auto viewer = rdaccel::Viewer::Create(rdaccel::ConnectUdp("10.0.0.2", 7300), std
 viewer->SendInput({rdaccel::InputKind::kMouseMove, 100, 200});
 ```
 
-按外部项目方式写的完整例子在 `examples/integration/`：纯 C 的远程协助 host 和 viewer（加密、配对码、依次服务多个接收端、剪贴板、输入注入、重试连接），用 CMake 或 pkg-config 针对安装好的库构建，`smoke.sh` 把两端跑一遍。其他可运行的例子：`examples/serve.cpp`（发送端）和 `examples/view.cpp`（接收端）；同一进程里的最小例子是 `examples/minimal/main.cpp`，纯 C 版是 `examples/minimal_c/main.c`；带窗口的 macOS 例子是 `examples/loopback_mac/main.mm`。
+按外部项目方式写的完整例子在 `examples/integration/`：纯 C 的远程协助 host 和 viewer（加密、配对码、依次服务多个接收端、剪贴板、输入注入、重试连接），用 CMake 或 pkg-config 针对安装好的库构建，`smoke.sh` 把两端跑一遍。其他可运行的例子：`examples/serve.cpp`（发送端）和 `examples/view.cpp`（接收端）；同一进程里的最小例子是 `examples/minimal/main.cpp`，纯 C 版是 `examples/minimal_c/main.c`；带窗口的 macOS 例子是 `examples/loopback_mac/main.mm`（本机回环）和 `examples/remote_mac/main.mm`（跨机器远程控制：画面、光标层、鼠标键盘滚轮回传）。
 
 ## 1.1 连接状态、应用消息、输入
 

@@ -21,6 +21,15 @@ if(APPLE)
   )
   set_target_properties(rdaccel_loopback PROPERTIES
     MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_SOURCE_DIR}/loopback_mac/Info.plist.in)
+
+  # A windowed viewer that controls another machine running rdaccel_serve.
+  add_executable(rdaccel_remote remote_mac/main.mm)
+  target_compile_options(rdaccel_remote PRIVATE -fobjc-arc)
+  target_link_libraries(rdaccel_remote PRIVATE
+    rdaccel::rdaccel
+    "-framework AppKit"
+    "-framework QuartzCore"
+  )
 endif()
 
 add_executable(rdaccel_netsim netsim.cpp)
@@ -44,6 +53,9 @@ target_link_libraries(rdaccel_minimal_c PRIVATE rdaccel::rdaccel)
 
 if(RDACCEL_INSTALL AND RDACCEL_INSTALL_TOOLS)
   set(RDA_TOOLS rdaccel_serve rdaccel_view rdaccel_record rdaccel_play rdaccel_bench rdaccel_netsim)
+  if(APPLE)
+    list(APPEND RDA_TOOLS rdaccel_remote)
+  endif()
   # Find a shared librdaccel next to them: <prefix>/bin -> <prefix>/lib.
   if(APPLE)
     set(RDA_TOOL_RPATH "@loader_path/../${CMAKE_INSTALL_LIBDIR}")

@@ -67,6 +67,7 @@ cmake --install build --prefix /opt/rdaccel
 KEY=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')         # 32 字节密钥，两边相同（或两边都用 --plaintext）
 ./build/bin/rdaccel_serve --udp=7300 --key=$KEY           # 被控机：采集主屏，等一个接收端
 ./build/bin/rdaccel_view 10.0.0.2 --udp=7300 --key=$KEY --seconds=30 --dump=last.ppm   # 控制端：解码并每秒打印统计
+./build/bin/rdaccel_remote 10.0.0.2 --udp=7300 --key=$KEY  # 或者 Mac 控制端用窗口直接操作（被控机加 --inject）
 ```
 
 ## 文档
