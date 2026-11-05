@@ -211,7 +211,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       // more than the link, and showing every frame beats showing them exact
       // while they fly past.
       const double share = moving_ ? kLosslessMovingShare
-                           : pending_lossless_count_ > 0 && !holding_back_ && quiet_ ? kProgressiveShare
+                           : progressive_active_ && !holding_back_ ? kProgressiveShare
                                                                                      : kLosslessRateShare;
       const double gap_us = static_cast<double>(frame.capture_time_us -
                                                 std::min(frame.capture_time_us, lossless_tokens_us_));
@@ -234,6 +234,25 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   // half of this frame's share of the bitrate.
   size_t progressive_sent = 0;
   std::vector<uint8_t> progressive_now(n_tiles, 0);
+  // Once the screen is nearly still, every tile left at video quality (sent
+  // as video for want of budget, moved or copied from such a tile, or the
+  // first picture's) is owed too, and goes out losslessly within the bucket
+  // like the rest; one that is not palette content goes as video and is
+  // refined by the encoder instead. The user's choice for a slow link:
+  // blurry while it moves, sharp once it stops.
+  if (!key && quiet_ && options_.lossless) {
+    for (size_t i = 0; i < n_tiles; ++i) {
+      if (quality_[i] != kRough || refine_[i] != 0 || pending_lossless_[i] ||
+          frame_no_ - born_[i] < kRefreshDelay) {
+        continue;
+      }
+      const auto col = static_cast<int32_t>(i % differ_.cols());
+      const auto row = static_cast<int32_t>(i / differ_.cols());
+      if (regions_.RegionOf(col, row) >= 0) continue;
+      pending_lossless_[i] = 1;
+      ++pending_lossless_count_;
+    }
+  }
   // Tiles the budget sent as video wait for a nearly still screen (they
   // would take from the video otherwise); a progressive keyframe goes on.
   if (!key && pending_lossless_count_ > 0 && (progressive_active_ || quiet_)) {
