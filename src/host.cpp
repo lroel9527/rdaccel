@@ -81,6 +81,7 @@ struct Host::Impl {
     if (session) f(*session);
   }
   std::unique_ptr<capture::ICapturer> capturer;
+  std::atomic<bool> screen_capture{false};  // capturer running (read by the idle thread)
   // Handshake, keepalive, messages, for the current viewer. Calls into the
   // session; destroyed after the transport (whose receive thread calls it).
   // Replaced for each viewer (see ServeNext); read it through CurrentLink().
@@ -147,6 +148,10 @@ struct Host::Impl {
   std::atomic<uint64_t> last_frame_us{0};
   // A copy of the newest frame skipped for congestion (under submit_mu).
   std::vector<uint8_t> skipped_px;
+  // A frame was skipped since the last one that reached the session: its
+  // changes are not in the next frame's dirty rects (those are relative to
+  // the source's previous frame), so the next frame is compared in full.
+  bool full_diff_next = false;  // under submit_mu
   uint64_t frames_resubmitted = 0;  // under mu
   uint64_t resolution_changes = 0;  // under mu
 
@@ -165,7 +170,11 @@ struct Host::Impl {
       if (!skipped_px.empty()) {
         px = std::move(skipped_px);
         skipped_px.clear();
-      } else if (s->keyframe_pending()) {
+      } else if (s->keyframe_pending() || (screen_capture && s->work_pending())) {
+        // Screen capture (ScreenCaptureKit, PipeWire) delivers no frames
+        // while nothing changes, so what the last change left owed would
+        // wait for the next one. An application feeding frames itself
+        // decides when to send them.
         px = s->last_frame();
       } else {
         continue;
@@ -387,6 +396,7 @@ struct Host::Impl {
   }
 
   void KeepSkipped(const capture::CapturedFrame& f) {
+    full_diff_next = true;
     skipped_px.resize(static_cast<size_t>(width) * height * 4);
     for (int32_t y = 0; y < height; ++y) {
       std::memcpy(skipped_px.data() + static_cast<size_t>(y) * width * 4,
@@ -503,7 +513,15 @@ struct Host::Impl {
       skipped_px.clear();
     }
     std::string err;
-    if (!session->OnFrame(f, &err)) {
+    capture::CapturedFrame whole;
+    const capture::CapturedFrame* in = &f;
+    if (full_diff_next && !f.dirty.empty()) {
+      whole = f;
+      whole.dirty.clear();  // empty = compare every tile
+      in = &whole;
+    }
+    full_diff_next = false;
+    if (!session->OnFrame(*in, &err)) {
       if (error) *error = err;
       // One picture lost, the next one is a keyframe: not something the
       // error handler reports (it reports only what stops the host). Logged
@@ -617,6 +635,7 @@ bool Host::StartScreenCapture(std::string* error) {
     return false;
   }
   impl_->capturer = std::move(cap);
+  impl_->screen_capture = true;
   if (impl_->config.cursor_channel && !impl_->config.capture_cursor) {
     std::string cerr;
     if (auto src = platform::CreateCursorSource(impl_->config.display_index, &cerr)) {
@@ -643,6 +662,7 @@ void Host::StopScreenCapture() {
     impl_->cursor_running = false;
     impl_->cursor_thread.join();
   }
+  impl_->screen_capture = false;
   if (impl_->capturer) {
     impl_->capturer->Stop();
     impl_->capturer.reset();

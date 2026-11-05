@@ -693,3 +693,65 @@ TEST(Session, ProgressiveKeyframeSendsVideoFirstAndLosslessAfter) {
     }
   }
 }
+
+// What a change leaves owed (tiles over the lossless budget, a picture the
+// encoder dropped) shows up in work_pending(), and re-submitting the last
+// frame pays it off: the Host does that while screen capture sends no
+// frames for a static screen.
+TEST(Session, WorkLeftOwedIsPaidOffByResubmittingTheLastFrame) {
+  auto [host_end, viewer_end] = transport::MakeLocalPipe();
+  constexpr int W = 320, H = 192;
+  auto enc = std::make_unique<FakeEncoder>();
+  FakeEncoder* encp = enc.get();
+  session::HostOptions o;
+  o.bitrate_bps = 200'000;
+  session::HostSession host(host_end.get(), std::move(enc), W, H, o);
+  PipeStopper stop{host_end, viewer_end};
+
+  std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 0xe0);
+  uint64_t t = 1'000'000;
+  capture::CapturedFrame f{{px.data(), W, H, W * 4}, {}, t};
+  host.OnFrame(f);  // keyframe
+  for (int i = 0; i < 100 && host.work_pending(); ++i) {
+    f.capture_time_us = t += 100'000;
+    host.OnFrame(f);
+  }
+  ASSERT_FALSE(host.work_pending());
+
+  // Two-colour detail over the whole screen: far over one frame's lossless
+  // budget at 200 kbps.
+  uint32_t seed = 7;
+  for (size_t i = 0; i < px.size(); i += 4) {
+    seed = seed * 1103515245u + 12345u;
+    if ((seed >> 16) % 3 == 0) px[i] = px[i + 1] = px[i + 2] = 0x20;
+  }
+  f.capture_time_us = t += 33'000;
+  host.OnFrame(f);
+  EXPECT_TRUE(host.work_pending());
+  int resubmits = 0;
+  while (host.work_pending() && resubmits < 200) {
+    std::vector<uint8_t> last = host.last_frame();
+    capture::CapturedFrame r{{last.data(), W, H, W * 4}, {}, t += 100'000};
+    host.OnFrame(r);
+    ++resubmits;
+  }
+  EXPECT_FALSE(host.work_pending()) << resubmits << " re-submits";
+  EXPECT_GT(resubmits, 0);
+
+  // A dropped picture's video tiles are owed too.
+  px[(10 * W + 10) * 4] ^= 0x55;
+  px[(100 * W + 200) * 4] ^= 0x55;
+  encp->drop_next = true;
+  f.capture_time_us = t += 33'000;
+  host.OnFrame(f);
+  if (host.stats().encoder_drops > 0) {
+    EXPECT_TRUE(host.work_pending());
+    std::vector<uint8_t> last = host.last_frame();
+    capture::CapturedFrame r{{last.data(), W, H, W * 4}, {}, t += 100'000};
+    for (int i = 0; i < 100 && host.work_pending(); ++i) {
+      r.capture_time_us = t += 100'000;
+      host.OnFrame(r);
+    }
+    EXPECT_FALSE(host.work_pending());
+  }
+}

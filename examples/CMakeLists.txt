@@ -28,6 +28,7 @@ if(APPLE)
   target_link_libraries(rdaccel_remote PRIVATE
     rdaccel::rdaccel
     "-framework AppKit"
+    "-framework IOSurface"
     "-framework QuartzCore"
   )
 endif()

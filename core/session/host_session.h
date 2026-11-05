@@ -109,6 +109,15 @@ class HostSession {
   // connected after the stream started.
   void SendHello();
   bool keyframe_pending() const { return force_keyframe_; }
+  // Something is still owed to the viewer that needs no new picture: a
+  // keyframe, video tiles of a picture the encoder dropped, tiles waiting to
+  // be sent losslessly or still refining. A source that stops delivering
+  // frames while the screen is static (ScreenCaptureKit) would leave them at
+  // video quality, or stale, until the next change; the Host re-submits the
+  // last frame instead. Not thread-safe against OnFrame.
+  bool work_pending() const {
+    return force_keyframe_ || !carry_video_tiles_.empty() || pending_lossless_count_ > 0 || refining_ > 0;
+  }
 
   // The screen as of the last frame passed to OnFrame (BGRA, rows of
   // width * 4 bytes), e.g. to encode a requested keyframe when no new frame
@@ -213,6 +222,7 @@ class HostSession {
   // before costs less, and the bucket is charged only what it cost.
   static constexpr double kLosslessRawShare = 1.0;
   double lossless_tokens_ = 0;  // bytes, may go negative
+  double lossless_cap_ = 0;     // what the bucket holds at most, bytes
   bool lossless_tokens_set_ = false;
   bool progressive_active_ = false;        // a progressive keyframe is being completed
   bool sharpen_video_ = false;             // ... and was: re-send the video tiles sharp
