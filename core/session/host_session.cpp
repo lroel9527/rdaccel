@@ -192,6 +192,34 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   const bool regions_to_send =
       region_needs_key || std::find(region_dirty.begin(), region_dirty.end(), true) != region_dirty.end();
 
+  // The lossless bucket fills with time, also over frames that end up
+  // skipped below: owed tiles are picked by what it holds, so a still screen
+  // must keep filling it or they would wait for the next change.
+  {
+    const double frame_us = 1e6 / std::max(1, options_.fps);
+    const double cap = static_cast<double>(options_.bitrate_bps) / 8.0 * kLosslessBurstFrames * frame_us / 1e6;
+    if (!lossless_tokens_set_) {
+      lossless_tokens_ = cap;
+      lossless_tokens_set_ = true;
+    } else {
+      // Owed tiles (a progressive keyframe, or tiles the budget sent as
+      // video) get a larger share while the screen is nearly still, unless
+      // frames are being held back: then the path is full already.
+      // While the screen keeps moving (a scroll, a drag), lossless gets less,
+      // so what is uncovered goes as video first and turns sharp once the
+      // screen stops: at 0.4 Mbps a scroll's new rows of text alone need
+      // more than the link, and showing every frame beats showing them exact
+      // while they fly past.
+      const double share = moving_ ? kLosslessMovingShare
+                           : pending_lossless_count_ > 0 && !holding_back_ && quiet_ ? kProgressiveShare
+                                                                                     : kLosslessRateShare;
+      const double gap_us = static_cast<double>(frame.capture_time_us -
+                                                std::min(frame.capture_time_us, lossless_tokens_us_));
+      lossless_tokens_ = std::min(
+          cap, lossless_tokens_ + static_cast<double>(options_.bitrate_bps) / 8.0 * share * gap_us / 1e6);
+    }
+    lossless_tokens_us_ = frame.capture_time_us;
+  }
   // Tiles the viewer shows at first-pass video quality (or copies of such)
   // that have been static for a while get sent again properly.
   std::vector<size_t> refresh;
@@ -205,8 +233,10 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   // Progressive keyframe: the next lossless tiles, as many as fit about
   // half of this frame's share of the bitrate.
   size_t progressive_sent = 0;
-  std::vector<uint8_t> progressive_now(progressive_active_ ? n_tiles : 0, 0);
-  if (!key && pending_lossless_count_ > 0) {
+  std::vector<uint8_t> progressive_now(n_tiles, 0);
+  // Tiles the budget sent as video wait for a nearly still screen (they
+  // would take from the video otherwise); a progressive keyframe goes on.
+  if (!key && pending_lossless_count_ > 0 && (progressive_active_ || quiet_)) {
     std::vector<uint8_t> listed(n_tiles, 0);
     for (const auto& c : changes) listed[static_cast<size_t>(c.row) * differ_.cols() + c.col] = 1;
     for (size_t idx : refresh) listed[idx] = 1;
@@ -262,6 +292,8 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   }
   if (changes.empty() && !key && refining_ == 0 && refresh.empty() && !regions_to_send &&
       !sharpen_video_) {
+    quiet_ = true;
+    moving_ = false;
     if (use_regions) FinishRegions(busy, region_changed);
     std::lock_guard<std::mutex> lock(mu_);
     ++stats_.frames_skipped;
@@ -319,7 +351,6 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
                           : std::clamp(static_cast<double>(frame.capture_time_us -
                                                            std::min(frame.capture_time_us, last_frame_us_)),
                                        frame_us, 6 * frame_us);
-  const uint64_t prev_frame_us = last_frame_us_;
   last_frame_us_ = frame.capture_time_us;
   // Frames are being held back when several came late within a second (one
   // late frame is just the first change after a quiet spell).
@@ -329,29 +360,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   }
   const bool holding_back =
       late_us_.front() != 0 && frame.capture_time_us - late_us_.front() <= 1'000'000;
-  {
-    const double cap = static_cast<double>(options_.bitrate_bps) / 8.0 * kLosslessBurstFrames * frame_us / 1e6;
-    if (!lossless_tokens_set_) {
-      lossless_tokens_ = cap;
-      lossless_tokens_set_ = true;
-    } else {
-      // A progressive keyframe being completed gets its own share (the
-      // screen is usually static meanwhile), unless frames are being held
-      // back: then the path is full already.
-      // While the screen keeps moving (a scroll, a drag), lossless gets less,
-      // so what is uncovered goes as video first and turns sharp once the
-      // screen stops (refresh): at 0.4 Mbps a scroll's new rows of text alone
-      // need more than the link, and showing every frame beats showing them
-      // exact while they fly past.
-      const double share = moving_ ? kLosslessMovingShare
-                           : pending_lossless_count_ > 0 && !holding_back ? kProgressiveShare
-                                                                          : kLosslessRateShare;
-      const double gap_us = static_cast<double>(frame.capture_time_us -
-                                                std::min(frame.capture_time_us, prev_frame_us));
-      lossless_tokens_ = std::min(
-          cap, lossless_tokens_ + static_cast<double>(options_.bitrate_bps) / 8.0 * share * gap_us / 1e6);
-    }
-  }
+  holding_back_ = holding_back;
   std::vector<bool> hot(changes.size());
   for (size_t i = 0; i < changes.size(); ++i) {
     uint8_t& n = seen_[changes[i].hash];
@@ -482,6 +491,14 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       if (!key && !progressive_turn && n > 1 && options_.bitrate_bps > 0 &&
           lossless_spent + raw * kLosslessRawShare > lossless_budget) {
         over_lossless_budget = true;
+        // Owed: sent losslessly once it stops changing, within the bucket
+        // (the same queue as a progressive keyframe's tiles). Without this
+        // the tile stayed at video quality (refresh is off by default).
+        const size_t idx = tile_index(c);
+        if (!pending_lossless_[idx]) {
+          pending_lossless_[idx] = 1;
+          ++pending_lossless_count_;
+        }
         CopyRectInto(frame.bgra, r, enc_input_.data(), enc_stride);
         tile::TileChange part = c;
         part.rect = r;
@@ -585,6 +602,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     changes.push_back({col, row, 0, 0, rect});
   }
   const size_t n_changed = changes.size() - refresh.size();
+  quiet_ = n_changed * 50 <= n_tiles;
   std::vector<size_t> refine_after;  // tiles that went to video whole
   for (size_t i = 0; i < changes.size(); ++i) {
     const auto& c = changes[i];

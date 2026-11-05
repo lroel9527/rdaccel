@@ -228,6 +228,10 @@ class HostSession {
   // of budget). A fast link never runs out, so nothing changes there.
   static constexpr double kLosslessMovingShare = 0.2;
   bool moving_ = false;
+  // The previous frame changed at most 2% of the tiles.
+  bool quiet_ = true;
+  bool holding_back_ = false;        // the previous frame's view
+  uint64_t lossless_tokens_us_ = 0;  // when the bucket was last filled
   static constexpr size_t kMaxProgressivePerFrame = 64;
   uint64_t next_frame_id_ = 1;
   std::atomic<bool> force_keyframe_{true};
