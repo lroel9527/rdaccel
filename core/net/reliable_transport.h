@@ -24,6 +24,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -50,8 +51,10 @@ class ReliableTransport final : public transport::ITransport {
   void Close() override;
   bool GetStats(TransportStats* out) const override;
   bool PeerKnown() const override;
+  std::unique_ptr<transport::ITransport> NextPeer(std::string* error) override;
 
  private:
+  void Linger();
   static constexpr int kChannels = kChannelCount;
 
   struct SendStream {

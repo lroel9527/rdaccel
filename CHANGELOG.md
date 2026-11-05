@@ -7,6 +7,13 @@
 
 版本号升到 0.5.0：去掉了两个 C 函数，ABI 不兼容 0.4（soname `librdaccel.so.0.5`，`find_package(rdaccel 0.5)`）。
 
+- **一个 Host 依次服务多个接收端**（`rda_host_config.keep_serving`，默认 1）：接收端离开、超时、被 `on_auth` 拒绝或密钥不对之后，
+  `rda_udp_bind` / `rda_tcp_bind` 上的 Host 报 `RDA_STATE_DISCONNECTED`（带原因）再报 `RDA_STATE_CONNECTING`，在同一个端口等下一个；
+  抓屏不停，下一个接收端从关键帧开始，统计跨接收端累计。以前一个密钥不对或被拒绝的接收端就会让 Host 永久断开，
+  只能重建 Host 和抓屏。
+- **杂包占不住位置**：UDP 上第一个包不像本协议的连接开头（端口扫描、上一个接收端迟到的包）时，Host 不把它的发送方当成对端；
+  像开头但始终不握手的对端在 `peer_timeout_ms` 后断开。
+- `examples/integration/support_host.c` 改成一个 Host 服务所有接收端。
 - **去掉阻塞的 `rda_tcp_listen` / `rda_udp_listen`**（C++ 的 `ListenTcp` / `ListenUdp`）：它们一直阻塞到对端出现，
   期间既不能取消也收不到状态回调。改用 `rda_tcp_bind` / `rda_udp_bind`（`BindTcp` / `BindUdp`）：马上返回，
   马上创建 Host，用 `on_state` 等对方连上；Host 在对方连上之前保留最新一帧。

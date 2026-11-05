@@ -23,15 +23,15 @@ class UdpSocket final : public DatagramSocket {
   // `first` is a datagram already read from `fd`. An unconnected `fd` gets
   // connected to whoever sends the first datagram; until then sends are
   // dropped.
-  UdpSocket(int fd, std::vector<uint8_t> first, bool connected)
-      : fd_(fd), first_(std::move(first)), connected_(connected) {
+  UdpSocket(int fd, std::vector<uint8_t> first, bool connected, bool first_sender = false)
+      : fd_(fd), first_(std::move(first)), connected_(connected), first_sender_(first_sender) {
     int buf = 4 << 20;  // room for bursts at high bitrates
     ::setsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &buf, sizeof(buf));
     ::setsockopt(fd_, SOL_SOCKET, SO_SNDBUF, &buf, sizeof(buf));
   }
   ~UdpSocket() override {
     Close();
-    ::close(fd_);
+    if (fd_ >= 0) ::close(fd_);
   }
 
   bool Send(std::span<const uint8_t> d) override {
@@ -53,6 +53,31 @@ class UdpSocket final : public DatagramSocket {
     closed_ = true;
     std::lock_guard<std::mutex> lock(mu_);
     if (thread_.joinable()) thread_.join();
+  }
+
+  bool ForgetPeer() override {
+    if (!first_sender_ || fd_ < 0) return false;
+    sockaddr sa{};
+    sa.sa_family = AF_UNSPEC;
+    (void)::connect(fd_, &sa, sizeof(sa));
+    connected_ = false;
+    return true;
+  }
+
+  std::unique_ptr<DatagramSocket> NextPeer() override {
+    if (!first_sender_ || fd_ < 0) return nullptr;
+    Close();
+    // Forget the peer (connect to AF_UNSPEC) and drop what it still had on
+    // the way, so the next sender, not a late packet, becomes the peer.
+    sockaddr sa{};
+    sa.sa_family = AF_UNSPEC;
+    (void)::connect(fd_, &sa, sizeof(sa));
+    std::vector<uint8_t> buf(65536);
+    while (::recv(fd_, buf.data(), buf.size(), MSG_DONTWAIT) >= 0) {
+    }
+    const int fd = fd_;
+    fd_ = -1;
+    return std::make_unique<UdpSocket>(fd, std::vector<uint8_t>{}, false, true);
   }
 
  private:
@@ -81,6 +106,7 @@ class UdpSocket final : public DatagramSocket {
   int fd_;
   std::vector<uint8_t> first_;
   std::atomic<bool> connected_;
+  const bool first_sender_;  // the peer is whoever sends first (NextPeer works)
   std::atomic<bool> closed_{false};
   std::mutex mu_;
   ReceiveFn receiver_;
@@ -156,7 +182,7 @@ std::unique_ptr<DatagramSocket> BindUdpSocket(uint16_t port, std::string* error)
     ::close(s);
     return nullptr;
   }
-  return std::make_unique<UdpSocket>(s, std::vector<uint8_t>{}, false);
+  return std::make_unique<UdpSocket>(s, std::vector<uint8_t>{}, false, true);
 }
 
 std::unique_ptr<DatagramSocket> UdpSocketFromFd(int fd, std::string* error) {
@@ -169,7 +195,7 @@ std::unique_ptr<DatagramSocket> UdpSocketFromFd(int fd, std::string* error) {
   sockaddr_storage peer{};
   socklen_t len = sizeof(peer);
   const bool connected = ::getpeername(fd, reinterpret_cast<sockaddr*>(&peer), &len) == 0;
-  return std::make_unique<UdpSocket>(fd, std::vector<uint8_t>{}, connected);
+  return std::make_unique<UdpSocket>(fd, std::vector<uint8_t>{}, connected, !connected);
 }
 
 std::unique_ptr<DatagramSocket> ConnectUdpSocket(const std::string& host, uint16_t port,

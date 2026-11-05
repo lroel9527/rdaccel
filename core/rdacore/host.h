@@ -98,6 +98,12 @@ struct HostConfig {
   // Connection: once a viewer has connected, no bytes from it for this long
   // means it is gone (disconnected, kTimeout). 0 = never time out.
   int32_t peer_timeout_ms = 10'000;
+  // When the viewer goes (leaves, times out, is refused, has the wrong
+  // key), wait for the next one on the same port: the state goes from
+  // kDisconnected back to kConnecting. Screen capture keeps running. Works
+  // with BindUdp, BindTcp and unconnected UdpFromFd sockets; with other
+  // transports the first disconnect stays final. false = always final.
+  bool keep_serving = true;
   // Decides whether a viewer may connect, from the token it sent (on the
   // transport thread). Empty = everyone may.
   std::function<bool(std::span<const uint8_t> token)> auth;

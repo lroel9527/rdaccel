@@ -592,6 +592,9 @@ struct HostConfig {
   int64_t min_bitrate_bps = 300'000;
   int32_t max_queue_ms = 50;
   int32_t peer_timeout_ms = 10'000;
+  // After a viewer goes, wait for the next one on the same port (see
+  // rda_host_config.keep_serving).
+  bool keep_serving = true;
   // Whether a viewer may connect, from its auth token (transport thread).
   // Empty = everyone may.
   std::function<bool(std::span<const uint8_t> token)> auth;
@@ -675,6 +678,7 @@ class Host {
     c.min_bitrate_bps = config.min_bitrate_bps;
     c.max_queue_ms = config.max_queue_ms;
     c.peer_timeout_ms = config.peer_timeout_ms;
+    c.keep_serving = config.keep_serving ? 1 : 0;
     if (!config.encryption_key.empty() && config.encryption_key.size() != 32) {
       create_error_ = "encryption_key must be 32 bytes";
       return;

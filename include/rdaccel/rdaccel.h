@@ -416,7 +416,9 @@ typedef struct rda_host_config {
   /* Connection changes. `reason` is RDA_OK, or why it disconnected:
    * RDA_ERR_CLOSED (goodbye or transport closed), RDA_ERR_TIMEOUT,
    * RDA_ERR_PROTOCOL (incompatible version), RDA_ERR_AUTH (on_auth refused).
-   * Transport thread or the library's timer thread. */
+   * With keep_serving, RDA_STATE_DISCONNECTED is followed by
+   * RDA_STATE_CONNECTING when the host waits for the next viewer.
+   * Transport thread, the library's timer thread, or its serve thread. */
   void (*on_state)(void* user, rda_state state, rda_status reason);
   /* An application message from the viewer. Transport receive thread. */
   void (*on_message)(void* user, uint32_t type, const uint8_t* payload, size_t n);
@@ -439,6 +441,15 @@ typedef struct rda_host_config {
 
   /* rda_host_start_capture() only */
   int32_t display_index; /* 0 = primary display; see rda_list_displays() */
+
+  /* 1: when the viewer goes (leaves, times out, is refused by on_auth, has
+   * the wrong key), wait for the next one on the same port: on_state reports
+   * RDA_STATE_DISCONNECTED with the reason, then RDA_STATE_CONNECTING. Capture
+   * keeps running and the next viewer starts from a keyframe; stats keep
+   * counting. Works with rda_udp_bind, rda_tcp_bind and an unconnected
+   * rda_udp_from_fd socket; with other transports the first disconnect stays
+   * final. 0: the first disconnect is final. */
+  int32_t keep_serving; /* 1 */
 } rda_host_config;
 
 typedef struct rda_host_stats {

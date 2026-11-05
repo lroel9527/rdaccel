@@ -37,6 +37,7 @@ class TcpTransport final : public ITransport {
   void SetReceiver(ReceiveFn fn) override;
   void Close() override;
   bool PeerKnown() const override { return fd_.load() >= 0; }
+  std::unique_ptr<ITransport> NextPeer(std::string* error) override;
 
  private:
   struct Listening {};
@@ -47,6 +48,7 @@ class TcpTransport final : public ITransport {
 
   std::atomic<int> fd_;
   int listen_fd_ = -1;
+  uint16_t bound_port_ = 0;  // from Bind: NextPeer listens here again
   std::mutex fd_mu_;               // fd_ assignment vs Close
   std::vector<uint8_t> pending_;   // sends before the peer connected
   std::atomic<bool> closed_{false};

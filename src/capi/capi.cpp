@@ -634,6 +634,7 @@ rdacore::HostConfig ToHostConfig(const rda_host_config& c) {
   o.max_queue_ms = c.max_queue_ms;
   o.peer_timeout_ms = c.peer_timeout_ms;
   o.display_index = c.display_index;
+  o.keep_serving = c.keep_serving != 0;
   return o;
 }
 
@@ -709,6 +710,7 @@ void rda_host_config_default(rda_host_config* c) {
   c->max_queue_ms = d.max_queue_ms;
   c->peer_timeout_ms = d.peer_timeout_ms;
   c->display_index = d.display_index;
+  c->keep_serving = d.keep_serving;
 }
 
 rda_status rda_host_create(rda_transport* transport, const rda_host_config* config, rda_host** out) {

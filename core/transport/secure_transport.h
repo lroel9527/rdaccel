@@ -55,6 +55,13 @@ class SecureTransport final : public ITransport {
   bool GetStats(TransportStats* out) const override { return inner_->GetStats(out); }
   // Only once the keys are agreed: until then the host holds frames.
   bool PeerKnown() const override { return ready_.load() && inner_->PeerKnown(); }
+  bool PeerPresent() const override { return inner_->PeerPresent(); }
+  // The inner transport's next peer, with fresh connection keys.
+  std::unique_ptr<ITransport> NextPeer(std::string* error) override {
+    auto next = inner_->NextPeer(error);
+    if (!next) return nullptr;
+    return std::make_unique<SecureTransport>(std::move(next), is_host_, app_key_);
+  }
 
  private:
   void OnInner(Channel ch, std::span<const uint8_t> bytes);

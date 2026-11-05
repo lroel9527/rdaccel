@@ -62,21 +62,39 @@ ReliableTransport::ReliableTransport(std::unique_ptr<DatagramSocket> socket, Rel
 }
 
 ReliableTransport::~ReliableTransport() {
-  // Linger briefly so the last control bytes (a Goodbye) reach the peer:
-  // wait until they are acknowledged, at most kLingerUs.
-  {
-    constexpr uint64_t kLingerUs = 300'000;
-    const uint64_t deadline = Now() + kLingerUs;
-    const auto& control = out_[static_cast<size_t>(transport::Channel::kControl)];
-    std::unique_lock<std::mutex> lock(mu_);
-    while (!closed_ && heard_peer_ && !control.buf.empty() && Now() < deadline) {
-      lock.unlock();
-      std::this_thread::sleep_for(std::chrono::milliseconds(2));
-      lock.lock();
-    }
-  }
+  Linger();
   Close();
   if (worker_.joinable()) worker_.join();
+}
+
+void ReliableTransport::Linger() {
+  // Linger briefly so the last control bytes (a Goodbye) reach the peer:
+  // wait until they are acknowledged, at most kLingerUs.
+  constexpr uint64_t kLingerUs = 300'000;
+  const uint64_t deadline = Now() + kLingerUs;
+  const auto& control = out_[static_cast<size_t>(transport::Channel::kControl)];
+  std::unique_lock<std::mutex> lock(mu_);
+  while (!closed_ && heard_peer_ && !control.buf.empty() && Now() < deadline) {
+    lock.unlock();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    lock.lock();
+  }
+}
+
+std::unique_ptr<transport::ITransport> ReliableTransport::NextPeer(std::string* error) {
+  if (opt_.client) {
+    if (error) *error = "a connecting transport has only its own peer";
+    return nullptr;
+  }
+  Linger();
+  Close();
+  if (worker_.joinable()) worker_.join();
+  auto next = socket_->NextPeer();
+  if (!next) {
+    if (error) *error = "this socket has a fixed peer";
+    return nullptr;
+  }
+  return std::make_unique<ReliableTransport>(std::move(next), opt_);
 }
 
 void ReliableTransport::Close() {
@@ -111,7 +129,7 @@ void ReliableTransport::SetReceiver(ReceiveFn fn) {
 
 bool ReliableTransport::GetStats(TransportStats* out) const {
   std::lock_guard<std::mutex> lock(mu_);
-  out->bandwidth_bps = static_cast<int64_t>(bw_ * 8e6);
+  out->bandwidth_bps = static_cast<int64_t>(std::min(bw_ * 8e6, 1e15));
   out->rtt_us = static_cast<uint32_t>(srtt_);
   out->queued_bytes = QueuedBytes();
   out->bytes_in_flight = bytes_in_flight_;
@@ -153,7 +171,9 @@ uint64_t ReliableTransport::Cwnd() const {
   const uint64_t srtt = queue_since_ != 0 ? std::min(srtt_, queue_srtt_) : srtt_;
   double rtt = static_cast<double>(min_rtt_);
   if (mode_ != Mode::kStartup) rtt = (rtt + static_cast<double>(std::max(srtt, min_rtt_))) / 2;
-  const auto bdp = static_cast<uint64_t>(gain * bw_ * rtt);
+  // Capped: a nonsensical estimate (bogus acknowledgements) must not
+  // overflow the conversion.
+  const auto bdp = static_cast<uint64_t>(std::min(gain * bw_ * rtt, 1e15));
   const uint64_t cwnd = std::max(bdp + 4 * kMaxDatagram, kMinCwnd);
   // Like the pacing rate, the window does not shrink below its initial
   // size before the path has been measured under load.
@@ -601,11 +621,30 @@ void ReliableTransport::SendAck(uint64_t now) {
 
 void ReliableTransport::OnDatagram(std::span<const uint8_t> d) {
   if (d.empty()) return;
-  const uint64_t now = Now();
   std::vector<std::pair<int, std::vector<uint8_t>>> deliver;
   {
     std::lock_guard<std::mutex> lock(mu_);
+    // Read under the lock: a packet the sender thread sent while this one
+    // waited for it would otherwise be newer than `now`, and acknowledging
+    // it (only a broken or hostile peer can) would make the round trip
+    // negative, wrapping to ~2^64 us.
+    const uint64_t now = Now();
     if (closed_) return;
+    if (!heard_peer_ && !opt_.client) {
+      // Only the start of a connection may make its sender the peer: the
+      // client's hello, or the first control bytes. Anything else (a port
+      // scan, a late packet from the viewer before) must not take the place
+      // of the next viewer, so its sender is forgotten, where the socket can.
+      bool starts = d[0] == kHello;
+      if (d[0] == kData) {
+        proto::ByteReader h(d.subspan(1));
+        uint64_t pn = 0, off = 0;
+        uint8_t ch = 0;
+        starts = h.varint(pn) && h.u8(ch) && h.varint(off) &&
+                 ch == static_cast<uint8_t>(transport::Channel::kControl) && off == 0;
+      }
+      if (!starts && socket_->ForgetPeer()) return;
+    }
     if (!heard_peer_) {
       heard_peer_ = true;
       cv_.notify_all();  // data held for the peer can go now

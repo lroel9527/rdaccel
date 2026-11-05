@@ -49,6 +49,7 @@ void Link::Shutdown() {
 
 void Link::Start() {
   last_rx_us_ = Now();
+  listening_ = role_ == Role::kHost && transport_ && !transport_->PeerPresent();
   if (role_ == Role::kViewer) {
     proto::ViewerHello hello;
     hello.auth_token = options_.auth_token;
@@ -248,6 +249,16 @@ void Link::Timer() {
       if (options_.peer_timeout_ms > 0 && (role_ == Role::kViewer || s == LinkState::kConnected) &&
           quiet_us > static_cast<uint64_t>(options_.peer_timeout_ms) * 1000) {
         Fail(LinkError::kTimeout, proto::GoodbyeReason::kClosed);
+      }
+      if (listening_ && s == LinkState::kConnecting && options_.peer_timeout_ms > 0 &&
+          transport_->PeerPresent()) {
+        const uint64_t now = Now();
+        if (peer_since_us_ == 0) {
+          peer_since_us_ = now;
+        } else if (now - peer_since_us_ > static_cast<uint64_t>(options_.peer_timeout_ms) * 1000) {
+          log::Warn("host: a peer came but sent no handshake");
+          Fail(LinkError::kTimeout, proto::GoodbyeReason::kClosed);
+        }
       }
     }
     lock.lock();

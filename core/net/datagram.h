@@ -26,6 +26,15 @@ class DatagramSocket {
   virtual void SetReceiver(ReceiveFn fn) = 0;
   // Stops the receive thread (waits for a running callback to return).
   virtual void Close() = 0;
+  // For a socket whose peer is the first sender: stops this one and returns
+  // a socket on the same endpoint whose peer will be the next sender (what
+  // the old peer had in flight is dropped). Null when the peer was given
+  // (connected sockets, simulated links); this socket is then unchanged.
+  virtual std::unique_ptr<DatagramSocket> NextPeer() { return nullptr; }
+  // The same, in place, for a peer whose first datagram did not start a
+  // connection: the next sender becomes the peer. Safe from the receive
+  // callback. False (and nothing changes) when the peer was given.
+  virtual bool ForgetPeer() { return false; }
 };
 
 // Largest datagram the transport sends; small enough for any path MTU
