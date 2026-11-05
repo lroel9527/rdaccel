@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <set>
+#include <tuple>
 
 namespace rdacore::session {
 
@@ -21,7 +23,25 @@ std::vector<Rect> TilesToRegions(const std::vector<tile::TileChange>& changes) {
     }
     out.push_back(c.rect);
   }
-  return out;
+  // Then vertical runs of rects with the same columns: tiles split into
+  // pixel rows (the part of a tile a scroll or a dragged window uncovered)
+  // otherwise list one rect per row, and a frame with many of them sent
+  // several kB of region list (7 kB in one frame on the Mac at 0.4 Mbps).
+  std::sort(out.begin(), out.end(), [](const Rect& a, const Rect& b) {
+    return a.x != b.x ? a.x < b.x : a.w != b.w ? a.w < b.w : a.y < b.y;
+  });
+  std::vector<Rect> merged;
+  for (const Rect& r : out) {
+    if (!merged.empty()) {
+      Rect& last = merged.back();
+      if (last.x == r.x && last.w == r.w && last.y + last.h == r.y) {
+        last.h += r.h;
+        continue;
+      }
+    }
+    merged.push_back(r);
+  }
+  return merged;
 }
 
 HostSession::HostSession(transport::ITransport* transport,
@@ -198,9 +218,13 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
         frame_us, 6 * frame_us);
     const double budget =
         static_cast<double>(options_.bitrate_bps) / 8.0 * dt_us / 1e6 * kProgressiveShare;
-    const auto n = static_cast<size_t>(
-        std::clamp(budget / std::max(lossless_bytes_per_tile_, 64.0), 1.0,
-                   static_cast<double>(kMaxProgressivePerFrame)));
+    // Within the lossless bucket too: a progressive keyframe right after a
+    // drop would otherwise send its tiles faster than the path takes them.
+    const double per_tile = std::max(lossless_bytes_per_tile_, 64.0);
+    const double fits = std::min(budget, std::max(0.0, lossless_tokens_)) / per_tile;
+    const auto n = static_cast<size_t>(std::clamp(
+        fits, lossless_tokens_ >= per_tile || lossless_tokens_ >= budget ? 1.0 : 0.0,
+        static_cast<double>(kMaxProgressivePerFrame)));
     const size_t start = pending_cursor_;
     for (size_t k = 0; k < n_tiles && progressive_sent < n && pending_lossless_count_ > 0; ++k) {
       const size_t idx = (start + k) % n_tiles;
@@ -295,6 +319,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
                           : std::clamp(static_cast<double>(frame.capture_time_us -
                                                            std::min(frame.capture_time_us, last_frame_us_)),
                                        frame_us, 6 * frame_us);
+  const uint64_t prev_frame_us = last_frame_us_;
   last_frame_us_ = frame.capture_time_us;
   // Frames are being held back when several came late within a second (one
   // late frame is just the first change after a quiet spell).
@@ -304,6 +329,23 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   }
   const bool holding_back =
       late_us_.front() != 0 && frame.capture_time_us - late_us_.front() <= 1'000'000;
+  {
+    const double cap = static_cast<double>(options_.bitrate_bps) / 8.0 * kLosslessBurstFrames * frame_us / 1e6;
+    if (!lossless_tokens_set_) {
+      lossless_tokens_ = cap;
+      lossless_tokens_set_ = true;
+    } else {
+      // A progressive keyframe being completed gets its own share (the
+      // screen is usually static meanwhile), unless frames are being held
+      // back: then the path is full already.
+      const double share =
+          pending_lossless_count_ > 0 && !holding_back ? kProgressiveShare : kLosslessRateShare;
+      const double gap_us = static_cast<double>(frame.capture_time_us -
+                                                std::min(frame.capture_time_us, prev_frame_us));
+      lossless_tokens_ = std::min(
+          cap, lossless_tokens_ + static_cast<double>(options_.bitrate_bps) / 8.0 * share * gap_us / 1e6);
+    }
+  }
   std::vector<bool> hot(changes.size());
   for (size_t i = 0; i < changes.size(); ++i) {
     uint8_t& n = seen_[changes[i].hash];
@@ -329,6 +371,24 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   if (!key && options_.detect_moves) {
     moves = tile::DetectMoves({prev_.data(), width_, height_, enc_stride}, frame.bgra, changes,
                               moved, residual);
+    // Copies are cheap one at a time, but content that moves while it
+    // changes (a video panning over a detailed picture) matches in a
+    // thousand strips, each a copy plus slivers to code: 6-8 kB a frame
+    // where video takes ~1 kB, which at 0.4 Mbps backed frames up for most
+    // of a second. Such matches come in many pieces per tile (a scroll
+    // brings fewer copies than tiles, a dragged window up to ~3 per tile);
+    // when they do and their copies alone would take more than half of what
+    // the lossless budget holds, the frame goes without them.
+    constexpr double kBytesPerMove = 6;
+    size_t moved_count = 0;
+    for (bool b : moved) moved_count += b;
+    const double hold = static_cast<double>(options_.bitrate_bps) / 8.0 * kLosslessBurstFrames * frame_us / 1e6;
+    if (moves.size() > 64 && moves.size() > 6 * moved_count && options_.bitrate_bps > 0 &&
+        kBytesPerMove * static_cast<double>(moves.size()) > 0.5 * hold) {
+      moves.clear();
+      moved.assign(moved.size(), false);
+      for (auto& r : residual) r.clear();
+    }
     // The encoder's picture is left as it was under moved tiles: the viewer
     // does not take video there, and unchanged pixels cost the encoder
     // nothing, while moved ones would make it code the motion.
@@ -374,8 +434,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   // 0.4 Mbps link, and every frame after it waits. Tiles beyond the budget
   // go as video now; once static they are sent again losslessly (refresh),
   // within the budget of those frames.
-  const double lossless_budget =
-      static_cast<double>(options_.bitrate_bps) / 8.0 * (since_us + kLosslessBudgetFrames * frame_us) / 1e6;
+  const double lossless_budget = lossless_tokens_;
   double lossless_spent = 0;  // estimated
   // Codes `r` (all or part of tile `c`) losslessly if it has few colours,
   // else through the video encoder. Returns true for video.
@@ -411,6 +470,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       const bool progressive_turn = !progressive_now.empty() && progressive_now[tile_index(c)];
       const size_t n = t.colors.size();
       const int bits = n <= 1 ? 0 : n <= 2 ? 1 : n <= 4 ? 2 : n <= 16 ? 4 : 8;
+      // Plus the rect and the palette size (a plain sliver costs that alone).
       const double raw = 3.0 * static_cast<double>(n) + static_cast<double>(r.w) * r.h * bits / 8.0;
       if (!key && !progressive_turn && n > 1 && options_.bitrate_bps > 0 &&
           lossless_spent + raw * kLosslessRawShare > lossless_budget) {
@@ -585,15 +645,73 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   // and those of a picture the encoder dropped.
   std::vector<tile::TileChange> region_tiles = video_tiles;
   if (!carry_video_tiles_.empty()) {
-    std::vector<uint8_t> listed(n_tiles, 0);
-    for (const auto& t : region_tiles) listed[tile_index(t)] = 1;
+    // Every part of a dropped picture is listed again (a tile may have had
+    // several, and this frame may code another part of it), once, unless
+    // this frame lists its tile whole anyway.
+    std::vector<uint8_t> whole(n_tiles, 0);
+    std::set<std::tuple<int32_t, int32_t, int32_t, int32_t>> listed;
+    for (const auto& t : region_tiles) {
+      listed.insert({t.rect.x, t.rect.y, t.rect.w, t.rect.h});
+      if (t.rect.w == kTileSize && t.rect.h == kTileSize) whole[tile_index(t)] = 1;
+    }
     for (const auto& t : carry_video_tiles_) {
-      if (!listed[tile_index(t)]) {
-        listed[tile_index(t)] = 1;
-        region_tiles.push_back(t);
-      }
+      if (whole[tile_index(t)]) continue;
+      if (listed.insert({t.rect.x, t.rect.y, t.rect.w, t.rect.h}).second) region_tiles.push_back(t);
     }
     carry_video_tiles_.clear();
+  }
+  // A tile left in many video parts (the strips and rows a scroll leaves
+  // between moved ones) is listed as one rect around them: each part costs
+  // the region list ~6 bytes, and on a busy scroll at 0.4 Mbps frames
+  // listed over a thousand of them (6.7 kB, four times the picture). The
+  // pixels of the rect the encoder did not get yet (moved ones; lossless
+  // ones are painted over the picture anyway) are given to it now, and the
+  // tile is left rough, to be refreshed once static.
+  {
+    constexpr size_t kMaxPartsPerTile = 4;
+    std::unordered_map<size_t, std::pair<size_t, Rect>> per_tile;  // parts, bounds
+    for (const auto& t : region_tiles) {
+      auto [it, fresh] = per_tile.try_emplace(tile_index(t), 0, t.rect);
+      ++it->second.first;
+      if (!fresh) {
+        Rect& b = it->second.second;
+        const int32_t x0 = std::min(b.x, t.rect.x), y0 = std::min(b.y, t.rect.y);
+        const int32_t x1 = std::max(b.right(), t.rect.right()), y1 = std::max(b.y + b.h, t.rect.y + t.rect.h);
+        b = {x0, y0, x1 - x0, y1 - y0};
+      }
+    }
+    bool coarsened = false;
+    for (auto& [idx, pb] : per_tile) {
+      if (pb.first > kMaxPartsPerTile) {
+        coarsened = true;
+        break;
+      }
+    }
+    if (coarsened) {
+      std::vector<tile::TileChange> kept;
+      kept.reserve(region_tiles.size());
+      std::vector<uint8_t> done(n_tiles, 0);
+      for (const auto& t : region_tiles) {
+        const size_t idx = tile_index(t);
+        const auto& pb = per_tile[idx];
+        if (pb.first <= kMaxPartsPerTile) {
+          kept.push_back(t);
+          continue;
+        }
+        if (done[idx]) continue;
+        done[idx] = 1;
+        CopyRectInto(frame.bgra, pb.second, enc_input_.data(), enc_stride);
+        // Lossless parts stay flattened, as everywhere else.
+        for (const auto& lt : lossless_tiles) {
+          if (lt.rect.intersects(pb.second)) FillRect(lt.rect, lt.colors[0], enc_input_.data(), enc_stride);
+        }
+        tile::TileChange whole = t;
+        whole.rect = pb.second;
+        kept.push_back(whole);
+        quality_[idx] = kRough;
+      }
+      region_tiles = std::move(kept);
+    }
   }
   if (refining_ > 0) {
     for (int32_t row = 0; row < differ_.rows(); ++row) {
@@ -792,6 +910,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   stats_.region_pictures += region_pictures;
   stats_.region_encode_us_total += region_us;
   stats_.lossless_bytes += lossless_data.size();
+  lossless_tokens_ -= static_cast<double>(lossless_data.size());
   stats_.lossless_tiles += n_lossless;
   stats_.moved_tiles += moved_tiles;
   stats_.cached_tiles += n_loads;

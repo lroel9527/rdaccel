@@ -203,10 +203,26 @@ jobs:
       # missing there, so codec steps report but do not fail the build.
       - name: VideoToolbox codec + public API tests
         continue-on-error: true
+        timeout-minutes: 15
         run: |
-          ./build/bin/rdaccel_platform_tests
-          ./build-minimal/minimal
-          ./build-minimal/minimal_c
+          # A hung run prints every thread's stack before it is killed, so the
+          # log shows where it stopped (the step once hung for over an hour on
+          # a hosted runner, with nothing in the log).
+          run() {
+            "$@" & pid=$!
+            for _ in $(seq 300); do
+              if ! kill -0 "$pid" 2>/dev/null; then wait "$pid"; return $?; fi
+              sleep 1
+            done
+            echo "::error::$* still running after 300 s; thread stacks follow"
+            sample "$pid" 3 -file /dev/stdout || true
+            lldb -p "$pid" --batch -o "thread backtrace all" || true
+            kill -9 "$pid"
+            return 124
+          }
+          run ./build/bin/rdaccel_platform_tests
+          run ./build-minimal/minimal
+          run ./build-minimal/minimal_c
       - uses: actions/download-artifact@v4
         with:
           name: linux-stream
