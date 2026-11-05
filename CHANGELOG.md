@@ -3,19 +3,16 @@
 版本号遵循语义化版本。从 1.0 起，同一主版本内 C ABI 只加不改（新函数、结构体末尾加字段），
 `find_package(rdaccel 1.0)` 接受任何 1.x。1.0 之前次版本号（0.x）变化时 C ABI 可能有不兼容改动。
 
-## 未发布
-
-- **`rdaccel_remote`**（macOS）：带窗口的跨机器接收端，显示对方屏幕和光标，把鼠标、滚轮、键盘（含 Command 快捷键）发给
-  `rdaccel_serve --inject`；窗口失去焦点时松开还按着的键。标题栏显示“input→update”：本机发出输入到下一张有变化的画面的时间。
-  只是示例，库和 C ABI 没有变化。
-- `rdaccel_serve`：接收端离开后在同一端口等下一个（`keep_serving`），不再退出；`--once` 恢复原来的行为。
-
 ## 1.0.0-rc1
 
 1.0 的候选版：C ABI 从这一版起冻结，1.x 之内只加不改。soname 改为 `librdaccel.so.1` / `librdaccel.1.dylib`，
 `find_package(rdaccel 1.0)` 接受任何 1.x。和 0.4 相比 ABI 不兼容：去掉了两个阻塞的 C 函数，
 `on_error` 的状态码有了约定，`rda_host_config` 末尾加了 `keep_serving`。在 Mac 和 Linux 上实测之后发 1.0.0。
 
+- **`rdaccel_remote`**（macOS，#35）：带窗口的跨机器接收端，显示对方屏幕和光标，把鼠标、滚轮、键盘（含 Command 快捷键）发给
+  `rdaccel_serve --inject`；窗口失去焦点时松开还按着的键。标题栏显示“input→update”：本机发出输入到下一张有变化的画面的时间。
+  macOS 发布包（共享库版）的 `bin/` 里带这个程序。只是示例，库和 C ABI 没有变化。
+- `rdaccel_serve`：接收端离开后在同一端口等下一个（`keep_serving`），不再退出；`--once` 恢复原来的行为。
 - **0.4 Mbps 的链路**（#32）：无损块按真实字节扣一个按半个码率充值的桶，渐进细化也从桶里扣；
   估计带宽骤降时目标码率立刻跟到估计的 85%；区域列表纵向合并、一个块拆成很多视频碎片时只列外框；
   匹配碎成很多块的帧不做拷贝。netsim 4 → 0.4 Mbps 降速瞬间最差延迟约 200 ms（之前 0.5–1.2 s），

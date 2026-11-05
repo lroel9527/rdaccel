@@ -6,7 +6,7 @@
 ## 步骤
 
 1. 改 `CMakeLists.txt` 和 `rdaccel.h` 里的版本号（候选版另外把 `RDACCEL_PRERELEASE` 和 `RDA_VERSION_PRERELEASE`
-   设成 `rc1` 之类，正式版设成空字符串；两处必须一致），，`tests/test_capi.cpp` 和 `tests/test_api.cpp` 的版本断言，`examples/minimal` 和 README 里
+   设成 `rc1` 之类，正式版设成空字符串；两处必须一致），`tests/test_capi.cpp` 和 `tests/test_api.cpp` 的版本断言，`examples/minimal` 和 README 里
    `find_package(rdaccel x.y)` 的版本。
 2. 在 `CHANGELOG.md` 顶部写 `## x.y.z` 一节（候选版是 `## x.y.z-rc1`；发布说明直接取这一节）。
    完整版本号（标签去掉 `v`）用 `tools/version.sh` 看。
