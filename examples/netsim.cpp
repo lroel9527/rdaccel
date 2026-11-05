@@ -86,6 +86,18 @@ int main(int argc, char** argv) {
   // Per second of capture time: frames shown and their worst latency (--verbose).
   std::map<uint64_t, std::pair<int, double>> by_second;
   std::vector<uint64_t> shown_at;
+  // --trace=FILE: one CSV row per captured frame (host side), with the
+  // latency at which the viewer showed it (-1 = never).
+  struct TraceRow {
+    double t_ms;
+    uint64_t video_b, lossless_b, bytes_b;
+    bool dropped, key;
+    int64_t target, estimate;
+    uint32_t rtt_us;
+    double shown_ms = -1;
+  };
+  std::vector<TraceRow> trace;
+  const std::string trace_path = args.str("trace", "");
   const auto warmup_frames = static_cast<uint64_t>(args.real("warmup", 3) * fps);
   double first_frame_ms = -1;
   std::vector<std::pair<double, double>> first_psnr;  // (ms since start, PSNR) during warm-up
@@ -115,6 +127,7 @@ int main(int argc, char** argv) {
       auto& sec = by_second[index / static_cast<uint64_t>(fps)];
       ++sec.first;
       sec.second = std::max(sec.second, (now - info.capture_time_us) / 1000.0);
+      if (index < trace.size()) trace[index].shown_ms = (now - info.capture_time_us) / 1000.0;
       if (index >= warmup_frames) {
         latency_ms.push_back((now - info.capture_time_us) / 1000.0);
         shown_at.push_back(now);
@@ -173,6 +186,8 @@ int main(int argc, char** argv) {
   double target_sum = 0;
   uint64_t warm_bytes = 0, warm_dropped = 0;
   int target_n = 0;
+  if (!trace_path.empty()) trace.resize(frames);
+  rdaccel::HostStats prev_st{};
   for (uint64_t i = 0; i < frames; ++i) {
     const uint64_t due = t0 + i * 1'000'000ull / static_cast<uint64_t>(fps);
     const uint64_t now = rdaccel::NowMicros();
@@ -195,6 +210,20 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "frame %llu: %s\n", static_cast<unsigned long long>(i), err.c_str());
     }
     const auto st = host.stats();
+    if (!trace_path.empty()) {
+      std::lock_guard<std::mutex> lock(mu);
+      TraceRow& r = trace[i];
+      r.t_ms = (ct - t0) / 1000.0;
+      r.video_b = st.video_bytes - prev_st.video_bytes;
+      r.lossless_b = st.lossless_bytes - prev_st.lossless_bytes;
+      r.bytes_b = st.bytes_sent - prev_st.bytes_sent;
+      r.dropped = st.frames_dropped_congestion != prev_st.frames_dropped_congestion;
+      r.key = st.keyframes != prev_st.keyframes;
+      r.target = st.target_bitrate_bps;
+      r.estimate = st.bandwidth_estimate_bps;
+      r.rtt_us = st.rtt_us;
+      prev_st = st;
+    }
     if (args.has("verbose") && i % static_cast<uint64_t>(fps) == 0) {
       std::printf("t=%3.0fs target %5.0f kbps, estimate %5.0f kbps, rtt %3u ms, sent %7.0f kB, skipped %llu, "
                   "video frames %llu, encoder drops %llu, area pictures %llu\n",
@@ -219,6 +248,21 @@ int main(int argc, char** argv) {
   const auto hs = host.stats();
 
   std::lock_guard<std::mutex> lock(mu);
+  if (!trace_path.empty()) {
+    if (FILE* f = std::fopen(trace_path.c_str(), "w")) {
+      std::fprintf(f, "frame,t_ms,video_bytes,lossless_bytes,sent_bytes,skipped,keyframe,target_kbps,estimate_kbps,rtt_ms,shown_latency_ms\n");
+      for (size_t k = 0; k < trace.size(); ++k) {
+        const TraceRow& r = trace[k];
+        std::fprintf(f, "%zu,%.1f,%llu,%llu,%llu,%d,%d,%.0f,%.0f,%.1f,%.1f\n", k, r.t_ms,
+                     static_cast<unsigned long long>(r.video_b), static_cast<unsigned long long>(r.lossless_b),
+                     static_cast<unsigned long long>(r.bytes_b), r.dropped ? 1 : 0, r.key ? 1 : 0,
+                     r.target / 1000.0, r.estimate / 1000.0, r.rtt_us / 1000.0, r.shown_ms);
+      }
+      std::fclose(f);
+    } else {
+      std::fprintf(stderr, "cannot write %s\n", trace_path.c_str());
+    }
+  }
   std::vector<double> lat = latency_ms;
   std::sort(lat.begin(), lat.end());
   auto pct = [&](double p) { return lat.empty() ? 0.0 : lat[static_cast<size_t>(p * (lat.size() - 1))]; };

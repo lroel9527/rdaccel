@@ -48,8 +48,18 @@ RateController::Decision RateController::Update(uint64_t now_us, const Transport
   d.skip_frame = queue_delay_us_ > max_queue_us_ || halve || over_budget;
   if (d.skip_frame) ++skipped_;
 
+  // The path fell: the estimate (measured from what was delivered) is under
+  // half of what it was. The target follows at once, not 10% a step: at
+  // 4 -> 0.4 Mbps it stayed at 4.6 Mbps for 0.4 s after the estimate had
+  // fallen, and the frames of that time (a 15 kB picture, an 11 kB lossless
+  // part) took more than a second to get through.
+  bool fell = false;
+  if (st.bandwidth_bps > 0) {
+    peak_bps_ = std::max(peak_bps_, st.bandwidth_bps);
+    fell = st.bandwidth_bps * 2 < peak_bps_ && target_ > st.bandwidth_bps;
+  }
   constexpr uint64_t kInterval = 250'000;
-  if (started_ && now_us - last_update_us_ < kInterval) return d;
+  if (started_ && !fell && now_us - last_update_us_ < kInterval) return d;
   started_ = true;
   last_update_us_ = now_us;
   if (st.bandwidth_bps <= 0) return d;
@@ -59,12 +69,19 @@ RateController::Decision RateController::Update(uint64_t now_us, const Transport
   skipped_ = 0;
   const bool draining = st.queued_bytes < last_queued_;
   last_queued_ = st.queued_bytes;
-  if (skipped || path_queue || queue_delay_us_ > max_queue_us_ / 2) {
+  if (fell) {
+    congested_us_ = now_us;
+    congested_bps_ = st.bandwidth_bps;
+    peak_bps_ = st.bandwidth_bps;
+    next = std::min(target_, st.bandwidth_bps * 85 / 100);
+  } else if (skipped || path_queue || queue_delay_us_ > max_queue_us_ / 2) {
     // The queue is building (frames had to be skipped), so the sender is
     // not application limited and the estimate is the path's rate: back off
     // below it at once. Fewer bits per frame beat fewer frames. Below that,
     // keep backing off slowly only while the queue is not draining (one big
     // picture, such as the first one, is not a reason to starve the rest).
+    congested_us_ = now_us;
+    congested_bps_ = st.bandwidth_bps;
     const int64_t cap = st.bandwidth_bps * 85 / 100;
     next = target_ > cap ? cap : (draining ? target_ : target_ * 95 / 100);
   } else {
@@ -75,7 +92,19 @@ RateController::Decision RateController::Update(uint64_t now_us, const Transport
     // after the path fell to 1 (the encoder sending less than either) would
     // let the next busy scene overshoot the path eightfold. Down by 10% a
     // step at most, as the first estimates of a session are still low.
-    next = std::min(target_ + target_ / 4, std::max(st.bandwidth_bps * 2, min_bps_));
+    // After a queue built up, though, the estimate was the path's rate, and
+    // twice it overfills the path as soon as the screen gets busy: the
+    // network's buffer overflows, and every frame behind a lost packet waits
+    // for its retransmission (a sawtooth of 1-2 s delays every few seconds
+    // at 0.4 Mbps). So the ceiling starts at the estimate then and opens up
+    // by 10% of it per second, back to twice it after ten seconds.
+    int64_t ceiling = st.bandwidth_bps * 2;
+    if (congested_us_ != 0) {
+      const double opened = std::min(1.0, static_cast<double>(now_us - congested_us_) / 10e6);
+      const auto base = static_cast<double>(std::max(st.bandwidth_bps, congested_bps_));
+      ceiling = std::min(ceiling, static_cast<int64_t>(base * (1.0 + opened)));
+    }
+    next = std::min(target_ + target_ / 4, std::max(ceiling, min_bps_));
     next = std::max(next, target_ * 9 / 10);
   }
   target_ = std::clamp(next, min_bps_, max_bps_);
