@@ -2,7 +2,7 @@
 
 ## macOS
 
-需要 macOS 14+、Apple Silicon、Xcode 命令行工具和 CMake（`brew install cmake`）。
+需要 macOS 12.3+（Apple Silicon 或 Intel）、Xcode 命令行工具和 CMake（`brew install cmake`）。默认部署目标是 12.3（ScreenCaptureKit 从这一版开始有），在新系统上构建的产物也能在 12.3 上运行；用到更新系统才有的接口时必须加 `@available` 分支，否则编译报错（`-Werror=unguarded-availability-new`）。
 
 ```bash
 git clone https://github.com/lroel9527/rdaccel && cd rdaccel

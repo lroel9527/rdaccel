@@ -85,7 +85,7 @@ KEY=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')         # 32 字节密钥，�
 ## 构建
 
 ```bash
-# macOS 14+（Apple Silicon）：Xcode 命令行工具 + CMake
+# macOS 12.3+（Apple Silicon 或 Intel）：Xcode 命令行工具 + CMake
 # Linux：sudo apt-get install cmake g++ libavcodec-dev libavutil-dev libswscale-dev \
 #          libx11-dev libxext-dev libxfixes-dev libxrandr-dev libxtst-dev zlib1g-dev \
 #          libpipewire-0.3-dev libglib2.0-dev   # 后两个用于 Wayland，可省

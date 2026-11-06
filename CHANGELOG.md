@@ -3,6 +3,17 @@
 版本号遵循语义化版本。从 1.0 起，同一主版本内 C ABI 只加不改（新函数、结构体末尾加字段），
 `find_package(rdaccel 1.0)` 接受任何 1.x。1.0 之前次版本号（0.x）变化时 C ABI 可能有不兼容改动。
 
+## 1.0.1
+
+补丁版，C ABI 和 1.0.0 相同。
+
+- **macOS 最低版本降到 12.3**（#39）：默认 `CMAKE_OSX_DEPLOYMENT_TARGET` 从 14.0 改为 12.3（ScreenCaptureKit 从 12.3 开始有），
+  这样 macOS 12 Monterey 上的 Intel Mac（如 2016 款 MacBook Pro）也能用。两处新系统才有的接口加了兼容分支：
+  采集分辨率的点到像素比例在 14 以下改用显示器的 `backingScaleFactor`（以前用 `SCContentFilter.pointPixelScale`，14 起才有）；
+  `SCStreamConfiguration.capturesAudio` 只在 13 起设置（12.x 上没有这个属性，会直接崩溃）。macOS 编译加了
+  `-Werror=unguarded-availability-new`，以后用到比部署目标新的接口而没加 `@available` 会编译失败。
+  Intel 上没有低延迟硬件编码时照旧退回普通硬件编码或软件编码，`rda_host_encoder_name()` 显示实际用的那个。
+
 ## 1.0.0
 
 第一个正式版。C ABI 和 1.0.0-rc1 相同（只是版本号去掉 rc1），1.x 之内只加不改。和 rc1 相比修了两台机器实测发现的问题：
