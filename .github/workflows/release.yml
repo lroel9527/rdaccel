@@ -30,9 +30,9 @@ jobs:
           - os: ubuntu-24.04
             kind: static
           # macOS packages are universal (arm64 + x86_64).
-          - os: macos-14
+          - os: macos-15
             kind: shared
-          - os: macos-14
+          - os: macos-15
             kind: static
     runs-on: ${{ matrix.os }}
     steps:
