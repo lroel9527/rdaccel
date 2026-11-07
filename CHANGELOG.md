@@ -10,7 +10,8 @@
 - **macOS 最低版本降到 12.3**（#39）：默认 `CMAKE_OSX_DEPLOYMENT_TARGET` 从 14.0 改为 12.3（ScreenCaptureKit 从 12.3 开始有），
   这样 macOS 12 Monterey 上的 Intel Mac（如 2016 款 MacBook Pro）也能用。两处新系统才有的接口加了兼容分支：
   采集分辨率的点到像素比例在 14 以下改用显示器的 `backingScaleFactor`（以前用 `SCContentFilter.pointPixelScale`，14 起才有）；
-  `SCStreamConfiguration.capturesAudio` 只在 13 起设置（12.x 上没有这个属性，会直接崩溃）。macOS 编译加了
+  `SCStreamConfiguration.capturesAudio` 只在 13 起设置（12.x 上没有这个属性，会直接崩溃）；编码器的最小 QP
+  （`kVTCompressionPropertyKey_MinAllowedFrameQP`）13 起才有，12.x 上不设下限。macOS 编译加了
   `-Werror=unguarded-availability-new`，以后用到比部署目标新的接口而没加 `@available` 会编译失败。
   Intel 上没有低延迟硬件编码时照旧退回普通硬件编码或软件编码，`rda_host_encoder_name()` 显示实际用的那个。
 
