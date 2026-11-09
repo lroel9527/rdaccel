@@ -8,7 +8,7 @@
 cmake_minimum_required(VERSION 3.24)
 project(rdaccel_integration LANGUAGES C CXX)
 
-find_package(rdaccel 1.0 REQUIRED)
+find_package(rdaccel 1.1 REQUIRED)
 find_package(Threads REQUIRED)
 
 foreach(prog support_host support_viewer)
