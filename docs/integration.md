@@ -212,6 +212,7 @@ host.SetInputHandler([&](const rdaccel::InputEvent& ev) { injector->Inject(ev); 
 | 编码 / 解码 | VideoToolbox（HEVC 硬件） | FFmpeg：NVENC，否则 libx265；解码 FFmpeg |
 | 屏幕采集 | ScreenCaptureKit，需要"屏幕录制"权限，不采集声音 | X11 MIT-SHM；Wayland 用 xdg-desktop-portal + PipeWire（系统弹窗选屏，见 building.md） |
 | 光标 | CoreGraphics + NSCursor | XFixes；Wayland 用 PipeWire 光标元数据，没有时画进画面 |
+| 系统版本 | macOS 12.3+，Apple Silicon 或 Intel（发布包是 universal） | 见 building.md |
 | 依赖 | 系统框架 | `libavcodec libavutil libswscale libx11 libxext libxfixes zlib`，Wayland 另需 `libpipewire-0.3 gio-2.0` |
 
 ## 8. 版本

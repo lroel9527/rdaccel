@@ -1,6 +1,6 @@
 #pragma once
 
-// Screen capture on macOS with ScreenCaptureKit (macOS 14+). Captures one
+// Screen capture on macOS with ScreenCaptureKit (macOS 12.3+). Captures one
 // display (CaptureConfig::display_index) at native pixel resolution in BGRA and reports SCK's dirty
 // rects. Needs the Screen Recording permission (System Settings > Privacy &
 // Security > Screen & System Audio Recording).

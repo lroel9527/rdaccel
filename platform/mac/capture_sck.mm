@@ -165,7 +165,9 @@ bool SckCapturer::Start(const capture::CaptureConfig& cfg, capture::FrameFn on_f
                                                     exceptingWindows:@[]];
 
   SCStreamConfiguration* conf = [[SCStreamConfiguration alloc] init];
-  const double scale = filter.pointPixelScale > 0 ? filter.pointPixelScale : 1.0;
+  double scale = 0;
+  if (@available(macOS 14.0, *)) scale = filter.pointPixelScale;
+  if (scale <= 0) scale = rdacore::platform::MacDisplayScale(display.displayID);
   conf.width = cfg.width > 0 ? static_cast<size_t>(cfg.width)
                              : static_cast<size_t>(std::lround(display.width * scale));
   conf.height = cfg.height > 0 ? static_cast<size_t>(cfg.height)
@@ -174,8 +176,9 @@ bool SckCapturer::Start(const capture::CaptureConfig& cfg, capture::FrameFn on_f
   conf.minimumFrameInterval = CMTimeMake(1, cfg.fps > 0 ? cfg.fps : 60);
   conf.showsCursor = cfg.show_cursor ? YES : NO;
   conf.queueDepth = 5;
-  // Video only: rdaccel never captures or plays audio.
-  conf.capturesAudio = NO;
+  // Video only: rdaccel never captures or plays audio. The property exists
+  // from macOS 13 (and is NO by default); 12.x has no audio capture at all.
+  if (@available(macOS 13.0, *)) conf.capturesAudio = NO;
 
   impl_->queue = dispatch_queue_create("rdaccel.capture", DISPATCH_QUEUE_SERIAL);
   impl_->output = [[RDStreamOutput alloc] initWithCallback:std::move(on_frame) stopped:on_stopped_];

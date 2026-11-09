@@ -1,13 +1,14 @@
 cmake_minimum_required(VERSION 3.24)
-# The lowest macOS the binaries run on. Must come before project(): there
+# The lowest macOS the binaries run on (12.3: first with ScreenCaptureKit).
+# Must come before project(): there
 # CMake creates the cache entry (empty, i.e. "this machine's macOS") and a
 # later set(... CACHE ...) no longer changes it. -DCMAKE_OSX_DEPLOYMENT_TARGET
 # or the MACOSX_DEPLOYMENT_TARGET environment variable still win. Ignored
 # on other systems.
 if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET AND NOT DEFINED ENV{MACOSX_DEPLOYMENT_TARGET})
-  set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version")
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "12.3" CACHE STRING "Minimum macOS version")
 endif()
-project(rdaccel VERSION 1.0.0 LANGUAGES C CXX)
+project(rdaccel VERSION 1.0.1 LANGUAGES C CXX)
 # Pre-release label ("rc1"), empty for a release. The full version, as the
 # library, the packages and the tag (v1.0.0-rc1) show it, is
 # PROJECT_VERSION[-RDACCEL_PRERELEASE].
@@ -65,7 +66,7 @@ if(APPLE)
   # A build directory configured before the default moved above project()
   # has an empty entry; give it the default too.
   if(CMAKE_OSX_DEPLOYMENT_TARGET STREQUAL "" AND NOT DEFINED ENV{MACOSX_DEPLOYMENT_TARGET})
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version" FORCE)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "12.3" CACHE STRING "Minimum macOS version" FORCE)
   endif()
 endif()
 
@@ -73,6 +74,11 @@ if(MSVC)
   add_compile_options(/W4)
 else()
   add_compile_options(-Wall -Wextra)
+endif()
+if(APPLE)
+  # An API newer than CMAKE_OSX_DEPLOYMENT_TARGET must sit behind
+  # @available / __builtin_available, or it crashes on older macOS.
+  add_compile_options(-Werror=unguarded-availability-new)
 endif()
 
 # ---------------------------------------------------------------------------
