@@ -409,6 +409,66 @@ rda_status rda_injector_inject(rda_injector* injector, const rda_input_event* ev
   RDA_GUARD_END
 }
 
+// ---- keyboard input sources ------------------------------------------------
+
+namespace {
+
+rda_input_source_info ToC(const rdacore::platform::InputSourceInfo& s) {
+  rda_input_source_info o{};
+  o.struct_size = sizeof(o);
+  CopyName(s.id, o.id, sizeof(o.id));
+  CopyName(s.name, o.name, sizeof(o.name));
+  CopyName(s.language, o.language, sizeof(o.language));
+  o.input_method = s.input_method ? 1 : 0;
+  o.ascii_capable = s.ascii_capable ? 1 : 0;
+  return o;
+}
+
+}  // namespace
+
+rda_status rda_list_input_sources(rda_input_source_info* out, size_t capacity, size_t* count) {
+  RDA_GUARD_BEGIN
+  if (!count || (capacity > 0 && !out)) return Fail(RDA_ERR_INVALID_ARG, "count (and out with a capacity) required");
+  const size_t stride = capacity > 0 ? out[0].struct_size : 0;
+  if (capacity > 0 && stride < sizeof(uint32_t)) return Fail(RDA_ERR_INVALID_ARG, "out[0].struct_size is required");
+  std::vector<rdacore::platform::InputSourceInfo> all;
+  std::string err;
+  if (!rdacore::platform::ListInputSources(all, &err)) return Fail(RDA_ERR_UNSUPPORTED, err);
+  *count = all.size();
+  auto* base = reinterpret_cast<uint8_t*>(out);
+  for (size_t i = 0; i < all.size() && i < capacity; ++i) {
+    rda_input_source_info s = ToC(all[i]);
+    s.struct_size = static_cast<uint32_t>(std::min(stride, sizeof(s)));
+    auto* entry = base + i * stride;
+    std::memset(entry, 0, stride);
+    std::memcpy(entry, &s, std::min(stride, sizeof(s)));
+  }
+  return RDA_OK;
+  RDA_GUARD_END
+}
+
+rda_status rda_current_input_source(rda_input_source_info* out) {
+  RDA_GUARD_BEGIN
+  if (!out) return Fail(RDA_ERR_INVALID_ARG, "out is required");
+  rdacore::platform::InputSourceInfo cur;
+  std::string err;
+  if (!rdacore::platform::CurrentInputSource(cur, &err)) return Fail(RDA_ERR_UNSUPPORTED, err);
+  if (!WriteStruct(ToC(cur), out)) return Fail(RDA_ERR_INVALID_ARG, "out needs struct_size");
+  return RDA_OK;
+  RDA_GUARD_END
+}
+
+rda_status rda_injector_select_input_source(rda_injector* injector, const char* id) {
+  RDA_GUARD_BEGIN
+  if (!injector || !id || !*id) return Fail(RDA_ERR_INVALID_ARG, "injector and id are required");
+  std::string err;
+  if (!injector->impl->SelectInputSource(id, &err)) {
+    return Fail(err.find("not enabled") != std::string::npos ? RDA_ERR_INVALID_ARG : RDA_ERR_UNSUPPORTED, err);
+  }
+  return RDA_OK;
+  RDA_GUARD_END
+}
+
 // ---- transports -----------------------------------------------------------
 
 rda_status rda_transport_custom(const rda_transport_vtable* vtable, void* self, rda_transport** out) {

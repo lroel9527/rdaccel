@@ -23,6 +23,13 @@ class IInputInjector {
   // False with `error` for an event the OS cannot take (a key it does not
   // have, a character no keyboard mapping can make, ...). Thread-safe.
   virtual bool Inject(const InputEvent& ev, std::string* error) = 0;
+  // Selects one of the enabled keyboard input sources (InputSourceInfo::id)
+  // for the keys that follow. Thread-safe.
+  virtual bool SelectInputSource(const std::string& id, std::string* error) {
+    (void)id;
+    if (error) *error = "selecting input sources is not supported on this platform";
+    return false;
+  }
 };
 
 }  // namespace rdacore::platform

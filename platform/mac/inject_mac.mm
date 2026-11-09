@@ -11,6 +11,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
+#include <string>
+#include <vector>
 #include <functional>
 #include <memory>
 #include <atomic>
@@ -127,7 +130,62 @@ struct InputSourceSwitch {
     std::lock_guard<std::mutex> lock(mu);
     return saved != nullptr;
   }
+
+  // Main thread. Drops the remembered input method without selecting it
+  // again: the application picks the input source itself now.
+  void Forget() {
+    std::lock_guard<std::mutex> lock(mu);
+    if (!saved) return;
+    CFRelease(saved);
+    CFRelease(ours);
+    saved = ours = nullptr;
+  }
 };
+
+std::string CFString(CFTypeRef v) {
+  if (!v || CFGetTypeID(v) != CFStringGetTypeID()) return {};
+  const CFStringRef s = static_cast<CFStringRef>(v);
+  if (const char* fast = CFStringGetCStringPtr(s, kCFStringEncodingUTF8)) return fast;
+  const CFIndex max = CFStringGetMaximumSizeForEncoding(CFStringGetLength(s), kCFStringEncodingUTF8) + 1;
+  std::string out(static_cast<size_t>(max), '\0');
+  if (!CFStringGetCString(s, out.data(), max, kCFStringEncodingUTF8)) return {};
+  out.resize(std::strlen(out.c_str()));
+  return out;
+}
+
+InputSourceInfo Describe(TISInputSourceRef src) {
+  InputSourceInfo info;
+  info.id = CFString(TISGetInputSourceProperty(src, kTISPropertyInputSourceID));
+  info.name = CFString(TISGetInputSourceProperty(src, kTISPropertyLocalizedName));
+  auto langs = static_cast<CFArrayRef>(TISGetInputSourceProperty(src, kTISPropertyInputSourceLanguages));
+  if (langs && CFGetTypeID(langs) == CFArrayGetTypeID() && CFArrayGetCount(langs) > 0) {
+    info.language = CFString(CFArrayGetValueAtIndex(langs, 0));
+  }
+  info.input_method = IsInputMethod(src);
+  auto ascii = static_cast<CFBooleanRef>(TISGetInputSourceProperty(src, kTISPropertyInputSourceIsASCIICapable));
+  info.ascii_capable = ascii && CFGetTypeID(ascii) == CFBooleanGetTypeID() && CFBooleanGetValue(ascii);
+  return info;
+}
+
+// Enabled keyboard input sources the user can select (no palettes such as
+// the emoji viewer). Main thread. `id` empty = all of them.
+CFArrayRef CopySelectable(const std::string& id) {
+  CFMutableDictionaryRef filter =
+      CFDictionaryCreateMutable(nullptr, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+  CFDictionarySetValue(filter, kTISPropertyInputSourceCategory, kTISCategoryKeyboardInputSource);
+  CFDictionarySetValue(filter, kTISPropertyInputSourceIsSelectCapable, kCFBooleanTrue);
+  CFStringRef wanted = nullptr;
+  if (!id.empty()) {
+    wanted = CFStringCreateWithCString(nullptr, id.c_str(), kCFStringEncodingUTF8);
+    if (wanted) CFDictionarySetValue(filter, kTISPropertyInputSourceID, wanted);
+  }
+  CFArrayRef list = TISCreateInputSourceList(filter, false);
+  if (wanted) CFRelease(wanted);
+  CFRelease(filter);
+  return list;
+}
+
+constexpr int kSourcesTimeoutMs = 500;
 
 class MacInjector final : public IInputInjector {
  public:
@@ -245,6 +303,37 @@ class MacInjector final : public IInputInjector {
     return false;
   }
 
+  bool SelectInputSource(const std::string& id, std::string* error) override {
+    struct Result {
+      bool ok = false;
+      std::string error;
+    };
+    auto result = std::make_shared<Result>();
+    const bool answered = RunOnMain(
+        [ime = ime_, id, result] {
+          // Text typing may have stepped away from an input method; the
+          // application's choice replaces what it would have restored.
+          ime->Forget();
+          CFArrayRef list = CopySelectable(id);
+          if (!list || CFArrayGetCount(list) == 0) {
+            result->error = "input source " + id + " is not enabled on this computer";
+          } else {
+            auto src = static_cast<TISInputSourceRef>(const_cast<void*>(CFArrayGetValueAtIndex(list, 0)));
+            const OSStatus st = TISSelectInputSource(src);
+            result->ok = st == noErr;
+            if (!result->ok) result->error = "TISSelectInputSource failed (" + std::to_string(st) + ")";
+          }
+          if (list) CFRelease(list);
+        },
+        kSourcesTimeoutMs);
+    if (!answered) {
+      if (error) *error = "the main thread does not run a run loop";
+      return false;
+    }
+    if (!result->ok && error) *error = result->error;
+    return result->ok;
+  }
+
  private:
   static constexpr int kMainTimeoutMs = 200;
   static constexpr auto kTextIdle = std::chrono::seconds(1);
@@ -314,6 +403,48 @@ class MacInjector final : public IInputInjector {
 };
 
 }  // namespace
+
+bool ListInputSources(std::vector<InputSourceInfo>& out, std::string* error) {
+  auto all = std::make_shared<std::vector<InputSourceInfo>>();
+  const bool answered = RunOnMain(
+      [all] {
+        CFArrayRef list = CopySelectable({});
+        if (!list) return;
+        for (CFIndex i = 0; i < CFArrayGetCount(list); ++i) {
+          all->push_back(Describe(static_cast<TISInputSourceRef>(const_cast<void*>(CFArrayGetValueAtIndex(list, i)))));
+        }
+        CFRelease(list);
+      },
+      kSourcesTimeoutMs);
+  if (!answered) {
+    if (error) *error = "the main thread does not run a run loop";
+    return false;
+  }
+  out = *all;
+  return true;
+}
+
+bool CurrentInputSource(InputSourceInfo& out, std::string* error) {
+  auto cur = std::make_shared<InputSourceInfo>();
+  const bool answered = RunOnMain(
+      [cur] {
+        TISInputSourceRef src = TISCopyCurrentKeyboardInputSource();
+        if (!src) return;
+        *cur = Describe(src);
+        CFRelease(src);
+      },
+      kSourcesTimeoutMs);
+  if (!answered) {
+    if (error) *error = "the main thread does not run a run loop";
+    return false;
+  }
+  if (cur->id.empty()) {
+    if (error) *error = "no current keyboard input source";
+    return false;
+  }
+  out = *cur;
+  return true;
+}
 
 std::unique_ptr<IInputInjector> CreateInputInjector(const InjectorConfig& cfg, std::string* error) {
   if (cfg.source_width < 0 || cfg.source_height < 0) {

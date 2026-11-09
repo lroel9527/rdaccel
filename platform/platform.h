@@ -40,6 +40,22 @@ std::unique_ptr<codec::IHevcDecoder> CreateHevcDecoder(std::string* error);
 // X display, or no such display).
 std::unique_ptr<capture::ICursorSource> CreateCursorSource(int32_t display_index, std::string* error);
 
+// A keyboard input source: a layout (ABC, US) or an input method mode
+// (Pinyin, Kana). macOS: Text Input Sources.
+struct InputSourceInfo {
+  std::string id;        // "com.apple.inputmethod.SCIM.ITABC", "com.apple.keylayout.ABC"
+  std::string name;      // localized, for display
+  std::string language;  // its first language, BCP 47 ("zh-Hans", "en"); may be empty
+  bool input_method = false;  // composes text (Pinyin, Kana) rather than a plain layout
+  bool ascii_capable = false; // types ASCII as is (ABC, US)
+};
+
+// The keyboard input sources the user enabled and can switch to, and the
+// one selected now. False with `error` where the platform has none to offer
+// (Linux so far). macOS: needs the main thread or a running main run loop.
+bool ListInputSources(std::vector<InputSourceInfo>& out, std::string* error);
+bool CurrentInputSource(InputSourceInfo& out, std::string* error);
+
 // Injects input into display cfg.display_index. Null with `error` set when
 // the OS will not let this process do it (no XTest; on macOS, no
 // Accessibility permission) or there is no such display.

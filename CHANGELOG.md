@@ -3,6 +3,15 @@
 版本号遵循语义化版本。从 1.0 起，同一主版本内 C ABI 只加不改（新函数、结构体末尾加字段），
 `find_package(rdaccel 1.0)` 接受任何 1.x。1.0 之前次版本号（0.x）变化时 C ABI 可能有不兼容改动。
 
+## 1.2.0
+
+次版本：C ABI 只加不改。
+
+- **键盘输入源**（macOS）：`rda_list_input_sources` 列出用户启用的键盘输入源（布局和输入法，不含表情等面板），
+  `rda_current_input_source` 读当前输入源，`rda_injector_select_input_source` 按 id 切换。切换会结束注入器为
+  `RDA_INPUT_TEXT` 临时离开输入法的状态，免得之后又被切回去。用于让被控端跟随控制端的中英文切换：
+  注入的 Caps Lock 不会切换输入源（macOS 只认物理键盘）。Linux 上返回 `RDA_ERR_UNSUPPORTED`。
+
 ## 1.1.0
 
 次版本：C ABI 只加不改，1.0 编出来的程序不用重编。

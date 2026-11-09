@@ -37,8 +37,8 @@ struct Counter {
 
 TEST(CApi, Version) {
   EXPECT_EQ(rda_version(), RDA_VERSION);
-  EXPECT_EQ(rda_version(), RDA_MAKE_VERSION(1, 1, 0));
-  EXPECT_STREQ(rda_version_string(), "1.1.0");
+  EXPECT_EQ(rda_version(), RDA_MAKE_VERSION(1, 2, 0));
+  EXPECT_STREQ(rda_version_string(), "1.2.0");
   EXPECT_GT(std::strlen(rda_platform_name()), 0u);
   EXPECT_STREQ(rda_status_str(RDA_ERR_TIMEOUT), "RDA_ERR_TIMEOUT");
   EXPECT_STREQ(rda_status_str(static_cast<rda_status>(-999)), "RDA_ERR_UNKNOWN");
@@ -794,4 +794,37 @@ TEST(CApi, ListDisplaysAndPickOne) {
   EXPECT_NE(rda_host_start_capture(h), RDA_OK);
   EXPECT_NE(std::string(rda_last_error()).find("no display"), std::string::npos) << rda_last_error();
   rda_host_destroy(h);
+}
+
+TEST(CApi, KeyboardInputSources) {
+  size_t count = 0;
+  const rda_status s = rda_list_input_sources(nullptr, 0, &count);
+#if defined(__APPLE__)
+  ASSERT_EQ(s, RDA_OK) << rda_last_error();
+  ASSERT_GT(count, 0u);  // every Mac has at least one keyboard layout
+  std::vector<rda_input_source_info> all(count);
+  all[0].struct_size = sizeof(rda_input_source_info);
+  ASSERT_EQ(rda_list_input_sources(all.data(), all.size(), &count), RDA_OK);
+  rda_input_source_info cur{};
+  cur.struct_size = sizeof(cur);
+  ASSERT_EQ(rda_current_input_source(&cur), RDA_OK) << rda_last_error();
+  EXPECT_NE(cur.id[0], '\0');
+  bool listed = false;
+  for (const auto& i : all) listed |= std::strcmp(i.id, cur.id) == 0;
+  EXPECT_TRUE(listed) << cur.id << " is current but not listed";
+  // An older caller's shorter struct: only its prefix is written.
+  struct {
+    uint32_t struct_size;
+    char id[128];
+    uint32_t guard;
+  } shorter;
+  shorter.struct_size = offsetof(rda_input_source_info, name);
+  shorter.guard = 0xABCD;
+  ASSERT_EQ(rda_current_input_source(reinterpret_cast<rda_input_source_info*>(&shorter)), RDA_OK);
+  EXPECT_STREQ(shorter.id, cur.id);
+  EXPECT_EQ(shorter.guard, 0xABCDu);
+#else
+  EXPECT_EQ(s, RDA_ERR_UNSUPPORTED);
+#endif
+  EXPECT_EQ(rda_injector_select_input_source(nullptr, "x"), RDA_ERR_INVALID_ARG);
 }

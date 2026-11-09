@@ -43,7 +43,7 @@ extern "C" {
 /* ---- version ------------------------------------------------------------ */
 
 #define RDA_VERSION_MAJOR 1
-#define RDA_VERSION_MINOR 1
+#define RDA_VERSION_MINOR 2
 #define RDA_VERSION_PATCH 0
 /* "rc1" and so on for a pre-release, "" for a release. rda_version() does
  * not include it; rda_version_string() does ("1.0.0-rc1"). */
@@ -249,6 +249,35 @@ RDA_API void rda_injector_destroy(rda_injector* injector); /* releases held keys
  * (AppKit, dispatch_main, CFRunLoopRun); without one, text goes in as is.
  * RDA_ERR_UNSUPPORTED for a key or character the host cannot produce. */
 RDA_API rda_status rda_injector_inject(rda_injector* injector, const rda_input_event* ev);
+
+/* ---- keyboard input sources (1.2) ----------------------------------------- */
+
+/* A keyboard layout (ABC, US) or input method mode (Pinyin, Kana): what
+ * turns physical keys into characters. macOS only so far (Text Input
+ * Sources); elsewhere these functions return RDA_ERR_UNSUPPORTED. On macOS
+ * they need the main thread, or a main thread that runs a run loop (AppKit,
+ * dispatch_main, CFRunLoopRun). */
+typedef struct rda_input_source_info {
+  uint32_t struct_size;
+  char id[128];           /* "com.apple.inputmethod.SCIM.ITABC", "com.apple.keylayout.ABC" */
+  char name[128];         /* localized, UTF-8, for display */
+  char language[32];      /* its first language, BCP 47 ("zh-Hans", "en"); may be "" */
+  int32_t input_method;   /* nonzero: composes text (Pinyin, Kana); 0: a plain layout */
+  int32_t ascii_capable;  /* nonzero: types ASCII as is (ABC, US) */
+} rda_input_source_info;
+
+/* The input sources the user enabled and can switch to, as for
+ * rda_list_displays(): set out[0].struct_size; *count gets the number of
+ * sources, also when it exceeds `capacity`. */
+RDA_API rda_status rda_list_input_sources(rda_input_source_info* out, size_t capacity, size_t* count);
+/* The input source selected now. Set out->struct_size first. */
+RDA_API rda_status rda_current_input_source(rda_input_source_info* out);
+/* Selects an enabled input source by id for the keys the injector sends
+ * next (and for the user at that computer: it is the system's selection).
+ * It also ends the injector's own switch away from an input method for
+ * RDA_INPUT_TEXT, so that choice is not undone later. RDA_ERR_INVALID_ARG
+ * for a source that is not enabled there. Thread-safe. */
+RDA_API rda_status rda_injector_select_input_source(rda_injector* injector, const char* id);
 
 /* ---- connection --------------------------------------------------------- */
 

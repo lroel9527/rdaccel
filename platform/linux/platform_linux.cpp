@@ -13,6 +13,18 @@ namespace rdacore::platform {
 
 const char* PlatformName() { return "Linux"; }
 
+bool ListInputSources(std::vector<InputSourceInfo>& out, std::string* error) {
+  out.clear();
+  if (error) *error = "input sources are only supported on macOS";
+  return false;
+}
+
+bool CurrentInputSource(InputSourceInfo& out, std::string* error) {
+  out = {};
+  if (error) *error = "input sources are only supported on macOS";
+  return false;
+}
+
 std::unique_ptr<capture::ICapturer> CreateScreenCapturer(std::string* error) {
   // A Wayland desktop can only be captured through the screen-cast portal.
 #ifdef RDACCEL_HAVE_PIPEWIRE
