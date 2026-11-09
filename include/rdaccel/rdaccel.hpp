@@ -637,6 +637,8 @@ struct HostStats {
   uint64_t lossless_us_total = 0;
   uint64_t resolution_changes = 0;
   uint64_t encoder_drops = 0;  // pictures the encoder chose not to produce
+  uint64_t packets_sent = 0;   // transport packets for the current viewer (UDP)
+  uint64_t packets_lost = 0;
 };
 
 class Host {
@@ -861,6 +863,8 @@ class Host {
     o.lossless_us_total = s.lossless_us_total;
     o.resolution_changes = s.resolution_changes;
     o.encoder_drops = s.encoder_drops;
+    o.packets_sent = s.packets_sent;
+    o.packets_lost = s.packets_lost;
     return o;
   }
 

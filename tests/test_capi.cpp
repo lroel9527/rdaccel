@@ -243,6 +243,8 @@ struct LoopTransport {
   static int Stats(void*, rda_transport_stats* out) {
     out->bandwidth_bps = 5'000'000;
     out->rtt_us = 1000;
+    out->packets_sent = 200;
+    out->packets_lost = 3;
     return 1;
   }
   static void Destroy(void* self) {
@@ -299,6 +301,8 @@ TEST(CApi, CustomTransportThroughVtable) {
   hs.struct_size = sizeof(hs);
   ASSERT_EQ(rda_host_get_stats(h, &hs), RDA_OK);
   EXPECT_EQ(hs.bandwidth_estimate_bps, 5'000'000);  // the host read our stats
+  EXPECT_EQ(hs.packets_sent, 200u);
+  EXPECT_EQ(hs.packets_lost, 3u);
 
   // Destroy the host first; then x is gone and y must not call into it.
   rda_host_destroy(h);

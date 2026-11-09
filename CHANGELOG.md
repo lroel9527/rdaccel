@@ -3,6 +3,12 @@
 版本号遵循语义化版本。从 1.0 起，同一主版本内 C ABI 只加不改（新函数、结构体末尾加字段），
 `find_package(rdaccel 1.0)` 接受任何 1.x。1.0 之前次版本号（0.x）变化时 C ABI 可能有不兼容改动。
 
+## 未发布
+
+- **`rda_host_stats` 末尾加 `packets_sent`、`packets_lost`**：传输层（UDP）为当前接收端发出和丢失（重传）的包数，
+  和 `rtt_us` 同时采样，`packets_lost / packets_sent` 就是丢包率。以前这两个数只在 `rda_transport_get_stats` 里，
+  而传输交给 Host 以后应用拿不到它。按 1.x 的约定只在结构体末尾加字段，旧程序不受影响。
+
 ## 1.0.0
 
 第一个正式版。C ABI 和 1.0.0-rc1 相同（只是版本号去掉 rc1），1.x 之内只加不改。和 rc1 相比修了两台机器实测发现的问题：

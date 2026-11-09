@@ -490,6 +490,12 @@ typedef struct rda_host_stats {
   uint64_t resolution_changes; /* frames of a new size started a new stream */
   uint64_t encoder_drops;      /* pictures a video encoder (full screen or area)
                                   chose not to produce (the next one catches up) */
+  /* 1.1: the transport's packet counters for the current viewer, sampled
+   * with rtt_us (0 unless the transport measures the path, as UDP does).
+   * packets_lost / packets_sent is the loss rate. */
+  uint64_t packets_sent;
+  uint64_t packets_lost; /* detected lost and resent; on very short round trips this
+                           * includes late acknowledgements */
 } rda_host_stats;
 
 RDA_API void rda_host_config_default(rda_host_config* c);

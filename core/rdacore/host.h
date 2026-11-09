@@ -148,6 +148,10 @@ struct HostStats {
   int64_t target_bitrate_bps = 0;          // current encoder budget
   int64_t bandwidth_estimate_bps = 0;      // from the transport
   uint32_t rtt_us = 0;
+  // Packets the transport sent and lost (resent) for the current viewer;
+  // zero unless the transport measures the path (UDP). Sampled with rtt_us.
+  uint64_t packets_sent = 0;
+  uint64_t packets_lost = 0;
   // Cursor channel.
   uint64_t cursor_updates = 0;  // position messages
   uint64_t cursor_images = 0;   // images sent (each distinct image once)

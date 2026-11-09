@@ -898,6 +898,8 @@ rda_status rda_host_get_stats(const rda_host* h, rda_host_stats* out) {
   c.lossless_us_total = s.lossless_us_total;
   c.resolution_changes = s.resolution_changes;
   c.encoder_drops = s.encoder_drops;
+  c.packets_sent = s.packets_sent;
+  c.packets_lost = s.packets_lost;
   if (!WriteStruct(c, out)) return Fail(RDA_ERR_INVALID_ARG, "out needs struct_size");
   return RDA_OK;
   RDA_GUARD_END
