@@ -97,6 +97,7 @@ TEST(CApi, OlderShorterStructsAreAccepted) {
   // fields it does not know keep their defaults.
   rda_host_config full;
   rda_host_config_default(&full);
+  EXPECT_EQ(full.capture_own_windows, 0);  // 1.1; off unless asked for
   full.fps = 30;
   rda_host_config old = full;
   old.struct_size = offsetof(rda_host_config, lossless);  // ends before `lossless`
@@ -106,6 +107,15 @@ TEST(CApi, OlderShorterStructsAreAccepted) {
   rda_transport_destroy(b);
   rda_host* h = nullptr;
   ASSERT_EQ(rda_host_create(a, &old, &h), RDA_OK);
+  rda_host_destroy(h);
+
+  // A 1.0 program: its config ends before capture_own_windows.
+  rda_host_config v10 = full;
+  v10.struct_size = offsetof(rda_host_config, capture_own_windows);
+  v10.capture_own_windows = 7;  // beyond its struct: must be ignored
+  ASSERT_EQ(rda_pipe_create(&a, &b), RDA_OK);
+  rda_transport_destroy(b);
+  ASSERT_EQ(rda_host_create(a, &v10, &h), RDA_OK);
   rda_host_destroy(h);
 
   // Stats into a shorter struct: only the known prefix is written.

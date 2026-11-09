@@ -453,6 +453,12 @@ typedef struct rda_host_config {
    * rda_udp_from_fd socket; with other transports the first disconnect stays
    * final. 0: the first disconnect is final. */
   int32_t keep_serving; /* 1 */
+
+  /* 1.1, rda_host_start_capture() only. 1: also capture this process's own
+   * windows (a status menu, a statistics panel: what an application shows
+   * on the shared screen). 0: leave them out, so a viewer in the same
+   * process does not film itself. macOS only; Linux captures everything. */
+  int32_t capture_own_windows; /* 0 */
 } rda_host_config;
 
 typedef struct rda_host_stats {

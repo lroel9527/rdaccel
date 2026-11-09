@@ -104,6 +104,10 @@ struct HostConfig {
   // with BindUdp, BindTcp and unconnected UdpFromFd sockets; with other
   // transports the first disconnect stays final. false = always final.
   bool keep_serving = true;
+  // StartScreenCapture(): also capture this process's own windows (macOS
+  // leaves them out by default, so a viewer in the same process does not
+  // film itself).
+  bool capture_own_windows = false;
   // Decides whether a viewer may connect, from the token it sent (on the
   // transport thread). Empty = everyone may.
   std::function<bool(std::span<const uint8_t> token)> auth;

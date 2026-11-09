@@ -154,7 +154,7 @@ bool SckCapturer::Start(const capture::CaptureConfig& cfg, capture::FrameFn on_f
     return false;
   }
   NSMutableArray<SCRunningApplication*>* excluded = [NSMutableArray array];
-  if (exclude_self_) {
+  if (exclude_self_ && !cfg.include_own_windows) {
     const pid_t me = getpid();
     for (SCRunningApplication* app in content.applications) {
       if (app.processID == me) [excluded addObject:app];

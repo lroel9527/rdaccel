@@ -45,6 +45,9 @@ struct CaptureConfig {
   int32_t width = 0;
   int32_t height = 0;
   bool show_cursor = false;  // the viewer draws the cursor itself
+  // Also capture this process's own windows. Capturers that cannot tell
+  // windows apart capture everything anyway.
+  bool include_own_windows = false;
 };
 
 class ICapturer {

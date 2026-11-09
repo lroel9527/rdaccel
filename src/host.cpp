@@ -625,6 +625,7 @@ bool Host::StartScreenCapture(std::string* error) {
   cc.width = impl_->config.capture_width;
   cc.height = impl_->config.capture_height;
   cc.show_cursor = impl_->config.capture_cursor;
+  cc.include_own_windows = impl_->config.capture_own_windows;
   Impl* impl = impl_.get();
   cap->SetStoppedHandler([impl](const std::string& why) { impl->ReportError("capture stopped: " + why); });
   if (!cap->Start(cc, [impl](const capture::CapturedFrame& f) {

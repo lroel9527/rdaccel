@@ -15,7 +15,8 @@ namespace rdacore::platform {
 class SckCapturer final : public capture::ICapturer {
  public:
   // `exclude_self`: leave this process's own windows out of the capture, so
-  // a loopback viewer does not film itself.
+  // a loopback viewer does not film itself (unless the capture config asks
+  // for them: CaptureConfig::include_own_windows).
   explicit SckCapturer(bool exclude_self);
   ~SckCapturer() override;
 

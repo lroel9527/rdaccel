@@ -595,6 +595,8 @@ struct HostConfig {
   // After a viewer goes, wait for the next one on the same port (see
   // rda_host_config.keep_serving).
   bool keep_serving = true;
+  // Also capture this process's own windows (rda_host_config.capture_own_windows).
+  bool capture_own_windows = false;
   // Whether a viewer may connect, from its auth token (transport thread).
   // Empty = everyone may.
   std::function<bool(std::span<const uint8_t> token)> auth;
@@ -681,6 +683,7 @@ class Host {
     c.max_queue_ms = config.max_queue_ms;
     c.peer_timeout_ms = config.peer_timeout_ms;
     c.keep_serving = config.keep_serving ? 1 : 0;
+    c.capture_own_windows = config.capture_own_windows ? 1 : 0;
     if (!config.encryption_key.empty() && config.encryption_key.size() != 32) {
       create_error_ = "encryption_key must be 32 bytes";
       return;
