@@ -96,7 +96,7 @@ examples/          只用公开 API 的示例和工具
 tests/ fuzz/       GoogleTest 单元测试、libFuzzer 目标
 ```
 
-平台相关代码只在 `platform/` 里，`core/` 只通过抽象接口访问采集、编解码和网络，所以单元测试可以用假实现在 Linux CI 上跑。
+平台相关代码只在 `platform/` 里，`core/` 只通过抽象接口访问采集、编解码和网络，所以单元测试可以用假实现在没有屏幕的 Linux 上跑。
 
 ## 配置开关
 

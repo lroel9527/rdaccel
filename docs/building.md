@@ -51,7 +51,7 @@ Wayland 桌面（GNOME、KDE、sway、Hyprland 等）只能通过 xdg-desktop-po
 
 无头测试环境：`tools/wayland_headless.sh 命令…` 起一个 sway（软件渲染）+ PipeWire + xdg-desktop-portal-wlr 的桌面再运行命令，
 需要 `sway pipewire wireplumber xdg-desktop-portal xdg-desktop-portal-wlr dbus-daemon`。Ubuntu 24.04 的 xdg-desktop-portal-wlr
-在没有显卡时不肯共享屏幕，`tools/build_test_xdpw.sh` 编一个去掉这条限制的版本，用 `RDA_WL_XDPW=<路径>` 指定（CI 就这样跑）。
+在没有显卡时不肯共享屏幕，`tools/build_test_xdpw.sh` 编一个去掉这条限制的版本，用 `RDA_WL_XDPW=<路径>` 指定。
 
 ## 示例和工具
 
@@ -98,11 +98,11 @@ KEY=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')    # 32 字节密钥，两边
 
 ## Mac 与 Linux 码流互解
 
-CI 每次在 Linux 上用 x265 录一段合成码流、在 macOS 上用 VideoToolbox 解，再反过来。手动做法：在一端用 `rdaccel_record` 生成 `.rdstream`，拷到另一端运行 `rdaccel_play FILE --check-synthetic`，结果为 `OK` 且 PSNR 高于 30 dB 即互通。
+改了编解码相关代码后，确认 Linux 上 x265 录的码流 macOS 上 VideoToolbox 能解，反过来也一样：在一端用 `rdaccel_record` 生成 `.rdstream`，拷到另一端运行 `rdaccel_play FILE --check-synthetic`，结果为 `OK` 且 PSNR 高于 30 dB 即互通。
 
 ## 其他检查
 
-- **Sanitizer**：CI 的 Linux 任务用 ASan + UBSan 构建并跑全部测试：`cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined" -DCMAKE_C_FLAGS="-fsanitize=address,undefined"`。
+- **Sanitizer**：在 Linux 上用 ASan + UBSan 构建并跑全部测试：`cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined" -DCMAKE_C_FLAGS="-fsanitize=address,undefined"`。
 - **fuzz**：libFuzzer 目标覆盖所有解析对端数据的代码，用 `-DRDACCEL_BUILD_FUZZERS=ON` 构建，见 [fuzz/README.md](../fuzz/README.md)。
-- **ABI**：`tools/abi_check.sh` 用 abidiff 对比上一版本的 C ABI，CI 每个 PR 都跑。
-- **真机复测**：云端 CI 的 macOS 跑的是 VideoToolbox 软件编码，硬件相关的项目要在真实 Mac 上确认，清单和静音脚本见 [mac_retest.md](mac_retest.md)。
+- **ABI**：`tools/abi_check.sh` 用 abidiff 对比上一版本的 C ABI，改了公开头文件就跑一次。
+- **真机复测**：硬件编解码相关的项目要在真实 Mac 上确认，清单和静音脚本见 [mac_retest.md](mac_retest.md)。

@@ -1,8 +1,8 @@
 # Fuzzing
 
 libFuzzer targets for every place rdaccel parses bytes from the network or
-from a recording. Each one runs for 60 s in CI (the `fuzz` job) with ASan and
-UBSan; a crash fails the job and its reproducer is uploaded as an artifact.
+from a recording. Before a release, run each for about 60 s with ASan and
+UBSan (see below); a crash leaves its reproducer in the working directory.
 
 | target | what it feeds |
 |---|---|
@@ -17,8 +17,7 @@ UBSan; a crash fails the job and its reproducer is uploaded as an artifact.
 
 Seed inputs live in `fuzz/corpus/<target>/` (for `recording`: synthetic
 recordings at a few sizes and an Xvfb screen capture with the cursor, made
-with `rdaccel_record`). CI passes them as a second, read-only corpus
-directory.
+with `rdaccel_record`). Pass them as a second, read-only corpus directory.
 
 Multi-channel targets read their input as `[channel][len][bytes]...`
 (`fuzz_input.h`), so the fuzzer can interleave channels.
