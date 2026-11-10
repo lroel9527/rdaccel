@@ -44,7 +44,7 @@ extern "C" {
 
 #define RDA_VERSION_MAJOR 1
 #define RDA_VERSION_MINOR 4
-#define RDA_VERSION_PATCH 2
+#define RDA_VERSION_PATCH 3
 /* "rc1" and so on for a pre-release, "" for a release. rda_version() does
  * not include it; rda_version_string() does ("1.0.0-rc1"). */
 #define RDA_VERSION_PRERELEASE ""
@@ -229,7 +229,8 @@ typedef struct rda_injector_config {
   uint32_t struct_size;
   int32_t display_index; /* 0; the display the host captures */
   /* The picture size the viewer's coordinates refer to: the host's
-   * capture_width / capture_height when it scales. 0 = native size. */
+   * capture_width / capture_height when it scales. 0 = native size: the
+   * display's own pixels, also after its resolution changes (macOS). */
   int32_t source_width, source_height;
 } rda_injector_config;
 

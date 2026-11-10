@@ -52,6 +52,14 @@ bool MacDisplayId(int32_t index, CGDirectDisplayID& out, std::string* error) {
 }
 
 double MacDisplayScale(CGDirectDisplayID id) {
+  // From the display's current mode, not NSScreen: NSScreen only follows a
+  // mode change or a display that was just added once the main run loop has
+  // handled the notification, and a command-line host may have none.
+  if (CGDisplayModeRef mode = CGDisplayCopyDisplayMode(id)) {
+    const size_t points = CGDisplayModeGetWidth(mode), pixels = CGDisplayModeGetPixelWidth(mode);
+    CGDisplayModeRelease(mode);
+    if (points > 0 && pixels > 0) return static_cast<double>(pixels) / static_cast<double>(points);
+  }
   @autoreleasepool {
     NSScreen* s = ScreenFor(id);
     return s && s.backingScaleFactor > 0 ? s.backingScaleFactor : 1.0;

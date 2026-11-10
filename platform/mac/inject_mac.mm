@@ -189,12 +189,9 @@ constexpr int kSourcesTimeoutMs = 500;
 
 class MacInjector final : public IInputInjector {
  public:
-  MacInjector(CGDirectDisplayID id, int32_t src_w, int32_t src_h) : id_(id) {
-    const CGRect b = CGDisplayBounds(id);
-    const double scale = MacDisplayScale(id);
-    src_w_ = src_w > 0 ? src_w : std::max(1, static_cast<int32_t>(std::lround(b.size.width * scale)));
-    src_h_ = src_h > 0 ? src_h : std::max(1, static_cast<int32_t>(std::lround(b.size.height * scale)));
-  }
+  // src_w, src_h: the size of the picture the viewer's positions are in;
+  // 0 = the display's own pixels, whatever its mode is at the time.
+  MacInjector(CGDirectDisplayID id, int32_t src_w, int32_t src_h) : id_(id), src_w_(src_w), src_h_(src_h) {}
 
   ~MacInjector() override {
     // Release what the viewer left pressed.
@@ -353,11 +350,19 @@ class MacInjector final : public IInputInjector {
     if (now) std::this_thread::sleep_for(std::chrono::milliseconds(30));
   }
 
-  // Viewer pixels -> global points on this display.
+  // Viewer pixels -> global points on this display. The display's mode is
+  // read each time: it may change while the session runs (a resized virtual
+  // display, a new resolution chosen in System Settings).
   CGPoint Point(int32_t x, int32_t y) const {
     const CGRect b = CGDisplayBounds(id_);
-    const double px = std::clamp<double>(x, 0, src_w_ - 1), py = std::clamp<double>(y, 0, src_h_ - 1);
-    return CGPointMake(b.origin.x + px * b.size.width / src_w_, b.origin.y + py * b.size.height / src_h_);
+    int32_t w = src_w_, h = src_h_;
+    if (w <= 0 || h <= 0) {
+      const double scale = MacDisplayScale(id_);
+      w = std::max(1, static_cast<int32_t>(std::lround(b.size.width * scale)));
+      h = std::max(1, static_cast<int32_t>(std::lround(b.size.height * scale)));
+    }
+    const double px = std::clamp<double>(x, 0, w - 1), py = std::clamp<double>(y, 0, h - 1);
+    return CGPointMake(b.origin.x + px * b.size.width / w, b.origin.y + py * b.size.height / h);
   }
 
   CGEventRef MouseEvent(bool down, int b, CGPoint at) {

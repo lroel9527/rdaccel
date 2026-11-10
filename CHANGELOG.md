@@ -3,6 +3,22 @@
 版本号遵循语义化版本。从 1.0 起，同一主版本内 C ABI 只加不改（新函数、结构体末尾加字段），
 `find_package(rdaccel 1.0)` 接受任何 1.x。1.0 之前次版本号（0.x）变化时 C ABI 可能有不兼容改动。
 
+## 1.4.3
+
+修订版：C ABI 不变。显示器在会话中途变化（应用为远程客户端建的虚拟显示器、在系统设置里换分辨率）时，
+macOS 上的尺寸和指针位置跟着变。
+
+- **缩放系数从显示模式读取**（`platform/mac/displays_mac.mm`）：以前用 `NSScreen.backingScaleFactor`，
+  而 `NSScreen` 要等主线程的事件循环处理完通知才更新，刚出现的显示器（或刚换的模式）会被当成 1 倍：
+  `rda_list_displays` 报的像素少一半，注入的指针位置差一倍。现在读 `CGDisplayCopyDisplayMode` 的像素宽 / 点宽，
+  读不到时才退回 `NSScreen`。
+- **输入注入跟随显示模式**（`platform/mac/inject_mac.mm`）：`source_width` / `source_height` 为 0（原始尺寸）时，
+  以前在创建注入器时把显示器的像素尺寸记下来，之后分辨率一变指针就按旧尺寸换算。现在每次换算时读当前模式。
+  指定了尺寸（采集时缩放）的行为不变。
+
+采集的输出尺寸仍在开始时定下：分辨率变化后调用方 `rda_host_stop_capture` 再 `rda_host_start_capture`，
+观看端会再收到一次 `on_stream_info`。
+
 ## 1.4.2
 
 修订版：C ABI 不变。修 1.4.1 的已知问题：1 Mbps 慢链路上滚动（往返 200 ms）目标码率停在估计的两倍（约 2 Mbps），
