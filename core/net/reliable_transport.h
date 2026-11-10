@@ -16,6 +16,12 @@
 //     at two bandwidth-delay products. Unlike loss-based control it neither
 //     fills the bottleneck buffer (latency stays near the base RTT) nor
 //     backs off on random loss.
+//   * Forward error correction (net/fec.h): on long, lossy paths a parity
+//     packet follows every few data packets, and the end of every burst, so
+//     the receiver rebuilds a single lost packet at once instead of waiting
+//     a round trip for its resend. A rebuilt packet is acknowledged as
+//     received; resends stay the fallback. Off where loss is rare or the
+//     round trip short (a resend is quick there).
 //   * Path statistics (GetStats) for the Host's adaptive bitrate.
 //
 // The wire format is private to this file pair; both ends must run it.
@@ -31,6 +37,7 @@
 #include <vector>
 
 #include "net/datagram.h"
+#include "net/fec.h"
 #include "transport/transport.h"
 
 namespace rdacore::net {
@@ -41,6 +48,9 @@ struct ReliableOptions {
   bool client = false;
   // false: no pacing or window, send as fast as data comes (for comparisons).
   bool congestion_control = true;
+  // Forward error correction: -1 automatic (round trip >= 40 ms and loss
+  // seen), 0 off, 2..32 a parity packet every this many data packets.
+  int fec = -1;
 };
 
 class ReliableTransport final : public transport::ITransport {
@@ -87,6 +97,15 @@ class ReliableTransport final : public transport::ITransport {
   bool SendOne(uint64_t now);
   void SendAck(uint64_t now);
   void MarkLost(uint64_t pn, const SentPacket& p, uint64_t now);
+  using Deliveries = std::vector<std::pair<int, std::vector<uint8_t>>>;
+  // Receiving (lock held): a data packet, received or rebuilt.
+  void MarkReceived(uint64_t pn, uint64_t now, bool in_order_hint);
+  void HandleData(uint64_t pn, uint8_t ch, uint64_t off, std::span<const uint8_t> data, uint64_t now,
+                  Deliveries& deliver);
+  void TryRecover(uint64_t now, Deliveries& deliver);
+  // Sending (lock held).
+  void SendParity(uint64_t now);
+  void UpdateFec(uint64_t now);
   void ReleaseAcked(SendStream& s);
   void OnRateSample(const SentPacket& p, uint64_t now);
   uint64_t QueuedBytes() const;
@@ -126,9 +145,54 @@ class ReliableTransport final : public transport::ITransport {
   };
   std::map<uint64_t, LostPacket> lost_recent_;
 
+  // Forward error correction, sending: the group being collected, its size
+  // (0 = off), and what decides it.
+  fec::Parity fec_group_;
+  size_t fec_n_ = 0;
+  // Parities may take at most kFecShare of the estimated bandwidth, and
+  // nothing while the path is full (a queue at the bottleneck, or our own
+  // data waiting): a token bucket in bytes.
+  double fec_tokens_ = 0;
+  uint64_t fec_tokens_time_ = 0;
+  // Overflow guard: a parity after every burst can push a nearly full path
+  // over (the bandwidth estimate cannot tell: ~1 Mbps on 1 and on 4 Mbps
+  // paths while the sender is application limited). When the loss rate
+  // climbs well above what it was when FEC went on, only full groups are
+  // sent for a while.
+  double fec_base_loss_ = 0;
+  uint64_t fec_no_flush_until_ = 0;
+  // Time the sender spent with data waiting (the window or the pacing held
+  // it back): a sender busy that much has no room for parities, whatever
+  // the round trip says (that queue is ours, not the network's).
+  uint64_t backlogged_us_ = 0, fec_check_backlogged_ = 0;
+  bool fec_busy_ = false;
+  uint64_t fec_parity_sent_ = 0;
+  uint64_t peer_fec_recovered_ = 0;  // the peer's count of our packets it rebuilt
+  uint64_t fec_check_time_ = 0, fec_check_sent_ = 0, fec_check_lost_ = 0;
+  double fec_loss_ = 0;            // recent loss rate, rebuilt packets included
+  uint64_t fec_hold_until_ = 0;    // stays on until then once it went on
+  // Receiving: recent data bodies (to rebuild from), parities still useful.
+  std::map<uint64_t, std::vector<uint8_t>> recv_bodies_;
+  struct PendingParity {
+    fec::Parity parity;
+    uint64_t time = 0;
+  };
+  std::vector<PendingParity> fec_pending_;
+  uint64_t fec_recovered_ = 0;  // packets of the peer's we rebuilt (and that never came after all)
+  // Rebuilt packets whose original may still come: on a jittery path a
+  // parity can overtake a data packet that was only late. If the original
+  // turns up, that was no loss and fec_recovered_ takes it back, or the
+  // sender would see loss that is not there (and send parities too often).
+  std::map<uint64_t, uint64_t> rebuilt_;  // packet number -> when rebuilt
+
   // RTT.
   uint64_t srtt_ = 0, rttvar_ = 0, latest_rtt_ = 0;
   uint64_t min_rtt_ = 0, min_rtt_time_ = 0;
+  // The lowest round trip of the last two smoothed ones (100 ms to 1 s):
+  // what says a queue stands. A single high sample is often just jitter;
+  // a queue keeps every sample high.
+  std::deque<std::pair<uint64_t, uint64_t>> recent_rtt_;  // {time, round trip}
+  uint64_t RecentMinRtt() const;
 
   // BBR-style model.
   enum class Mode { kStartup, kDrain, kProbeBw } mode_ = Mode::kStartup;

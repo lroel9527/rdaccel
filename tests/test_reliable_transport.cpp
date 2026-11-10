@@ -600,10 +600,10 @@ TEST(ReliableTransport, CursorStaysFastUnderASaturatingSender) {
 
 namespace {
 
-TransportStats SendThrough(const net::LinkConditions& c, size_t bytes) {
+TransportStats SendThrough(const net::LinkConditions& c, size_t bytes, int fec = -1) {
   Sink at_viewer, at_host;
   auto [a, b] = net::MakeSimulatedLink(c, net::LinkConditions{.delay_ms = c.delay_ms, .jitter_ms = c.jitter_ms});
-  net::ReliableTransport host(std::move(a));
+  net::ReliableTransport host(std::move(a), {.fec = fec});
   net::ReliableTransport viewer(std::move(b), {.client = true});
   viewer.SetReceiver(at_viewer.Fn());
   host.SetReceiver(at_host.Fn());
@@ -641,9 +641,86 @@ TEST(ReliableTransport, RealLossIsNotTakenForLateness) {
   c.bandwidth_bps = 8'000'000;
   c.delay_ms = 20;
   c.loss = 0.02;
-  const TransportStats st = SendThrough(c, 2'000'000);
+  // Without forward error correction: a packet it rebuilds after the loss
+  // was declared would be acknowledged "late" too.
+  const TransportStats st = SendThrough(c, 2'000'000, /*fec=*/0);
   std::printf("lossy: sent %llu lost %llu spurious %llu\n", (unsigned long long)st.packets_sent,
               (unsigned long long)st.packets_lost, (unsigned long long)st.packets_spurious);
   EXPECT_GT(st.packets_lost, st.packets_sent / 100);  // the 2% are found
   EXPECT_LE(st.packets_spurious, st.packets_lost / 10);
+}
+
+namespace {
+
+struct FrameLatency {
+  double p50 = 0, p95 = 0, max = 0;
+  TransportStats st;
+};
+
+// Pictures of 6 kB every 33 ms over a long, lossy path: how long each takes
+// to arrive whole (what a viewer waits for before it can decode it).
+FrameLatency PicturesOverLossyPath(int fec) {
+  net::LinkConditions c;
+  c.bandwidth_bps = 8'000'000;
+  c.delay_ms = 100;
+  c.loss = 0.03;
+  c.seed = 11;
+  auto [a, b] = net::MakeSimulatedLink(c, net::LinkConditions{.delay_ms = 100, .loss = 0.03, .seed = 12});
+  net::ReliableTransport host(std::move(a), {.fec = fec});
+  net::ReliableTransport viewer(std::move(b), {.client = true, .fec = fec});
+  constexpr size_t kFrame = 6'000;
+  constexpr int kFrames = 150;
+  std::mutex mu;
+  std::condition_variable cv;
+  size_t got = 0;
+  std::vector<std::chrono::steady_clock::time_point> sent(kFrames), arrived(kFrames);
+  viewer.SetReceiver([&](Channel ch, std::span<const uint8_t> bytes) {
+    if (ch != Channel::kVideo) return;
+    std::lock_guard<std::mutex> l(mu);
+    const size_t before = got / kFrame;
+    got += bytes.size();
+    for (size_t k = before; k < got / kFrame && k < kFrames; ++k) arrived[k] = std::chrono::steady_clock::now();
+    cv.notify_all();
+  });
+  host.SetReceiver([](Channel, std::span<const uint8_t>) {});
+  const auto frame = Pattern(kFrame, 9);
+  for (int k = 0; k < kFrames; ++k) {
+    {
+      std::lock_guard<std::mutex> l(mu);
+      sent[k] = std::chrono::steady_clock::now();
+    }
+    host.Send(Channel::kVideo, frame);
+    std::this_thread::sleep_for(std::chrono::milliseconds(33));
+  }
+  {
+    std::unique_lock<std::mutex> l(mu);
+    EXPECT_TRUE(cv.wait_for(l, std::chrono::seconds(20), [&] { return got >= kFrame * kFrames; }));
+  }
+  // The first second fills the window and settles the loss estimate.
+  std::vector<double> ms;
+  for (int k = 30; k < kFrames; ++k) ms.push_back(std::chrono::duration<double, std::milli>(arrived[k] - sent[k]).count());
+  std::sort(ms.begin(), ms.end());
+  FrameLatency r;
+  r.p50 = ms[ms.size() / 2];
+  r.p95 = ms[ms.size() * 95 / 100];
+  r.max = ms.back();
+  host.GetStats(&r.st);
+  return r;
+}
+
+}  // namespace
+
+TEST(ReliableTransport, ForwardErrorCorrectionCutsTheWaitForLostPackets) {
+  // 200 ms round trip, 3% loss: without FEC every picture behind a lost
+  // packet waits a round trip more for its resend.
+  const FrameLatency off = PicturesOverLossyPath(0);
+  const FrameLatency on = PicturesOverLossyPath(-1);  // automatic: long, lossy path
+  std::printf("pictures, FEC off: p50 %.0f p95 %.0f max %.0f ms\n", off.p50, off.p95, off.max);
+  std::printf("pictures, FEC on:  p50 %.0f p95 %.0f max %.0f ms (%llu parities, %llu rebuilt)\n", on.p50, on.p95,
+              on.max, static_cast<unsigned long long>(on.st.fec_parity_sent),
+              static_cast<unsigned long long>(on.st.fec_recovered));
+  EXPECT_EQ(off.st.fec_parity_sent, 0u);
+  EXPECT_GT(on.st.fec_parity_sent, 0u);
+  EXPECT_GT(on.st.fec_recovered, 0u);
+  EXPECT_LT(on.p95, off.p95);
 }

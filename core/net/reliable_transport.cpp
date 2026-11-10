@@ -9,7 +9,14 @@
 namespace rdacore::net {
 namespace {
 
-enum PacketType : uint8_t { kData = 1, kAck = 2, kHello = 3 };
+enum PacketType : uint8_t { kData = 1, kAck = 2, kHello = 3, kFec = 4 };
+// A parity packet in flight: not a channel's bytes, never resent.
+constexpr uint8_t kFecChannel = 0xff;
+constexpr size_t kMaxRecvBodies = 2048;
+constexpr size_t kMaxPendingParities = 256;
+constexpr uint64_t kFecMinRtt = 40'000;     // below it a resend is quick enough
+constexpr uint64_t kFecHoldUs = 10'000'000;
+constexpr double kFecShare = 0.3;
 
 // Room for the data header: type, packet number, channel, offset.
 constexpr size_t kMaxPayload = kMaxDatagram - 24;
@@ -136,6 +143,8 @@ bool ReliableTransport::GetStats(TransportStats* out) const {
   out->packets_sent = packets_sent_;
   out->packets_lost = packets_lost_;
   out->packets_spurious = packets_spurious_;
+  out->fec_parity_sent = fec_parity_sent_;
+  out->fec_recovered = peer_fec_recovered_;
   return true;
 }
 
@@ -181,11 +190,18 @@ uint64_t ReliableTransport::Cwnd() const {
   return mode_ == Mode::kStartup ? std::max(cwnd, kInitialCwnd) : cwnd;
 }
 
+uint64_t ReliableTransport::RecentMinRtt() const {
+  uint64_t m = latest_rtt_;
+  for (const auto& [t, r] : recent_rtt_) m = std::min(m, r);
+  return m;
+}
+
 bool ReliableTransport::PathQueued() const {
-  // The smoothed round trip: single samples jitter by several ms where
-  // threads wake late (acknowledgements go out late too), which would
-  // shrink the window on a path with no queue at all.
-  return min_rtt_ > 0 && srtt_ > min_rtt_ + std::max<uint64_t>(min_rtt_ / 4, 5'000) + kMaxAckDelay;
+  // The lowest recent round trip, not the smoothed one: on a jittery path
+  // (Wi-Fi) the smoothed round trip sits well above the minimum with no
+  // queue at all, and draining for it kept the sender far below the path
+  // (an estimate of ~0.3 Mbps on 4 Mbps with 60 ms of jitter).
+  return min_rtt_ > 0 && RecentMinRtt() > min_rtt_ + std::max<uint64_t>(min_rtt_ / 4, 5'000) + kMaxAckDelay;
 }
 
 double ReliableTransport::PacingRate() const {
@@ -236,6 +252,7 @@ void ReliableTransport::Run() {
       next_hello_ = now + 100'000;
     }
     if (ack_pending_ > 0 && now >= ack_deadline_) SendAck(now);
+    UpdateFec(now);
 
     // Probe timeout: nothing acknowledged for too long. Resend the oldest
     // packet as a probe; its acknowledgement declares the rest lost (by the
@@ -296,6 +313,7 @@ void ReliableTransport::Run() {
 
 bool ReliableTransport::SendOne(uint64_t now) {
   if (QueuedBytes() == 0) {
+    if (backlog_since_ != UINT64_MAX) backlogged_us_ += now - backlog_since_;
     backlog_since_ = UINT64_MAX;
     return false;
   }
@@ -335,15 +353,19 @@ bool ReliableTransport::SendOne(uint64_t now) {
   if (ch < 0) return false;
 
   const SendStream& s = out_[ch];
+  // Body ([channel][offset][bytes]) apart from the header: parities cover it.
+  proto::ByteWriter bw;
+  bw.u8(static_cast<uint8_t>(ch));
+  bw.varint(off);
+  std::vector<uint8_t> body = bw.take();
+  const auto first = s.buf.begin() + static_cast<std::ptrdiff_t>(off - s.base);
+  body.insert(body.end(), first, first + static_cast<std::ptrdiff_t>(len));
   proto::ByteWriter w;
   w.u8(kData);
   const uint64_t pn = next_pn_++;
   w.varint(pn);
-  w.u8(static_cast<uint8_t>(ch));
-  w.varint(off);
   std::vector<uint8_t> d = w.take();
-  const auto first = s.buf.begin() + static_cast<std::ptrdiff_t>(off - s.base);
-  d.insert(d.end(), first, first + static_cast<std::ptrdiff_t>(len));
+  d.insert(d.end(), body.begin(), body.end());
   socket_->Send(d);
   ++packets_sent_;
 
@@ -384,11 +406,106 @@ bool ReliableTransport::SendOne(uint64_t now) {
     const uint64_t base = std::max(next_send_time_, now > kPacingCredit ? now - kPacingCredit : 0);
     next_send_time_ = base + static_cast<uint64_t>(static_cast<double>(p.size) / PacingRate());
   }
+  if (fec_n_ >= 2) {
+    fec::Add(fec_group_, pn, body);
+    // A full group, or the end of a burst (a picture, a keystroke): what was
+    // sent must be covered now, not when the next burst comes.
+    const bool flush = now >= fec_no_flush_until_ && QueuedBytes() == 0;
+    if (fec_group_.pns.size() >= fec_n_ || flush) SendParity(now);
+  }
   return true;
+}
+
+void ReliableTransport::SendParity(uint64_t now) {
+  if (fec_group_.pns.empty()) return;
+  // Within the budget only; otherwise this group goes unprotected (a loss
+  // in it is resent as without FEC).
+  if (opt_.congestion_control && bw_ > 0) {
+    // None while a queue stands at the bottleneck: the path is full, and
+    // parities would only lengthen the queue.
+    const double rate = PathQueued() || fec_busy_ ? 0.0 : kFecShare * bw_;  // bytes per us
+    fec_tokens_ = std::min(fec_tokens_ + rate * static_cast<double>(now - std::min(now, fec_tokens_time_)),
+                           std::max(rate * 100'000.0, 2.0 * kMaxDatagram));  // up to 100 ms of it
+    fec_tokens_time_ = now;
+    if (fec_tokens_ < static_cast<double>(fec_group_.body_xor.size())) {
+      fec_group_ = {};
+      return;
+    }
+    fec_tokens_ -= static_cast<double>(fec_group_.body_xor.size());
+  }
+  const uint64_t pn = next_pn_++;
+  std::vector<uint8_t> d{kFec};
+  const auto payload = fec::Encode(pn, fec_group_);
+  d.insert(d.end(), payload.begin(), payload.end());
+  socket_->Send(d);
+  ++fec_parity_sent_;
+  fec_group_ = {};
+  // In flight like data, for the window, the pacing and the delivery rate;
+  // never resent.
+  SentPacket p;
+  p.ch = kFecChannel;
+  p.size = static_cast<uint32_t>(d.size());
+  p.time = now;
+  p.delivered = delivered_;
+  p.delivered_time = delivered_time_;
+  p.first_sent_time = first_sent_time_;
+  p.app_limited = true;  // it rides on what the data asked for
+  in_flight_[pn] = p;
+  bytes_in_flight_ += p.size;
+  if (opt_.congestion_control) {
+    next_send_time_ += static_cast<uint64_t>(static_cast<double>(p.size) / PacingRate());
+  }
+}
+
+void ReliableTransport::UpdateFec(uint64_t now) {
+  if (opt_.fec >= 0) {
+    fec_n_ = opt_.fec >= 2 ? std::min<size_t>(static_cast<size_t>(opt_.fec), fec::kMaxGroup) : 0;
+    return;
+  }
+  if (now - fec_check_time_ < 500'000) return;
+  // Loss as the peer sees it: what was resent for real, plus what it rebuilt
+  // (which was not resent, so it would not show otherwise and FEC would
+  // switch itself off).
+  const uint64_t lost = packets_lost_ - std::min(packets_lost_, packets_spurious_) + peer_fec_recovered_;
+  const uint64_t sent = packets_sent_ - fec_check_sent_;
+  if (sent >= 50) {
+    const double rate = static_cast<double>(lost - std::min(lost, fec_check_lost_)) / static_cast<double>(sent);
+    fec_loss_ = 0.7 * fec_loss_ + 0.3 * rate;
+    fec_check_sent_ = packets_sent_;
+    fec_check_lost_ = lost;
+  }
+  // Busy: data waited to go out for over a quarter of the time since the
+  // last check.
+  uint64_t backlogged = backlogged_us_ + (backlog_since_ != UINT64_MAX ? now - backlog_since_ : 0);
+  if (fec_check_time_ != 0 && now > fec_check_time_) {
+    fec_busy_ = 4 * (backlogged - std::min(backlogged, fec_check_backlogged_)) > now - fec_check_time_;
+  }
+  fec_check_backlogged_ = backlogged;
+  fec_check_time_ = now;
+  size_t n = 0;
+  if (srtt_ >= kFecMinRtt && fec_loss_ >= 0.002) {
+    if (fec_n_ == 0) fec_base_loss_ = fec_loss_;
+    // Only a clear overflow: 1-2% of loss (plus resends of resends, late
+    // packets) must not trip it, or most of the gain is lost (p95 160 -> 400
+    // ms at 2% over 200 ms); an overfilled 1 Mbps path showed ~19%.
+    if (fec_loss_ > std::max(0.06, 3 * fec_base_loss_)) {
+      // FEC itself overfills the path: full groups only (~6%) for a while.
+      fec_no_flush_until_ = now + kFecHoldUs;
+      fec_base_loss_ = fec_loss_;
+    }
+    const double loss = now < fec_no_flush_until_ ? 0.0 : fec_loss_;
+    n = loss < 0.01 ? 16 : loss < 0.03 ? 8 : loss < 0.08 ? 4 : 3;
+    fec_hold_until_ = now + kFecHoldUs;
+  } else if (now < fec_hold_until_) {
+    n = fec_n_;
+  }
+  if (n == 0 && fec_n_ != 0) SendParity(now);  // cover what was collected
+  fec_n_ = n;
 }
 
 void ReliableTransport::MarkLost(uint64_t pn, const SentPacket& p, uint64_t now) {
   bytes_in_flight_ -= p.size;
+  if (p.ch == kFecChannel) return;  // a parity: nothing to resend, not data lost
   ++packets_lost_;
   lost_recent_[pn] = {now, p.size};
   // Late acknowledgements come within a few round trips; keep it small.
@@ -442,7 +559,7 @@ void ReliableTransport::OnRateSample(const SentPacket& p, uint64_t now) {
     // application-limited sample counts too: a sender below the old rate
     // would otherwise keep a stale estimate for seconds after a drop.
     const bool path_paced = ack_elapsed > send_elapsed + send_elapsed / 8;
-    const bool queued = min_rtt_ > 0 && latest_rtt_ > 2 * min_rtt_ + 20'000;
+    const bool queued = min_rtt_ > 0 && RecentMinRtt() > 2 * min_rtt_ + 20'000;
     if (((!p.app_limited || queued) && !p.cwnd_limited && path_paced) || rate >= bw_) {
       bw_samples_.push_back({round_, now, rate});
     }
@@ -463,9 +580,9 @@ void ReliableTransport::OnRateSample(const SentPacket& p, uint64_t now) {
   // single samples below the line must not start a new queue (and cut the
   // window again) every few round trips.
   if (mode_ != Mode::kProbeBw || min_rtt_ == 0 ||
-      srtt_ < min_rtt_ + std::max<uint64_t>(min_rtt_ / 2, 10'000)) {
+      RecentMinRtt() < min_rtt_ + std::max<uint64_t>(min_rtt_ / 2, 10'000)) {
     queue_since_ = 0;
-  } else if (queue_since_ == 0 && latest_rtt_ > 2 * min_rtt_ + 20'000) {
+  } else if (queue_since_ == 0 && RecentMinRtt() > 2 * min_rtt_ + 20'000) {
     queue_since_ = now;
     queue_srtt_ = srtt_;
   }
@@ -541,6 +658,11 @@ void ReliableTransport::HandleAck(std::span<const uint8_t> payload, uint64_t now
     if (count > hi) return;
     ranges.push_back({hi - count, hi});
   }
+  // Since 1.4: how many of our packets the peer rebuilt (older peers stop
+  // before it).
+  // The latest count, not the largest: it goes down when a rebuilt packet
+  // turns out to have been only late.
+  if (uint64_t rebuilt = 0; r.varint(rebuilt)) peer_fec_recovered_ = rebuilt;
 
   bool newest_acked = false;
   const SentPacket* newest = nullptr;
@@ -553,8 +675,10 @@ void ReliableTransport::HandleAck(std::span<const uint8_t> payload, uint64_t now
       bytes_in_flight_ -= p.size;
       delivered_ += p.size;
       delivered_time_ = now;
-      AddRange(out_[p.ch].acked, p.offset, p.offset + p.len);
-      touched[p.ch] = true;
+      if (p.ch < kChannels) {
+        AddRange(out_[p.ch].acked, p.offset, p.offset + p.len);
+        touched[p.ch] = true;
+      }
       if (!newest || p.time > newest->time) {
         newest_copy = p;
         newest = &newest_copy;
@@ -585,6 +709,9 @@ void ReliableTransport::HandleAck(std::span<const uint8_t> payload, uint64_t now
 
   if (newest_acked) {
     latest_rtt_ = now - newest->time;
+    recent_rtt_.emplace_back(now, latest_rtt_);
+    const uint64_t window = std::clamp<uint64_t>(2 * srtt_, 100'000, 1'000'000);
+    while (recent_rtt_.size() > 1 && now - recent_rtt_.front().first > window) recent_rtt_.pop_front();
     if (min_rtt_ == 0 || latest_rtt_ < min_rtt_ || now - min_rtt_time_ > kMinRttWindow) {
       min_rtt_ = latest_rtt_;
       min_rtt_time_ = now;
@@ -638,8 +765,129 @@ void ReliableTransport::SendAck(uint64_t now) {
     w.varint(it->second - it->first);
     lo = it->first;
   }
+  w.varint(fec_recovered_);
   socket_->Send(w.data());
   ack_pending_ = 0;
+}
+
+void ReliableTransport::MarkReceived(uint64_t pn, uint64_t now, bool in_order_hint) {
+  const bool in_order = received_.empty() || pn == received_.rbegin()->second + 1;
+  const bool newest = received_.empty() || pn > received_.rbegin()->second;
+  // Ranges are stored as [lo, hi] (inclusive).
+  uint64_t lo = pn, hi = pn;
+  auto it = received_.upper_bound(pn);
+  if (it != received_.begin()) {
+    auto prev = std::prev(it);
+    if (prev->second + 1 >= pn) {
+      lo = prev->first;
+      hi = std::max(hi, prev->second);
+      received_.erase(prev);
+    }
+  }
+  it = received_.upper_bound(hi);
+  if (it != received_.end() && it->first == hi + 1) {
+    hi = it->second;
+    received_.erase(it);
+  }
+  received_[lo] = hi;
+  while (received_.size() > kMaxAckRanges) received_.erase(received_.begin());
+  if (newest) largest_received_time_ = now;
+  // Acknowledge every second packet, at once on reordering or loss,
+  // otherwise within kMaxAckDelay.
+  if (ack_pending_++ == 0) ack_deadline_ = now + kMaxAckDelay;
+  if (ack_pending_ >= 2 || !in_order || !in_order_hint) ack_deadline_ = now;
+  cv_.notify_all();
+}
+
+void ReliableTransport::HandleData(uint64_t pn, uint8_t ch, uint64_t off, std::span<const uint8_t> data,
+                                   uint64_t now, Deliveries& deliver) {
+  if (recv_bodies_.count(pn)) {  // a duplicate, or rebuilt already
+    if (auto it = rebuilt_.find(pn); it != rebuilt_.end()) {
+      // The original after all: it was only late, not lost.
+      if (fec_recovered_ > 0) --fec_recovered_;
+      rebuilt_.erase(it);
+    }
+    return;
+  }
+  MarkReceived(pn, now, true);
+  // Kept to rebuild a neighbour from a parity.
+  proto::ByteWriter bw;
+  bw.u8(ch);
+  bw.varint(off);
+  std::vector<uint8_t> body = bw.take();
+  body.insert(body.end(), data.begin(), data.end());
+  recv_bodies_[pn] = std::move(body);
+  while (recv_bodies_.size() > kMaxRecvBodies) recv_bodies_.erase(recv_bodies_.begin());
+
+  RecvStream& s = in_[ch];
+  if (off + data.size() > s.next) {
+    if (off <= s.next) {
+      deliver.emplace_back(ch, std::vector<uint8_t>(data.begin() + static_cast<std::ptrdiff_t>(s.next - off),
+                                                    data.end()));
+      s.next = off + data.size();
+      // Anything buffered that now continues the stream.
+      for (auto it = s.pending.begin(); it != s.pending.end() && it->first <= s.next;) {
+        const uint64_t end = it->first + it->second.size();
+        if (end > s.next) {
+          deliver.back().second.insert(deliver.back().second.end(),
+                                       it->second.begin() + static_cast<std::ptrdiff_t>(s.next - it->first),
+                                       it->second.end());
+          s.next = end;
+        }
+        it = s.pending.erase(it);
+      }
+    } else {
+      auto& slot = s.pending[off];
+      if (slot.size() < data.size()) slot.assign(data.begin(), data.end());
+    }
+  }
+}
+
+void ReliableTransport::TryRecover(uint64_t now, Deliveries& deliver) {
+  // Rebuilding one packet can complete another parity's group: repeat.
+  for (bool again = true; again;) {
+    again = false;
+    for (size_t i = 0; i < fec_pending_.size();) {
+      const fec::Parity& par = fec_pending_[i].parity;
+      // Older than what is kept: cannot tell, so no use.
+      const bool known_range = !recv_bodies_.empty() && par.pns.front() >= recv_bodies_.begin()->first;
+      size_t missing = 0;
+      uint64_t which = 0;
+      for (uint64_t pn : par.pns) {
+        if (!recv_bodies_.count(pn)) {
+          ++missing;
+          which = pn;
+        }
+      }
+      if (!known_range || missing == 0 || now - fec_pending_[i].time > 2'000'000 + 4 * srtt_) {
+        fec_pending_.erase(fec_pending_.begin() + static_cast<std::ptrdiff_t>(i));
+        continue;
+      }
+      if (missing == 1) {
+        auto body = fec::Recover(par, which, recv_bodies_);
+        fec_pending_.erase(fec_pending_.begin() + static_cast<std::ptrdiff_t>(i));
+        if (body) {
+          proto::ByteReader r(*body);
+          uint8_t ch = 0;
+          uint64_t off = 0;
+          std::span<const uint8_t> data;
+          if (r.u8(ch) && r.varint(off) && ch < kChannels && r.bytes(r.remaining(), data)) {
+            const std::vector<uint8_t> copy(data.begin(), data.end());  // body is replaced below
+            ++fec_recovered_;
+            rebuilt_[which] = now;
+            while (rebuilt_.size() > 1024 ||
+                   (!rebuilt_.empty() && now - rebuilt_.begin()->second > 2'000'000 + 4 * srtt_)) {
+              rebuilt_.erase(rebuilt_.begin());
+            }
+            HandleData(which, ch, off, copy, now, deliver);
+            again = true;
+          }
+        }
+        continue;
+      }
+      ++i;
+    }
+  }
 }
 
 void ReliableTransport::OnDatagram(std::span<const uint8_t> d) {
@@ -683,57 +931,16 @@ void ReliableTransport::OnDatagram(std::span<const uint8_t> d) {
           !r.bytes(r.remaining(), data)) {
         return;
       }
-      const bool in_order = received_.empty() || pn == received_.rbegin()->second + 1;
-      const bool newest = received_.empty() || pn > received_.rbegin()->second;
-      // Ranges are stored as [lo, hi] (inclusive).
-      {
-        uint64_t lo = pn, hi = pn;
-        auto it = received_.upper_bound(pn);
-        if (it != received_.begin()) {
-          auto prev = std::prev(it);
-          if (prev->second + 1 >= pn) {
-            lo = prev->first;
-            hi = std::max(hi, prev->second);
-            received_.erase(prev);
-          }
-        }
-        it = received_.upper_bound(hi);
-        if (it != received_.end() && it->first == hi + 1) {
-          hi = it->second;
-          received_.erase(it);
-        }
-        received_[lo] = hi;
-        while (received_.size() > kMaxAckRanges) received_.erase(received_.begin());
-      }
-      if (newest) largest_received_time_ = now;
-      // Acknowledge every second packet, at once on reordering or loss,
-      // otherwise within kMaxAckDelay.
-      if (ack_pending_++ == 0) ack_deadline_ = now + kMaxAckDelay;
-      if (ack_pending_ >= 2 || !in_order) ack_deadline_ = now;
-      cv_.notify_all();
-
-      RecvStream& s = in_[ch];
-      if (off + data.size() > s.next) {
-        if (off <= s.next) {
-          deliver.emplace_back(ch, std::vector<uint8_t>(data.begin() + static_cast<std::ptrdiff_t>(s.next - off),
-                                                        data.end()));
-          s.next = off + data.size();
-          // Anything buffered that now continues the stream.
-          for (auto it = s.pending.begin(); it != s.pending.end() && it->first <= s.next;) {
-            const uint64_t end = it->first + it->second.size();
-            if (end > s.next) {
-              deliver.back().second.insert(deliver.back().second.end(),
-                                           it->second.begin() + static_cast<std::ptrdiff_t>(s.next - it->first),
-                                           it->second.end());
-              s.next = end;
-            }
-            it = s.pending.erase(it);
-          }
-        } else {
-          auto& slot = s.pending[off];
-          if (slot.size() < data.size()) slot.assign(data.begin(), data.end());
-        }
-      }
+      HandleData(pn, ch, off, data, now, deliver);
+      TryRecover(now, deliver);
+    } else if (d[0] == kFec) {
+      uint64_t pn = 0;
+      fec::Parity parity;
+      if (!fec::Decode(d.subspan(1), &pn, &parity)) return;
+      MarkReceived(pn, now, true);
+      if (fec_pending_.size() >= kMaxPendingParities) fec_pending_.erase(fec_pending_.begin());
+      fec_pending_.push_back({std::move(parity), now});
+      TryRecover(now, deliver);
     }
   }
   if (deliver.empty()) return;

@@ -43,7 +43,7 @@ extern "C" {
 /* ---- version ------------------------------------------------------------ */
 
 #define RDA_VERSION_MAJOR 1
-#define RDA_VERSION_MINOR 3
+#define RDA_VERSION_MINOR 4
 #define RDA_VERSION_PATCH 0
 /* "rc1" and so on for a pre-release, "" for a release. rda_version() does
  * not include it; rda_version_string() does ("1.0.0-rc1"). */
@@ -322,6 +322,8 @@ typedef struct rda_transport_stats {
   uint64_t packets_lost;
   uint64_t packets_spurious; /* 1.3: of packets_lost, acknowledged after all (late,
                                 not lost); packets_lost - packets_spurious is real loss */
+  uint64_t fec_parity_sent;  /* 1.4: forward error correction packets sent */
+  uint64_t fec_recovered;    /* 1.4: lost packets the peer rebuilt from them (no resend wait) */
 } rda_transport_stats;
 
 /* Receive callback handed to a transport. `ctx` is the library's. */
@@ -536,6 +538,11 @@ typedef struct rda_host_stats {
   /* 1.3: of packets_lost, acknowledged after all (late, not lost: jitter,
    * reordering). packets_lost - packets_spurious is real loss. */
   uint64_t packets_spurious;
+  /* 1.4: forward error correction (on long, lossy paths): parity packets
+   * sent, and lost packets the viewer rebuilt from them without waiting
+   * for a resend. */
+  uint64_t fec_parity_sent;
+  uint64_t fec_recovered;
 } rda_host_stats;
 
 RDA_API void rda_host_config_default(rda_host_config* c);

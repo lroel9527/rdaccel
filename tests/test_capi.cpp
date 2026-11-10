@@ -37,8 +37,8 @@ struct Counter {
 
 TEST(CApi, Version) {
   EXPECT_EQ(rda_version(), RDA_VERSION);
-  EXPECT_EQ(rda_version(), RDA_MAKE_VERSION(1, 3, 0));
-  EXPECT_STREQ(rda_version_string(), "1.3.0");
+  EXPECT_EQ(rda_version(), RDA_MAKE_VERSION(1, 4, 0));
+  EXPECT_STREQ(rda_version_string(), "1.4.0");
   EXPECT_GT(std::strlen(rda_platform_name()), 0u);
   EXPECT_STREQ(rda_status_str(RDA_ERR_TIMEOUT), "RDA_ERR_TIMEOUT");
   EXPECT_STREQ(rda_status_str(static_cast<rda_status>(-999)), "RDA_ERR_UNKNOWN");

@@ -157,6 +157,8 @@ struct HostStats {
   uint64_t packets_sent = 0;
   uint64_t packets_lost = 0;
   uint64_t packets_spurious = 0;  // of packets_lost, acknowledged after all (late, not lost)
+  uint64_t fec_parity_sent = 0;   // forward error correction packets sent
+  uint64_t fec_recovered = 0;     // lost packets the viewer rebuilt from them
   // Cursor channel.
   uint64_t cursor_updates = 0;  // position messages
   uint64_t cursor_images = 0;   // images sent (each distinct image once)

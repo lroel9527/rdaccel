@@ -106,6 +106,8 @@ rdacore::TransportStats FromC(const rda_transport_stats& s) {
   o.packets_sent = s.packets_sent;
   o.packets_lost = s.packets_lost;
   o.packets_spurious = s.packets_spurious;
+  o.fec_parity_sent = s.fec_parity_sent;
+  o.fec_recovered = s.fec_recovered;
   return o;
 }
 
@@ -119,6 +121,8 @@ rda_transport_stats ToC(const rdacore::TransportStats& s) {
   o.packets_sent = s.packets_sent;
   o.packets_lost = s.packets_lost;
   o.packets_spurious = s.packets_spurious;
+  o.fec_parity_sent = s.fec_parity_sent;
+  o.fec_recovered = s.fec_recovered;
   return o;
 }
 
@@ -965,6 +969,8 @@ rda_status rda_host_get_stats(const rda_host* h, rda_host_stats* out) {
   c.packets_sent = s.packets_sent;
   c.packets_lost = s.packets_lost;
   c.packets_spurious = s.packets_spurious;
+  c.fec_parity_sent = s.fec_parity_sent;
+  c.fec_recovered = s.fec_recovered;
   if (!WriteStruct(c, out)) return Fail(RDA_ERR_INVALID_ARG, "out needs struct_size");
   return RDA_OK;
   RDA_GUARD_END

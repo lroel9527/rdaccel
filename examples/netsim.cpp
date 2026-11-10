@@ -294,7 +294,7 @@ int main(int argc, char** argv) {
   std::printf(
       "%-6s %4.1f Mbps %3d ms %4.1f%% loss cc %d abr %d | first picture %5.0f ms | steady: %5.0f kbps, "
       "%3.0f%% frames shown (%llu skipped), latency p50 %5.0f p95 %5.0f max %5.0f ms, stall %4.0f ms, "
-      "PSNR %5.2f dB, target %5.0f kbps, estimate %5.0f kbps, resent %4.1f%% (late %4.1f%%)\n",
+      "PSNR %5.2f dB, target %5.0f kbps, estimate %5.0f kbps, resent %4.1f%% (late %4.1f%%), fec %4.1f%% (rebuilt %llu)\n",
       sc->name, down.bandwidth_bps / 1e6, down.delay_ms, down.loss * 100, args.num("cc", 1) != 0 ? 1 : 0,
       cfg.adaptive_bitrate ? 1 : 0, first_frame_ms, (hs.bytes_sent - warm_bytes) * 8 / 1000.0 / steady_s,
       100.0 * static_cast<double>(latency_ms.size()) / static_cast<double>(steady_frames),
@@ -302,7 +302,9 @@ int main(int argc, char** argv) {
       lat.empty() ? 0.0 : lat.back(), max_gap, psnr_avg, target_n ? target_sum / target_n / 1000.0 : 0.0,
       hs.bandwidth_estimate_bps / 1000.0,
       hs.packets_sent ? 100.0 * static_cast<double>(hs.packets_lost) / static_cast<double>(hs.packets_sent) : 0.0,
-      hs.packets_sent ? 100.0 * static_cast<double>(hs.packets_spurious) / static_cast<double>(hs.packets_sent) : 0.0);
+      hs.packets_sent ? 100.0 * static_cast<double>(hs.packets_spurious) / static_cast<double>(hs.packets_sent) : 0.0,
+      hs.packets_sent ? 100.0 * static_cast<double>(hs.fec_parity_sent) / static_cast<double>(hs.packets_sent) : 0.0,
+      static_cast<unsigned long long>(hs.fec_recovered));
   if (args.has("verbose")) {
     // Where the latency comes from: per second of capture time, the share
     // of frames shown and the worst latency among them.

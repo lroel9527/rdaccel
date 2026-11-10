@@ -42,6 +42,8 @@ struct TransportStats {
   uint64_t packets_sent = 0;
   uint64_t packets_lost = 0;   // detected lost (and resent)
   uint64_t packets_spurious = 0;  // of those, acknowledged after all (late, not lost)
+  uint64_t fec_parity_sent = 0;   // forward error correction packets sent
+  uint64_t fec_recovered = 0;     // of our lost packets, rebuilt by the peer from them
 };
 
 class Transport {

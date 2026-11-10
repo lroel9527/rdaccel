@@ -708,6 +708,8 @@ HostStats Host::stats() const {
   st.packets_sent = impl_->net.packets_sent;
   st.packets_lost = impl_->net.packets_lost;
   st.packets_spurious = impl_->net.packets_spurious;
+  st.fec_parity_sent = impl_->net.fec_parity_sent;
+  st.fec_recovered = impl_->net.fec_recovered;
   const auto cs = impl_->cursor->stats();
   st.cursor_updates = cs.positions;
   st.cursor_images = cs.images;

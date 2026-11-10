@@ -8,7 +8,7 @@ cmake_minimum_required(VERSION 3.24)
 if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET AND NOT DEFINED ENV{MACOSX_DEPLOYMENT_TARGET})
   set(CMAKE_OSX_DEPLOYMENT_TARGET "12.3" CACHE STRING "Minimum macOS version")
 endif()
-project(rdaccel VERSION 1.3.0 LANGUAGES C CXX)
+project(rdaccel VERSION 1.4.0 LANGUAGES C CXX)
 # Pre-release label ("rc1"), empty for a release. The full version, as the
 # library, the packages and the tag (v1.0.0-rc1) show it, is
 # PROJECT_VERSION[-RDACCEL_PRERELEASE].
@@ -113,6 +113,7 @@ set(RDACCEL_SOURCES
   core/net/sim_link.cpp
   core/net/udp_socket.cpp
   core/net/reliable_transport.cpp
+  core/net/fec.cpp
   core/session/host_session.cpp
   core/session/link.cpp
   core/session/viewer_session.cpp
@@ -345,6 +346,7 @@ if(RDACCEL_BUILD_TESTS)
     tests/test_local_pipe.cpp
     tests/test_tcp_transport.cpp
     tests/test_reliable_transport.cpp
+    tests/test_fec.cpp
     tests/test_session.cpp
     tests/test_cursor.cpp
     tests/test_link.cpp

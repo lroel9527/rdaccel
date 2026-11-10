@@ -325,6 +325,8 @@ struct TransportStats {
   uint64_t packets_sent = 0;
   uint64_t packets_lost = 0;
   uint64_t packets_spurious = 0;  // of packets_lost, acknowledged after all
+  uint64_t fec_parity_sent = 0;   // forward error correction packets sent
+  uint64_t fec_recovered = 0;     // lost packets the peer rebuilt from them
 };
 
 class Transport;
@@ -387,8 +389,8 @@ class NativeTransport final : public Transport {
     rda_transport_stats s{};
     s.struct_size = sizeof(s);
     if (!t_ || !out || !rda_transport_get_stats(t_, &s)) return false;
-    *out = {s.bandwidth_bps, s.rtt_us,       s.queued_bytes,    s.bytes_in_flight,
-            s.packets_sent,  s.packets_lost, s.packets_spurious};
+    *out = {s.bandwidth_bps,    s.rtt_us,          s.queued_bytes,   s.bytes_in_flight, s.packets_sent,
+            s.packets_lost,     s.packets_spurious, s.fec_parity_sent, s.fec_recovered};
     return true;
   }
 
@@ -434,6 +436,8 @@ inline const rda_transport_vtable& SubclassVtable() {
       out->packets_sent = s.packets_sent;
       out->packets_lost = s.packets_lost;
       out->packets_spurious = s.packets_spurious;
+      out->fec_parity_sent = s.fec_parity_sent;
+      out->fec_recovered = s.fec_recovered;
       return 1;
     };
     t.destroy = [](void* self) { delete static_cast<Transport*>(self); };
@@ -645,6 +649,8 @@ struct HostStats {
   uint64_t packets_sent = 0;   // transport packets for the current viewer (UDP)
   uint64_t packets_lost = 0;
   uint64_t packets_spurious = 0;  // of packets_lost, acknowledged after all
+  uint64_t fec_parity_sent = 0;   // forward error correction packets sent
+  uint64_t fec_recovered = 0;     // lost packets the viewer rebuilt from them
 };
 
 class Host {
@@ -873,6 +879,8 @@ class Host {
     o.packets_sent = s.packets_sent;
     o.packets_lost = s.packets_lost;
     o.packets_spurious = s.packets_spurious;
+    o.fec_parity_sent = s.fec_parity_sent;
+    o.fec_recovered = s.fec_recovered;
     return o;
   }
 
