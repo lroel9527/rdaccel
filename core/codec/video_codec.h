@@ -46,6 +46,12 @@ class IHevcEncoder {
   // Changes the target bitrate without restarting the stream.
   virtual void SetBitrate(int64_t bps) = 0;
 
+  // Lowers the QP floor (the quality ceiling) to `qp` for the pictures that
+  // follow, or with 0 puts back the one the encoder was created with. For
+  // pictures of a still screen, which may be coded finer than moving ones.
+  // Never raises the floor. Encoders that cannot change it ignore the call.
+  virtual void SetMinQp(int /*qp*/) {}
+
   virtual const std::string& last_error() const = 0;
 };
 

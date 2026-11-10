@@ -126,6 +126,8 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     carry_video_tiles_.clear();
     refine_.assign(n_tiles, 0);
     refining_ = 0;
+    polish_.assign(n_tiles, kUnpolished);
+    polish_owed_ = false;
     born_.assign(n_tiles, 0);
     hot_us_.assign(n_tiles, 0);
     quality_.assign(n_tiles, kRough);
@@ -322,8 +324,25 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     }
     pending_sharpen_.clear();
   }
+  // Tiles at video quality that the still-screen polish has yet to do.
+  const auto still_frames = static_cast<uint8_t>(
+      options_.still_min_qp > 0 && options_.refine_frames > 0 ? std::clamp(options_.still_refine_frames, 0, static_cast<int>(kUnpolished) - 1) : 0);
+  for (const auto& c : changes) polish_[static_cast<size_t>(c.row) * differ_.cols() + c.col] = kUnpolished;
+  polish_owed_ = false;
+  if (still_frames > 0 && !key) {
+    for (size_t i = 0; i < n_tiles && !polish_owed_; ++i) {
+      if (polish_[i] == 0) continue;
+      if (quality_[i] == kExact) {
+        polish_[i] = 0;
+        continue;
+      }
+      const auto col = static_cast<int32_t>(i % differ_.cols());
+      const auto row = static_cast<int32_t>(i / differ_.cols());
+      polish_owed_ = regions_.RegionOf(col, row) < 0;  // areas have encoders of their own
+    }
+  }
   if (changes.empty() && !key && refining_ == 0 && refresh.empty() && !regions_to_send &&
-      !sharpen_video_) {
+      !sharpen_video_ && !polish_owed_) {
     quiet_ = true;
     moving_ = false;
     if (use_regions) FinishRegions(busy, region_changed);
@@ -473,6 +492,8 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     uint8_t& r = refine_[tile_index(c)];
     refining_ += (v > 0) - (r > 0);
     r = v;
+    // Coded as video (again): the still-screen polish is owed afresh.
+    if (v > 0) polish_[tile_index(c)] = kUnpolished;
   };
   // What the lossless part of this frame may cost: a few frame intervals of
   // the bitrate (more after frames were held back). Content that turns up
@@ -850,10 +871,52 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       }
     }
   }
+  // Still-screen polish: with the screen nearly still, the tiles left at
+  // video quality are taken from the next pictures too, and those are coded
+  // with the lower QP floor (HostOptions::still_refine_frames).
+  const bool still = still_frames > 0 && quiet_ && !key && !sharpen;
+  if (still && polish_owed_) {
+    std::vector<uint8_t> listed(n_tiles, 0);
+    for (const auto& t : region_tiles) listed[tile_index(t)] = 1;
+    for (int32_t row = 0; row < differ_.rows(); ++row) {
+      for (int32_t col = 0; col < differ_.cols(); ++col) {
+        const size_t idx = static_cast<size_t>(row) * differ_.cols() + col;
+        if (polish_[idx] == 0) continue;
+        if (quality_[idx] == kExact) {
+          polish_[idx] = 0;
+          continue;
+        }
+        // Not yet: still in its ordinary refinement, about to be sent
+        // losslessly, or part of a video area.
+        if (listed[idx] || refine_[idx] > 0 || pending_lossless_[idx] || regions_.RegionOf(col, row) >= 0) continue;
+        Rect rect{col * kTileSize, row * kTileSize, kTileSize, kTileSize};
+        rect.w = std::min(rect.w, width_ - rect.x);
+        rect.h = std::min(rect.h, height_ - rect.y);
+        if (polish_[idx] == kUnpolished) {
+          if (frame_no_ - born_[idx] < kRefreshDelay) continue;  // may still be changing
+          // Only what the encoder's picture really shows: a tile the viewer
+          // got by a move or from the cache is not in it.
+          bool same = true;
+          for (int32_t y = 0; y < rect.h && same; ++y) {
+            const size_t off = static_cast<size_t>(rect.y + y) * enc_stride + rect.x * 4;
+            same = std::memcmp(enc_input_.data() + off, prev_.data() + off, static_cast<size_t>(rect.w) * 4) == 0;
+          }
+          if (!same) {
+            polish_[idx] = 0;
+            continue;
+          }
+          polish_[idx] = still_frames;
+        }
+        region_tiles.push_back({col, row, 0, 0, rect});
+        if (--polish_[idx] == 0) quality_[idx] = kRefined;
+      }
+    }
+  }
   const uint64_t t1 = capture::MonotonicMicros();
 
   std::optional<codec::HevcAccessUnit> au;
   if (key || !region_tiles.empty()) {
+    encoder_->SetMinQp(still ? options_.still_min_qp : 0);
     au = encoder_->Encode({enc_input_.data(), width_, height_, enc_stride}, frame.capture_time_us,
                           key || sharpen);
     if (!au && !key && encoder_->last_error().empty()) {

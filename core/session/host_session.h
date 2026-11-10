@@ -55,6 +55,17 @@ struct HostOptions {
   // content (the low-latency encoder starts coarse and sharpens over a few
   // frames). Encoding continues while tiles are refining. 0 disables.
   int refine_frames = 8;
+  // Once the screen is nearly still, tiles left at video quality (icons,
+  // photos, gradients: whatever has too many colours for the lossless layer)
+  // are taken from this many more pictures, coded with the QP floor lowered
+  // to `still_min_qp`. The floor that suits a moving picture leaves a still
+  // one visibly soft, and the encoder needs about a second to use a finer
+  // one: on a 2816 x 1762 desktop 8 pictures at the usual floor left 64 of
+  // 1232 tiles more than 30 levels off, 60 pictures at 12 none. Nothing is
+  // spent while the picture moves. 0 frames (or 0 QP, or refine_frames 0:
+  // no refinement at all) disables.
+  int still_refine_frames = 60;
+  int still_min_qp = 12;
   bool tile_cache = true;
   // Re-send tiles left at first-pass video quality once they are static
   // (typically content that scrolled in or was dragged).
@@ -116,7 +127,8 @@ class HostSession {
   // video quality, or stale, until the next change; the Host re-submits the
   // last frame instead. Not thread-safe against OnFrame.
   bool work_pending() const {
-    return force_keyframe_ || !carry_video_tiles_.empty() || pending_lossless_count_ > 0 || refining_ > 0;
+    return force_keyframe_ || !carry_video_tiles_.empty() || pending_lossless_count_ > 0 || refining_ > 0 ||
+           polish_owed_;
   }
 
   // The screen as of the last frame passed to OnFrame (BGRA, rows of
@@ -160,6 +172,13 @@ class HostSession {
   // Video tiles of a picture the encoder dropped, listed with the next one.
   std::vector<tile::TileChange> carry_video_tiles_;
   size_t refining_ = 0;  // tiles with refine_ > 0
+  // Still-screen polish (HostOptions::still_refine_frames). Per tile: 0 =
+  // nothing owed (lossless, polished, or not in the encoder's picture);
+  // kUnpolished = its content changed since it was last polished; otherwise
+  // the still pictures it is yet to be taken from.
+  static constexpr uint8_t kUnpolished = 255;
+  std::vector<uint8_t> polish_;
+  bool polish_owed_ = false;  // some tile is waiting for, or in, its polish
 
   // Tile cache bookkeeping (see OnFrame).
   static constexpr uint64_t kStableFrames = 8;

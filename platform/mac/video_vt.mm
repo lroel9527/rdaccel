@@ -105,6 +105,7 @@ class VtHevcEncoder final : public codec::IHevcEncoder {
         SetIntProp(session_, kVTCompressionPropertyKey_MinAllowedFrameQP, cfg.min_qp);
       }
     }
+    min_qp_now_ = cfg.min_qp;
     VTCompressionSessionPrepareToEncodeFrames(session_);
     return true;
   }
@@ -126,6 +127,17 @@ class VtHevcEncoder final : public codec::IHevcEncoder {
   const std::string& last_error() const override { return error_; }
 
   void SetBitrate(int64_t bps) override { SetRate(session_, bps); }
+
+  void SetMinQp(int qp) override {
+    // Without a floor of its own (min_qp 0, or macOS 12) there is nothing to lower.
+    if (cfg_.min_qp <= 0) return;
+    const int want = qp > 0 && qp < cfg_.min_qp ? qp : cfg_.min_qp;
+    if (want == min_qp_now_) return;
+    if (@available(macOS 13.0, *)) {
+      SetIntProp(session_, kVTCompressionPropertyKey_MinAllowedFrameQP, want);
+      min_qp_now_ = want;
+    }
+  }
 
   std::optional<codec::HevcAccessUnit> Encode(const tile::ImageView& img, uint64_t pts_us,
                                               bool force_keyframe) override {
@@ -255,6 +267,7 @@ class VtHevcEncoder final : public codec::IHevcEncoder {
   VTCompressionSessionRef session_ = nullptr;
   bool hardware_ = true;
   bool low_latency_ = false;
+  int min_qp_now_ = 0;  // the floor in effect (SetMinQp); cfg_.min_qp at first
   std::mutex mu_;
   std::optional<codec::HevcAccessUnit> pending_;
   std::string callback_error_;

@@ -26,14 +26,17 @@ class FakeEncoder final : public codec::IHevcEncoder {
   bool fail_next = false;
   bool drop_next = false;  // drop the picture, as VideoToolbox may (no error)
   std::vector<bool> keyframe_requests;
+  std::vector<int> min_qp;  // per picture: the floor asked for (0 = the encoder's own)
 
   std::string name() const override { return "fake"; }
+  void SetMinQp(int qp) override { min_qp_now_ = qp; }
   const std::string& last_error() const override { return err_; }
   void SetBitrate(int64_t) override {}
   std::optional<codec::HevcAccessUnit> Encode(const tile::ImageView& img, uint64_t,
                                               bool force_keyframe) override {
     err_.clear();
     keyframe_requests.push_back(force_keyframe);
+    min_qp.push_back(min_qp_now_);
     if (fail_next) {
       fail_next = false;
       err_ = "simulated encoder failure";
@@ -55,6 +58,7 @@ class FakeEncoder final : public codec::IHevcEncoder {
 
  private:
   std::string err_;
+  int min_qp_now_ = 0;
 };
 
 class FakeDecoder final : public codec::IHevcDecoder {
@@ -624,6 +628,63 @@ TEST(Session, ViewerAsksForAKeyframeAfterADecodeError) {
   EXPECT_TRUE(encoder->keyframe_requests[2]);
   std::unique_lock<std::mutex> lock(mu);
   ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(5), [&] { return shown == 2; }));
+}
+
+// A still screen: what stays video is taken from more pictures, coded with
+// the lower QP floor, and then nothing more is sent. A change starts over,
+// at the ordinary floor while it moves.
+TEST(Session, StillScreenPolishesVideoTilesAtAFinerQuality) {
+  auto [host_end, viewer_end] = transport::MakeLocalPipe();
+  constexpr int W = 200, H = 120;  // 4 x 2 tiles
+  auto enc = std::make_unique<FakeEncoder>();
+  FakeEncoder* raw = enc.get();
+  session::HostSession host(host_end.get(), std::move(enc), W, H,
+                            {.lossless = false, .refine_frames = 2, .still_refine_frames = 5, .still_min_qp = 12,
+                             .progressive = false});
+  session::ViewerSession viewer(viewer_end.get(), std::make_unique<FakeDecoder>());
+  std::mutex mu;
+  std::vector<size_t> regions_per_frame;
+  viewer.SetFrameHandler([&](const tile::ImageView&, const std::vector<Rect>& regions, uint64_t, uint64_t) {
+    std::lock_guard<std::mutex> lock(mu);
+    regions_per_frame.push_back(regions.size());
+  });
+  std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 50);
+  capture::CapturedFrame f{{px.data(), W, H, W * 4}, {}, 0};
+  auto run_until_skipped = [&] {
+    const uint64_t skipped = host.stats().frames_skipped;
+    for (int n = 0; host.stats().frames_skipped == skipped && n < 100; ++n) host.OnFrame(f);
+  };
+  // The keyframe, its 2 refinements, then (after the wait that makes sure
+  // the tiles are static) 5 pictures at the finer floor.
+  run_until_skipped();
+  EXPECT_FALSE(host.work_pending());
+  ASSERT_EQ(raw->min_qp.size(), 1u + 2u + 5u);
+  EXPECT_EQ(raw->min_qp.front(), 0);  // the keyframe: the encoder's own floor
+  EXPECT_EQ(std::count(raw->min_qp.begin(), raw->min_qp.end(), 12), 5 + 2);  // refinements of a still screen too
+  for (size_t i = 3; i < raw->min_qp.size(); ++i) EXPECT_EQ(raw->min_qp[i], 12) << i;
+  host.OnFrame(f);
+  EXPECT_EQ(raw->min_qp.size(), 8u);  // nothing more
+
+  // One tile changes: it is refined and polished again, the others are not.
+  px[(70 * W + 150) * 4] = 99;  // tile (2, 1)
+  run_until_skipped();
+  EXPECT_EQ(raw->min_qp.size(), 8u + 1u + 2u + 5u);
+  EXPECT_FALSE(host.work_pending());
+
+  PipeStopper stop{host_end, viewer_end};
+  for (int i = 0; i < 500; ++i) {
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      if (regions_per_frame.size() >= 16) break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  std::lock_guard<std::mutex> lock(mu);
+  ASSERT_GE(regions_per_frame.size(), 16u);
+  // The last pictures (the second polish) carry only the tile that changed.
+  for (size_t i = regions_per_frame.size() - 5; i < regions_per_frame.size(); ++i) {
+    EXPECT_EQ(regions_per_frame[i], 1u) << i;
+  }
 }
 
 TEST(Session, ProgressiveKeyframeSendsVideoFirstAndLosslessAfter) {

@@ -75,7 +75,7 @@ struct Received {
 }  // namespace
 
 TEST(PublicApi, VersionAndPlatform) {
-  EXPECT_STREQ(rdaccel::Version(), "1.4.4");
+  EXPECT_STREQ(rdaccel::Version(), "1.4.5");
   EXPECT_NE(std::string(rdaccel::PlatformName()), "");
   const auto a = rdaccel::NowMicros();
   EXPECT_GE(rdaccel::NowMicros(), a);
@@ -133,15 +133,18 @@ TEST(PublicApi, StaticScreenIsSkipped) {
   std::vector<uint8_t> px;
   rdaccel::RenderTestPattern(0, kW, kH, px);
   // After the first frame come the progressive tiles, one sharper picture of
-  // what stays video, and `refine_frames` refinements of it; after that,
-  // nothing more is sent.
-  const int n = cfg.refine_frames + 40;
+  // what stays video, `refine_frames` refinements of it and, the screen
+  // being still, 60 finer pictures of it (the still-screen polish); after
+  // that, nothing more is sent.
+  constexpr int kStillFrames = 60;
+  const int n = cfg.refine_frames + kStillFrames + 40;
   for (int i = 0; i < n; ++i) {
     ASSERT_TRUE(host.SubmitFrame({px.data(), kW, kH, kW * 4}, rdaccel::NowMicros()));
   }
   ASSERT_TRUE(got.WaitFor(1));
   const auto st = host.stats();
-  EXPECT_LE(st.frames_encoded, 2u + static_cast<uint64_t>(cfg.refine_frames) + st.progressive_tiles);
+  EXPECT_LE(st.frames_encoded,
+            2u + static_cast<uint64_t>(cfg.refine_frames) + kStillFrames + 8u + st.progressive_tiles);
   EXPECT_EQ(st.frames_encoded + st.frames_skipped, static_cast<uint64_t>(n));
   const uint64_t sent = st.bytes_sent;
   for (int i = 0; i < 10; ++i) {
