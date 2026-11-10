@@ -329,6 +329,81 @@ TEST(Lossless, ContextTilesRoundTripAcrossFramesAndResets) {
   EXPECT_LT(later_size, first_size);
 }
 
+namespace {
+
+// Highlighted code on a dark background: five text colours, each with its
+// own shades towards the background.
+std::vector<uint8_t> ColouredCode(int w, int h, int seed) {
+  std::vector<uint8_t> px(static_cast<size_t>(w) * h * 4);
+  const int bg[3] = {40, 33, 30};
+  const int fg[5][3] = {{225, 220, 217}, {163, 94, 252}, {240, 217, 102}, {51, 150, 252}, {102, 204, 128}};
+  for (int y = 0; y < h; ++y) {
+    for (int x = 0; x < w; ++x) {
+      uint8_t* p = &px[(static_cast<size_t>(y) * w + x) * 4];
+      const uint32_t r = Mix(static_cast<uint32_t>(y * w + x) + static_cast<uint32_t>(seed) * 7919u);
+      const int* f = fg[(x / 13 + y / 16 + seed) % 5];
+      // Runs of background, strokes with soft edges.
+      const bool stroke = ((x + seed) % 9 < 3) && (y % 16 < 11) && r % 8 != 0;
+      const int level = !stroke ? 0 : ((x + seed) % 9 == 1 ? 24 : 6 + static_cast<int>((r >> 8) % 14));
+      for (int c = 0; c < 3; ++c) p[c] = static_cast<uint8_t>(bg[c] + (f[c] - bg[c]) * level / 24);
+      p[3] = 255;
+    }
+  }
+  return px;
+}
+
+}  // namespace
+
+TEST(Lossless, ContextTilesOfUpTo64ColoursRoundTripAndBeatDeflate) {
+  constexpr int W = 256, H = 64;
+  codec::LosslessEncoder enc, plain_enc;
+  codec::LosslessDecoder dec;
+  size_t context_total = 0, deflate_total = 0;
+  int over16 = 0, over32 = 0;
+  for (int frame = 0; frame < 8; ++frame) {
+    const auto px = ColouredCode(W, H, frame);
+    const ImageView img{px.data(), W, H, W * 4};
+    codec::RegionOps ops, plain;
+    for (int k = 0; k < 4; ++k) {
+      codec::PaletteTile t;
+      // Up to 32, 64, 64 colours, and one small odd-sized rect.
+      const Rect r = k == 3 ? Rect{192, 3, 41, 7} : Rect{k * 64, 0, 64, 64};
+      ASSERT_TRUE(codec::ExtractReducedPalette(img, r, k == 0 ? 32 : 64, 256, 4096, t));
+      over16 += t.colors.size() > 16;
+      over32 += t.colors.size() > 32;
+      plain.tiles.push_back(t);
+      ops.context_tiles.push_back(std::move(t));
+    }
+    std::vector<uint8_t> context;
+    const auto data = enc.Encode(ops, frame == 0 || frame == 5, &context);
+    context_total += data.size() + context.size();
+    deflate_total += plain_enc.Encode(plain, frame == 0 || frame == 5).size();
+    codec::RegionOps got;
+    std::string err;
+    ASSERT_TRUE(dec.Decode(data, frame == 0 || frame == 5, W, H, 16, got, &err, context)) << err;
+    ASSERT_EQ(got.tiles.size(), 4u);
+    std::vector<uint8_t> want(px.size(), 0), have(px.size(), 0);
+    for (const auto& t : ops.context_tiles) codec::PaintPalette(t, want.data(), W * 4);
+    for (const auto& t : got.tiles) codec::PaintPalette(t, have.data(), W * 4);
+    ASSERT_EQ(want, have) << "frame " << frame;
+    // Damage: an error or indices inside the palette, never a crash.
+    for (uint32_t seed = 1; seed <= 20; ++seed) {
+      auto bad = context;
+      bad[Mix(seed + static_cast<uint32_t>(frame) * 100) % bad.size()] ^= static_cast<uint8_t>(1 + Mix(seed) % 255);
+      codec::LosslessDecoder d2;
+      codec::RegionOps g2;
+      if (d2.Decode(data, true, W, H, 16, g2, nullptr, bad)) {
+        for (const auto& t : g2.tiles) {
+          for (uint8_t i : t.indices) ASSERT_LT(i, t.colors.size());
+        }
+      }
+    }
+  }
+  EXPECT_GT(over16, 8);  // the test is about tiles beyond 16 colours
+  EXPECT_GT(over32, 0);
+  EXPECT_LT(context_total * 10, deflate_total * 9) << context_total << " bytes with the context model, " << deflate_total << " with deflate";
+}
+
 TEST(Lossless, ContextTilesBeatDeflateOnAntiAliasedText) {
   constexpr int W = 64, H = 64;
   size_t deflate = 0, context = 0;

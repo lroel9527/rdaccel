@@ -33,7 +33,9 @@ inline constexpr uint64_t kCapMessages = 1;  // AppMessage on Channel::kMessage
 inline constexpr uint64_t kCapTextInput = 2;  // InputEvent kind kText
 // Viewer: decodes context tiles (LosslessData::context). 1.6.
 inline constexpr uint64_t kCapContextTiles = 4;
-inline constexpr uint64_t kCapsAll = kCapMessages | kCapTextInput | kCapContextTiles;
+// Viewer: ... also those of 17 to 64 colours. 1.8.
+inline constexpr uint64_t kCapContextTiles64 = 8;
+inline constexpr uint64_t kCapsAll = kCapMessages | kCapTextInput | kCapContextTiles | kCapContextTiles64;
 
 enum class MsgType : uint8_t {
   kHello = 1,

@@ -1275,7 +1275,8 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   if (text && options_.context_tiles) {
     for (auto& t : lossless_tiles) {
       const size_t n = t.colors.size();
-      (n >= 2 && n <= 16 ? ops.context_tiles : ops.tiles).push_back(std::move(t));
+      const size_t most = options_.context_tiles_64 ? 64 : 16;
+      (n >= 2 && n <= most ? ops.context_tiles : ops.tiles).push_back(std::move(t));
     }
   } else {
     ops.tiles = std::move(lossless_tiles);

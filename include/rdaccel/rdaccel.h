@@ -43,7 +43,7 @@ extern "C" {
 /* ---- version ------------------------------------------------------------ */
 
 #define RDA_VERSION_MAJOR 1
-#define RDA_VERSION_MINOR 7
+#define RDA_VERSION_MINOR 8
 #define RDA_VERSION_PATCH 0
 /* "rc1" and so on for a pre-release, "" for a release. rda_version() does
  * not include it; rda_version_string() does ("1.0.0-rc1"). */

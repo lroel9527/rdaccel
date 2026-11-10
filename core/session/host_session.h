@@ -104,6 +104,8 @@ struct HostOptions {
   // for a viewer that decodes it (proto::kCapContextTiles); see
   // SetContextTiles().
   bool context_tiles = false;
+  // ... and also its tiles of 17..64 colours (proto::kCapContextTiles64).
+  bool context_tiles_64 = false;
 
   // Video region streams. Off unless an encoder factory is given.
   using EncoderFactory = std::function<std::unique_ptr<codec::IHevcEncoder>(
@@ -149,7 +151,10 @@ class HostSession {
   bool text_mode() const { return options_.text_mode; }
   // Whether the viewer decodes context tiles (HostOptions::context_tiles).
   // May change between any two frames.
-  void SetContextTiles(bool on) { options_.context_tiles = on; }
+  void SetContextTiles(bool on, bool up_to_64 = false) {
+    options_.context_tiles = on;
+    options_.context_tiles_64 = on && up_to_64;
+  }
 
   // Makes the next encoded frame a keyframe.
   void RequestKeyframe() { force_keyframe_ = true; }

@@ -6,7 +6,12 @@
 namespace rdacore::codec {
 namespace {
 
-constexpr uint32_t kContexts = 1u << 18;
+// 2^19 contexts of indices or levels (three bits of palette size class),
+// then those of the colour within a level.
+constexpr uint32_t kLevelContexts = 1u << 19;
+constexpr uint32_t kWithinContexts = 2 * 16 * 25;
+constexpr uint32_t kContexts = kLevelContexts + kWithinContexts;
+constexpr int kSymbols = 16;
 constexpr int kIncrement = 24;
 constexpr int kLimit = 4000;  // of a context's total: then every count is halved
 constexpr uint32_t kTop = 1u << 24;
@@ -90,39 +95,61 @@ class RangeDecoder {
 inline uint32_t SizeClass(int n) { return n <= 2 ? 0 : n <= 4 ? 1 : n <= 8 ? 2 : 3; }
 
 struct Steps {
-  std::array<uint8_t, kContextTileMaxColors> of{};
+  std::array<uint8_t, kSymbols> of{};
   explicit Steps(int n) {
-    for (int r = 1; r < kContextTileMaxColors; ++r) {
+    for (int r = 1; r < kSymbols; ++r) {
       of[r] = static_cast<uint8_t>(1 + std::min(2, (r - 1) * 3 / std::max(1, n - 1)));
     }
   }
 };
 
-// Calls fn(context, position) for each pixel in coding order; `idx` holds
-// the indices coded so far (fn fills in the pixel's own before returning).
-template <class Fn>
-bool ForEachPixel(const Rect& rect, int n, const uint8_t* idx, Fn&& fn) {
-  const Steps step(n);
-  const uint32_t size_class = SizeClass(n) << 16;
+// A tile of more than 16 colours: the level of each index, and each level's
+// first index and number of colours.
+struct Levels {
+  std::array<uint8_t, kContextTileMaxColors> of{};
+  std::array<uint8_t, kSymbols + 1> first{};
+  explicit Levels(int n) {
+    for (int v = 0; v < n; ++v) of[static_cast<size_t>(v)] = static_cast<uint8_t>(v * kSymbols / n);
+    for (int l = 0; l <= kSymbols; ++l) first[static_cast<size_t>(l)] = static_cast<uint8_t>((l * n + kSymbols - 1) / kSymbols);
+  }
+  int size(int level) const { return first[static_cast<size_t>(level) + 1] - first[static_cast<size_t>(level)]; }
+};
+
+// Calls fn(context, position, left, above) for each pixel in coding order;
+// `idx` holds the indices coded so far (fn fills in the pixel's own before
+// returning). `level` maps an index to what the context is made of: the
+// index itself up to 16 colours, its level beyond.
+template <class Level, class Fn>
+bool ForEachPixel(const Rect& rect, uint32_t size_class, const Steps& step, const uint8_t* idx, Level&& level, Fn&& fn) {
   const int32_t w = rect.w, h = rect.h;
   for (int32_t y = 0; y < h; ++y) {
     const uint8_t* row = idx + static_cast<size_t>(y) * w;
     const uint8_t* up = y > 0 ? row - w : nullptr;
     const uint8_t* up2 = y > 1 ? row - 2 * w : nullptr;
     for (int32_t x = 0; x < w; ++x) {
-      const uint32_t left = x > 0 ? row[x - 1] : 0;
-      const uint32_t above = up ? up[x] : 0;
-      const uint32_t nw = up && x > 0 ? up[x - 1] : 0;
-      const uint32_t ne = up && x + 1 < w ? up[x + 1] : 0;
-      const uint32_t ww = x > 1 ? row[x - 2] : 0;
-      const uint32_t nn = up2 ? up2[x] : 0;
-      const uint32_t context = size_class | (left << 12) | (above << 8) | (static_cast<uint32_t>(step.of[nw]) << 6) |
-                               (static_cast<uint32_t>(step.of[ne]) << 4) | (static_cast<uint32_t>(step.of[ww]) << 2) |
-                               step.of[nn];
-      if (!fn(context, static_cast<size_t>(y) * w + x)) return false;
+      const uint32_t left_index = x > 0 ? row[x - 1] : 0;
+      const uint32_t above_index = up ? up[x] : 0;
+      const uint32_t left = level(left_index);
+      const uint32_t above = level(above_index);
+      const uint32_t nw = level(up && x > 0 ? up[x - 1] : 0);
+      const uint32_t ne = level(up && x + 1 < w ? up[x + 1] : 0);
+      const uint32_t ww = level(x > 1 ? row[x - 2] : 0);
+      const uint32_t nn = level(up2 ? up2[x] : 0);
+      const uint32_t context = (size_class << 16) | (left << 12) | (above << 8) |
+                               (static_cast<uint32_t>(step.of[nw]) << 6) | (static_cast<uint32_t>(step.of[ne]) << 4) |
+                               (static_cast<uint32_t>(step.of[ww]) << 2) | step.of[nn];
+      if (!fn(context, static_cast<size_t>(y) * w + x, left_index, above_index)) return false;
     }
   }
   return true;
+}
+
+// The context of the colour within its level.
+inline uint32_t WithinContext(uint32_t size_class, const Levels& lv, int level, uint32_t left_index, uint32_t above_index) {
+  auto place = [&](uint32_t index) -> uint32_t {
+    return lv.of[index] == level ? index - lv.first[static_cast<size_t>(level)] : 4;
+  };
+  return kLevelContexts + ((size_class - 4) * 16 + static_cast<uint32_t>(level)) * 25 + place(left_index) * 5 + place(above_index);
 }
 
 }  // namespace
@@ -140,7 +167,7 @@ ContextTileModel::Stats& ContextTileModel::At(uint32_t context) {
     i = static_cast<int32_t>(stats_.size());
     Stats s;
     std::fill(std::begin(s.freq), std::end(s.freq), uint16_t{1});
-    s.total = kContextTileMaxColors;
+    s.total = kSymbols;
     stats_.push_back(s);
   }
   return stats_[static_cast<size_t>(i)];
@@ -161,44 +188,83 @@ void ContextTileModel::Update(Stats& s, int symbol) {
 
 void ContextTileModel::Encode(std::span<const PaletteTile> tiles, std::vector<uint8_t>& out) {
   RangeEncoder rc(out);
+  auto put = [&](Stats& s, int v, int n) {
+    uint32_t cum = 0, total = 0;
+    for (int k = 0; k < n; ++k) {
+      if (k == v) cum = total;
+      total += s.freq[k];
+    }
+    rc.Encode(cum, s.freq[v], total);
+    Update(s, v);
+  };
   for (const PaletteTile& t : tiles) {
     const int n = static_cast<int>(t.colors.size());
-    ForEachPixel(t.rect, n, t.indices.data(), [&](uint32_t context, size_t at) {
-      Stats& s = At(context);
-      const int v = t.indices[at];
-      uint32_t cum = 0, total = 0;
-      for (int k = 0; k < n; ++k) {
-        if (k == v) cum = total;
-        total += s.freq[k];
-      }
-      rc.Encode(cum, s.freq[v], total);
-      Update(s, v);
-      return true;
-    });
+    if (n <= kContextTileBasicColors) {
+      ForEachPixel(t.rect, SizeClass(n), Steps(n), t.indices.data(), [](uint32_t i) { return i; },
+                   [&](uint32_t context, size_t at, uint32_t, uint32_t) {
+                     put(At(context), t.indices[at], n);
+                     return true;
+                   });
+      continue;
+    }
+    const Levels lv(n);
+    const uint32_t size_class = n <= 32 ? 4 : 5;
+    ForEachPixel(t.rect, size_class, Steps(kSymbols), t.indices.data(), [&](uint32_t i) -> uint32_t { return lv.of[i]; },
+                 [&](uint32_t context, size_t at, uint32_t left, uint32_t above) {
+                   const int v = t.indices[at];
+                   const int level = lv.of[static_cast<size_t>(v)];
+                   put(At(context), level, kSymbols);
+                   if (lv.size(level) > 1) {
+                     put(At(WithinContext(size_class, lv, level, left, above)), v - lv.first[static_cast<size_t>(level)],
+                         lv.size(level));
+                   }
+                   return true;
+                 });
   }
   rc.Finish();
 }
 
 bool ContextTileModel::Decode(std::span<const uint8_t> in, std::span<PaletteTile> tiles) {
   RangeDecoder rc(in);
+  auto get = [&](Stats& s, int n) {
+    uint32_t total = 0;
+    for (int k = 0; k < n; ++k) total += s.freq[k];
+    const uint32_t target = rc.Peek(total);
+    uint32_t cum = 0;
+    int v = 0;
+    while (v + 1 < n && cum + s.freq[v] <= target) cum += s.freq[v++];
+    rc.Take(cum, s.freq[v]);
+    Update(s, v);
+    return v;
+  };
   for (PaletteTile& t : tiles) {
     const int n = static_cast<int>(t.colors.size());
     if (n < 2 || n > kContextTileMaxColors || t.rect.w <= 0 || t.rect.h <= 0) return false;
     t.indices.assign(static_cast<size_t>(t.rect.w) * t.rect.h, 0);
     uint8_t* idx = t.indices.data();
-    const bool ok = ForEachPixel(t.rect, n, idx, [&](uint32_t context, size_t at) {
-      Stats& s = At(context);
-      uint32_t total = 0;
-      for (int k = 0; k < n; ++k) total += s.freq[k];
-      const uint32_t target = rc.Peek(total);
-      uint32_t cum = 0;
-      int v = 0;
-      while (v + 1 < n && cum + s.freq[v] <= target) cum += s.freq[v++];
-      rc.Take(cum, s.freq[v]);
-      idx[at] = static_cast<uint8_t>(v);
-      Update(s, v);
-      return !rc.overrun();
-    });
+    bool ok;
+    if (n <= kContextTileBasicColors) {
+      ok = ForEachPixel(t.rect, SizeClass(n), Steps(n), idx, [](uint32_t i) { return i; },
+                        [&](uint32_t context, size_t at, uint32_t, uint32_t) {
+                          idx[at] = static_cast<uint8_t>(get(At(context), n));
+                          return !rc.overrun();
+                        });
+    } else {
+      const Levels lv(n);
+      const uint32_t size_class = n <= 32 ? 4 : 5;
+      ok = ForEachPixel(t.rect, size_class, Steps(kSymbols), idx, [&](uint32_t i) -> uint32_t { return lv.of[i]; },
+                        [&](uint32_t context, size_t at, uint32_t left, uint32_t above) {
+                          const int level = get(At(context), kSymbols);
+                          int v = lv.first[static_cast<size_t>(level)];
+                          if (lv.size(level) > 1) {
+                            v += get(At(WithinContext(size_class, lv, level, left, above)), lv.size(level));
+                          }
+                          // (A level without colours cannot come from an encoder.)
+                          if (v >= n) return false;
+                          idx[at] = static_cast<uint8_t>(v);
+                          return !rc.overrun();
+                        });
+    }
     if (!ok) return false;
   }
   return true;

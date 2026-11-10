@@ -23,6 +23,15 @@
 // its left and upper neighbours, and those of four more (upper left, upper
 // right, two to the left, two above) in four steps each. Pixels outside the
 // tile count as background.
+//
+// Tiles of 17 to 64 colours (text in several colours, which needs 32 or 64:
+// on a page of highlighted code they were 8% of the tiles and, left to
+// deflate, 36% of the bytes) are coded in two steps. The 16 "levels" a
+// tile's indices fall into (index * 16 / colours) are coded like the indices
+// of a 16-colour tile, with contexts of their own; then, where a level holds
+// more than one colour, which of them it is (four at most), from the level
+// and from what the left and upper neighbours are if they are in the same
+// level. Only for viewers that say they decode it (proto::kCapContextTiles64).
 
 #include <cstdint>
 #include <span>
@@ -32,7 +41,9 @@
 
 namespace rdacore::codec {
 
-inline constexpr int kContextTileMaxColors = 16;
+inline constexpr int kContextTileMaxColors = 64;
+// What viewers with proto::kCapContextTiles alone decode.
+inline constexpr int kContextTileBasicColors = 16;
 
 // The statistics; one per direction of a stream, reset when the stream is.
 class ContextTileModel {
@@ -40,7 +51,7 @@ class ContextTileModel {
   ContextTileModel();
   void Reset();
 
-  // Appends the indices of `tiles` (each with 2..16 colours, in the order
+  // Appends the indices of `tiles` (each with 2..64 colours, in the order
   // described above) to `out` as one range-coded block.
   void Encode(std::span<const PaletteTile> tiles, std::vector<uint8_t>& out);
   // Fills the indices of `tiles`, whose rects and colours are set. False on
@@ -48,8 +59,9 @@ class ContextTileModel {
   bool Decode(std::span<const uint8_t> in, std::span<PaletteTile> tiles);
 
  private:
+  static constexpr int kSymbols = 16;  // per context
   struct Stats {
-    uint16_t freq[kContextTileMaxColors];
+    uint16_t freq[kSymbols];
     uint16_t total;  // of all sixteen
   };
   Stats& At(uint32_t context);
