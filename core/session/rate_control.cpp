@@ -4,9 +4,25 @@
 
 namespace rdacore::session {
 
-RateController::Decision RateController::Update(uint64_t now_us, const TransportStats& st,
+RateController::Decision RateController::Update(uint64_t now_us, const TransportStats& path,
                                                 uint64_t sent_bytes, uint64_t total_bytes) {
   Decision d;
+  // At the start of a session the estimate is no estimate yet. Taking ~1
+  // kbps at its word made the first picture look like minutes of queue: its
+  // frames were skipped and the target dropped to the floor, VideoToolbox
+  // then coded the first keyframes at 300 kbps and dropped the frames after
+  // them (its budget gone), and the blurry keyframe stayed on screen for
+  // seconds (scrolling at 15 ms one way: PSNR ~20 dB instead of ~39). So
+  // until it reaches the floor, or kStartupUs has passed, it is ignored.
+  if (!seen_update_) {
+    seen_update_ = true;
+    first_update_us_ = now_us;
+  }
+  if (!estimate_credible_ && (path.bandwidth_bps >= min_bps_ || now_us - first_update_us_ >= kStartupUs)) {
+    estimate_credible_ = true;
+  }
+  TransportStats st = path;
+  if (!estimate_credible_) st.bandwidth_bps = 0;
   const int64_t drain_bps = st.bandwidth_bps > 0 ? st.bandwidth_bps : target_;
   queue_delay_us_ = drain_bps > 0 ? st.queued_bytes * 8'000'000 / static_cast<uint64_t>(drain_bps) : 0;
   uint32_t recent_min = 0;

@@ -592,8 +592,19 @@ void ReliableTransport::OnRateSample(const SentPacket& p, uint64_t now) {
   // the window keeps everything since the queue began, so a round trip
   // that stays high with no queue at all (threads that wake late) cannot
   // keep cutting it.
-  while (bw_samples_.size() > 1 && (bw_samples_.front().round + kBwWindowRounds < round_ ||
-                                    bw_samples_.front().time < oldest)) {
+  // While the sender is application limited and no queue stands, nothing it
+  // sends can show the path's rate, so the samples it has do not age out:
+  // the estimate holds what was measured under load instead of falling to
+  // whatever the last small burst showed (632 -> 72 kbps a second after the
+  // first picture on a jittery 4 Mbps path, the bitrate kept at its floor).
+  // A queue still ages them out, so a path that slowed down is followed: one
+  // that stands (queue_since_), or the smoothed round trip climbing, which
+  // shows it sooner (the recent minimum lags by design, as jitter must not
+  // count): below 400 kbps an application-limited 640 kbps sender saw its
+  // estimate hold for 1.9 s otherwise.
+  const bool hold = p.app_limited && queue_since_ == 0 && min_rtt_ > 0 && srtt_ < 2 * min_rtt_ + 20'000;
+  while (!hold && bw_samples_.size() > 1 && (bw_samples_.front().round + kBwWindowRounds < round_ ||
+                                             bw_samples_.front().time < oldest)) {
     bw_samples_.pop_front();
   }
   // The cut for a queue keeps the last few samples, though, however old:

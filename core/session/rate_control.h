@@ -50,6 +50,10 @@ class RateController {
                   uint64_t total_bytes = 0);
 
   static constexpr uint64_t kMinRttWindowUs = 10'000'000;
+  // Until the estimate reaches min_bps or this long has passed, it is no
+  // estimate yet (the first samples of a session, taken from a handshake and
+  // a few bytes, read ~1 kbps): queue delay and back-off wait for a real one.
+  static constexpr uint64_t kStartupUs = 2'000'000;
   static constexpr uint64_t kRecentWindowUs = 250'000;
 
   int64_t target_bps() const { return target_; }
@@ -70,6 +74,9 @@ class RateController {
   uint64_t path_skips_ = 0;  // frames considered for skipping on a path queue
   double budget_ = 0;        // bytes that may still go out at the floor
   uint64_t budget_us_ = 0, budget_bytes_ = 0;  // when it was last updated, and the bytes sent then
+  bool seen_update_ = false;
+  uint64_t first_update_us_ = 0;
+  bool estimate_credible_ = false;
   uint32_t min_rtt_us_ = 0;       // lowest smoothed RTT of the last kMinRttWindowUs
   uint64_t min_rtt_time_us_ = 0;  // when it was seen
   std::deque<std::pair<uint64_t, uint32_t>> recent_rtt_;  // {time, RTT} of the last kRecentWindowUs

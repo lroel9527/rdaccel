@@ -306,6 +306,16 @@ int main(int argc, char** argv) {
       hs.packets_sent ? 100.0 * static_cast<double>(hs.fec_parity_sent) / static_cast<double>(hs.packets_sent) : 0.0,
       static_cast<unsigned long long>(hs.fec_recovered));
   if (args.has("verbose")) {
+    std::printf("       PSNR samples:");
+    for (double v : psnr) std::printf(" %.0f", v);
+    std::printf("\n");
+    // Where the bits went: video vs the lossless layer (text, UI).
+    std::printf("       layers: video %.0f kbps, lossless %.0f kbps (%llu tiles, %llu progressive, %llu refreshed), "
+                "keyframes %llu, encoder drops %llu\n",
+                hs.video_bytes * 8 / 1000.0 / seconds, hs.lossless_bytes * 8 / 1000.0 / seconds,
+                static_cast<unsigned long long>(hs.lossless_tiles), static_cast<unsigned long long>(hs.progressive_tiles),
+                static_cast<unsigned long long>(hs.refreshed_tiles), static_cast<unsigned long long>(hs.keyframes),
+                static_cast<unsigned long long>(hs.encoder_drops));
     // Where the latency comes from: per second of capture time, the share
     // of frames shown and the worst latency among them.
     std::printf("       by second (shown %%, worst ms):");

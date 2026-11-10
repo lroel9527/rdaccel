@@ -257,6 +257,37 @@ TEST(RateController, SkipsEveryOtherFrameOnANetworkQueueAtTheFloor) {
   EXPECT_FALSE(above.Update(33'000, st).skip_frame);
 }
 
+TEST(RateController, TheFirstTinyEstimatesAreNoEstimate) {
+  // A session's first samples come from a handshake and a few bytes: ~1
+  // kbps. With the first picture queued behind them that read as minutes of
+  // queue, so frames were skipped and the target fell to its floor.
+  session::RateController rc(8'000'000, 300'000, 50);
+  TransportStats st;
+  st.queued_bytes = 18'000;  // the first picture
+  st.rtt_us = 30'000;
+  int skipped = 0;
+  uint64_t t = 0;
+  for (int64_t bw : {1'000, 5'000, 40'000, 120'000}) {
+    st.bandwidth_bps = bw;
+    skipped += rc.Update(t, st).skip_frame;
+    t += 250'000;
+  }
+  EXPECT_EQ(skipped, 0);
+  EXPECT_EQ(rc.target_bps(), 8'000'000);
+  // A real estimate: the controller takes it from there (twice it at most).
+  st.bandwidth_bps = 1'000'000;
+  st.queued_bytes = 0;
+  for (int i = 0; i < 30; ++i) rc.Update(t += 250'000, st);
+  EXPECT_LE(rc.target_bps(), 2'000'000);
+  // After two seconds even a low estimate counts (a really slow path).
+  session::RateController slow(8'000'000, 300'000, 50);
+  st.bandwidth_bps = 100'000;
+  st.queued_bytes = 18'000;
+  slow.Update(0, st);
+  EXPECT_FALSE(slow.Update(1'000'000, st).skip_frame);
+  EXPECT_TRUE(slow.Update(2'100'000, st).skip_frame);
+}
+
 TEST(RateController, JitterIsNotAQueue) {
   // A jittery Wi-Fi path: base round trip 30 ms, each reading up to 120 ms
   // more. The lowest reading of every quarter second stays near the base,
