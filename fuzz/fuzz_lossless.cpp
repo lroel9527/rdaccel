@@ -21,5 +21,12 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   if (dec.Decode(rest.first(half), true, w, h, proto::kTileCacheSlots, ops, &err)) {
     dec.Decode(rest.subspan(half), reset, w, h, proto::kTileCacheSlots, ops, &err);
   }
+  // The same with a context block (codec/context_tiles.h): the last quarter
+  // of each half.
+  codec::LosslessDecoder ctx;
+  const size_t q = half / 4;
+  if (ctx.Decode(rest.first(half - q), true, w, h, proto::kTileCacheSlots, ops, &err, rest.subspan(half - q, q))) {
+    ctx.Decode(rest.subspan(half), reset, w, h, proto::kTileCacheSlots, ops, &err, rest.first(q));
+  }
   return 0;
 }

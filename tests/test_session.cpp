@@ -934,6 +934,53 @@ TEST(Session, TextModeNeverSendsTextAsVideoAndEndsUpExact) {
   EXPECT_EQ(shown.Differences(px, W, H, frames), "");
 }
 
+TEST(Session, TextModeContextTilesArriveExactAndSmaller) {
+  // The same screenful of "text" with and without context tiles (the
+  // viewer decodes both): what arrives is the same, in fewer bytes.
+  constexpr int W = 512, H = 384, kFps = 30;
+  uint64_t bytes[2] = {0, 0};
+  for (int with = 0; with < 2; ++with) {
+    auto [host_end, viewer_end] = transport::MakeLocalPipe();
+    session::HostSession host(host_end.get(), std::make_unique<FakeEncoder>(), W, H,
+                              {.text_mode = true, .context_tiles = with == 1, .fps = kFps, .bitrate_bps = 2'000'000});
+    session::ViewerSession viewer(nullptr, std::make_unique<FakeDecoder>());
+    Shown shown;
+    shown.Attach(viewer);
+    viewer.Attach(viewer_end.get());
+    std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 250);
+    for (size_t i = 3; i < px.size(); i += 4) px[i] = 255;
+    // Strokes on a background, with softer pixels along their edges.
+    uint32_t seed = 9;
+    auto rnd = [&](uint32_t n) { return ((seed = seed * 1103515245u + 12345u) >> 16) % n; };
+    for (int k = 0; k < 2500; ++k) {
+      const int x = 2 + static_cast<int>(rnd(W - 12)), y = 2 + static_cast<int>(rnd(H - 12));
+      const int len = 2 + static_cast<int>(rnd(8));
+      const bool across = rnd(2) == 0;
+      for (int i = -1; i <= len; ++i) {
+        for (int side = -1; side <= 1; ++side) {
+          const int px_x = across ? x + i : x + side, px_y = across ? y + side : y + i;
+          const bool edge = side != 0 || i < 0 || i == len;
+          uint8_t* p = &px[(static_cast<size_t>(px_y) * W + px_x) * 4];
+          const uint8_t v = edge ? static_cast<uint8_t>(std::min<int>(p[0], 120 + 20 * static_cast<int>(rnd(5)))) : 30;
+          p[0] = p[1] = p[2] = v;
+        }
+      }
+    }
+    uint64_t t = 1'000'000;
+    host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+    for (int f = 0; f < 30 * kFps && host.work_pending(); ++f) {
+      t += 1'000'000 / kFps;
+      host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+    }
+    EXPECT_FALSE(host.work_pending());
+    bytes[with] = host.stats().lossless_bytes;
+    const uint64_t frames = host.stats().frames_encoded;
+    PipeStopper stop{host_end, viewer_end};
+    EXPECT_EQ(shown.Differences(px, W, H, frames), "") << (with ? "context tiles" : "deflate");
+  }
+  EXPECT_LT(bytes[1] * 10, bytes[0] * 8) << bytes[1] << " bytes with context tiles, " << bytes[0] << " without";
+}
+
 TEST(Session, TextModeEndsUpExactAfterScrollingAndEditing) {
   // Scrolls (copies of what the viewer shows), cached tiles and partial
   // updates all assume the viewer has the previous frame, which in text
@@ -942,8 +989,10 @@ TEST(Session, TextModeEndsUpExactAfterScrollingAndEditing) {
   constexpr int W = 512, H = 448, kFps = 30;
   for (uint32_t run = 1; run <= 6; ++run) {
     auto [host_end, viewer_end] = transport::MakeLocalPipe();
+    // Odd runs with context tiles, even ones with deflate.
     session::HostSession host(host_end.get(), std::make_unique<FakeEncoder>(), W, H,
-                              {.text_mode = true, .fps = kFps, .bitrate_bps = 60'000 * run});
+                              {.text_mode = true, .context_tiles = run % 2 == 1, .fps = kFps,
+                               .bitrate_bps = 60'000 * run});
     session::ViewerSession viewer(nullptr, std::make_unique<FakeDecoder>());
     Shown shown;
     shown.Attach(viewer);

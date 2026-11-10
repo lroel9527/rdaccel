@@ -31,7 +31,9 @@ inline constexpr uint32_t kMinViewerVersion = 4;
 // Capability bits in Hello / ViewerHello, for features a peer may lack.
 inline constexpr uint64_t kCapMessages = 1;  // AppMessage on Channel::kMessage
 inline constexpr uint64_t kCapTextInput = 2;  // InputEvent kind kText
-inline constexpr uint64_t kCapsAll = kCapMessages | kCapTextInput;
+// Viewer: decodes context tiles (LosslessData::context). 1.6.
+inline constexpr uint64_t kCapContextTiles = 4;
+inline constexpr uint64_t kCapsAll = kCapMessages | kCapTextInput | kCapContextTiles;
 
 enum class MsgType : uint8_t {
   kHello = 1,
@@ -156,6 +158,9 @@ struct LosslessData {
   uint64_t frame_id = 0;
   bool reset = false;
   std::vector<uint8_t> data;
+  // The indices of the frame's context tiles (codec/context_tiles.h), for
+  // viewers with kCapContextTiles; empty (and not on the wire) otherwise.
+  std::vector<uint8_t> context;
   friend bool operator==(const LosslessData&, const LosslessData&) = default;
 };
 

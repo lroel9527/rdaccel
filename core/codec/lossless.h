@@ -78,7 +78,13 @@ struct RegionOps {
   std::vector<MoveOp> moves;
   std::vector<SlotOp> loads;
   std::vector<PaletteTile> tiles;
-  bool empty() const { return stores.empty() && moves.empty() && loads.empty() && tiles.empty(); }
+  // Encoder only: tiles of 2..16 colours whose indices go through the
+  // context model (codec/context_tiles.h) instead of deflate. A decoder
+  // returns them in `tiles`, after the others.
+  std::vector<PaletteTile> context_tiles;
+  bool empty() const {
+    return stores.empty() && moves.empty() && loads.empty() && tiles.empty() && context_tiles.empty();
+  }
 };
 
 class LosslessEncoder {
@@ -90,7 +96,10 @@ class LosslessEncoder {
 
   // Compresses one frame's region commands. With `reset` the deflate history
   // is dropped first; the matching decoder call must then also reset.
-  std::vector<uint8_t> Encode(const RegionOps& ops, bool reset);
+  // The indices of ops.context_tiles are appended to `*context` (required
+  // if there are any; their rects and palettes go into the deflate stream,
+  // after everything else, so a stream without them is as it always was).
+  std::vector<uint8_t> Encode(const RegionOps& ops, bool reset, std::vector<uint8_t>* context = nullptr);
 
  private:
   struct Impl;
@@ -107,8 +116,10 @@ class LosslessDecoder {
   // Returns false on corrupt input (the decoder then needs a reset frame).
   // Rects outside a `width` x `height` screen, slots >= `slots` and cache
   // parts outside a kTileSize tile are rejected.
+  // `context`: the block Encode() wrote for the frame's context tiles.
   bool Decode(std::span<const uint8_t> data, bool reset, int32_t width, int32_t height,
-              uint32_t slots, RegionOps& ops, std::string* error = nullptr);
+              uint32_t slots, RegionOps& ops, std::string* error = nullptr,
+              std::span<const uint8_t> context = {});
 
  private:
   struct Impl;

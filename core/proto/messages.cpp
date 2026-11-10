@@ -164,6 +164,7 @@ MsgType Write(ByteWriter& w, const LosslessData& m) {
   w.varint(m.frame_id);
   w.u8(m.reset ? 1 : 0);
   w.blob(m.data);
+  if (!m.context.empty()) w.blob(m.context);
   return MsgType::kLosslessData;
 }
 
@@ -340,6 +341,11 @@ std::optional<Message> ReadLosslessData(ByteReader& r) {
   std::span<const uint8_t> data;
   if (!(r.varint(m.frame_id) && GetBool(r, m.reset) && r.blob(data))) return std::nullopt;
   m.data = ToVec(data);
+  if (r.remaining() > 0) {
+    std::span<const uint8_t> context;
+    if (!r.blob(context)) return std::nullopt;
+    m.context = ToVec(context);
+  }
   return m;
 }
 

@@ -1151,9 +1151,17 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   ops.stores = std::move(stores);
   for (const auto& m : moves) ops.moves.push_back({m.dst, m.dx, m.dy});
   ops.loads = std::move(loads);
-  ops.tiles = std::move(lossless_tiles);
-  std::vector<uint8_t> lossless_data;
-  if (!ops.empty()) lossless_data = lossless_.Encode(ops, key);
+  if (text && options_.context_tiles) {
+    for (auto& t : lossless_tiles) {
+      const size_t n = t.colors.size();
+      (n >= 2 && n <= 16 ? ops.context_tiles : ops.tiles).push_back(std::move(t));
+    }
+  } else {
+    ops.tiles = std::move(lossless_tiles);
+  }
+  std::vector<uint8_t> lossless_data, context_data;
+  if (!ops.empty()) lossless_data = lossless_.Encode(ops, key, &context_data);
+  const size_t lossless_size = lossless_data.size() + context_data.size();
   if (progressive_active_ && !key && pending_lossless_count_ == 0) {
     progressive_active_ = false;
     // Next frame, if any tile is left at the first picture's quality.
@@ -1162,11 +1170,11 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   }
   if (progressive_sent > 0 && n_lossless > 0) {
     lossless_bytes_per_tile_ = 0.7 * lossless_bytes_per_tile_ +
-                               0.3 * static_cast<double>(lossless_data.size()) / static_cast<double>(n_lossless);
+                               0.3 * static_cast<double>(lossless_size) / static_cast<double>(n_lossless);
   }
   if (n_lossless > 0 && lossless_raw > 256) {
     lossless_ratio_ = std::clamp(
-        0.8 * lossless_ratio_ + 0.2 * static_cast<double>(lossless_data.size()) / lossless_raw, 0.05, 1.0);
+        0.8 * lossless_ratio_ + 0.2 * static_cast<double>(lossless_size) / lossless_raw, 0.05, 1.0);
   }
   const uint64_t t3 = capture::MonotonicMicros();
   if (text && !au && region_bytes.empty() && lossless_data.empty()) {
@@ -1197,7 +1205,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   // Area pictures go on top of the full-screen one.
   bytes.insert(bytes.end(), region_bytes.begin(), region_bytes.end());
   if (!lossless_data.empty()) {
-    proto::EncodeTo(proto::LosslessData{id, key, lossless_data}, bytes);
+    proto::EncodeTo(proto::LosslessData{id, key, lossless_data, context_data}, bytes);
   }
   proto::EncodeTo(proto::FrameEnd{id}, bytes);
   transport_->Send(transport::Channel::kVideo, bytes);
@@ -1214,8 +1222,8 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   stats_.region_bytes += region_payload;
   stats_.region_pictures += region_pictures;
   stats_.region_encode_us_total += region_us;
-  stats_.lossless_bytes += lossless_data.size();
-  lossless_tokens_ -= static_cast<double>(lossless_data.size());
+  stats_.lossless_bytes += lossless_size;
+  lossless_tokens_ -= static_cast<double>(lossless_size);
   video_tokens_ -= static_cast<double>(video_bytes);
   stats_.lossless_tiles += n_lossless;
   stats_.moved_tiles += moved_tiles;

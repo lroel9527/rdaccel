@@ -8,7 +8,7 @@ cmake_minimum_required(VERSION 3.24)
 if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET AND NOT DEFINED ENV{MACOSX_DEPLOYMENT_TARGET})
   set(CMAKE_OSX_DEPLOYMENT_TARGET "12.3" CACHE STRING "Minimum macOS version")
 endif()
-project(rdaccel VERSION 1.5.0 LANGUAGES C CXX)
+project(rdaccel VERSION 1.6.0 LANGUAGES C CXX)
 # Pre-release label ("rc1"), empty for a release. The full version, as the
 # library, the packages and the tag (v1.0.0-rc1) show it, is
 # PROJECT_VERSION[-RDACCEL_PRERELEASE].
@@ -105,6 +105,7 @@ set(RDACCEL_SOURCES
   core/tile/video_region.cpp
   core/codec/hevc_bitstream.cpp
   core/codec/lossless.cpp
+  core/codec/context_tiles.cpp
   core/capture/synthetic_capturer.cpp
   core/transport/local_pipe.cpp
   core/transport/tcp_transport.cpp

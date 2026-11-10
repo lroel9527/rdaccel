@@ -47,6 +47,7 @@ std::vector<Message> SampleMessages() {
       InputEvent{InputKind::kText, 0, 0, 0, 0, 0x1F600, 0},
       Feedback{42, 1000, 2000},
       LosslessData{8, true, {1, 2, 3}},
+      LosslessData{9, false, {1, 2, 3}, {4, 5}},  // with a context block (1.6)
       KeyframeRequest{77},
   };
 }

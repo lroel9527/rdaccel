@@ -554,6 +554,9 @@ struct Host::Impl {
       in = &whole;
     }
     full_diff_next = false;
+    // Whether this viewer decodes context tiles (0 before it has said hello:
+    // nothing is sent to it then anyway).
+    if (text_applied) session->SetContextTiles((CurrentLink()->peer_caps() & proto::kCapContextTiles) != 0);
     if (!session->OnFrame(*in, &err)) {
       if (error) *error = err;
       // One picture lost, the next one is a keyframe: not something the

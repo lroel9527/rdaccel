@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdlib>
 
+#include "codec/context_tiles.h"
 #include "codec/lossless.h"
 
 using namespace rdacore;
@@ -238,4 +239,120 @@ TEST(Lossless, ReducedPaletteTakesTextOnAGradientButNotAPhoto) {
     }
   }
   EXPECT_FALSE(codec::ExtractReducedPalette({photo.data(), W, H, W * 4}, {0, 0, W, H}, 16, 256, 4096, t));
+}
+
+// ---- context tiles ---------------------------------------------------------
+
+TEST(Lossless, ContextTilesRoundTripAcrossFramesAndResets) {
+  constexpr int W = 256, H = 64;
+  codec::LosslessEncoder enc;
+  codec::LosslessDecoder dec;
+  size_t first_size = 0, later_size = 0;
+  for (int frame = 0; frame < 6; ++frame) {
+    const bool reset = frame == 0 || frame == 4;
+    // Four tiles of anti-aliased text, reduced to 16, 16, 4 and 2 colours,
+    // plus an ordinary tile and a sliver.
+    std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4);
+    const auto a = SmoothText(W, H, 40 + frame, false);
+    px = a;
+    const ImageView img{px.data(), W, H, W * 4};
+    codec::RegionOps ops;
+    const int limits[4] = {16, 16, 4, 2};
+    for (int k = 0; k < 4; ++k) {
+      codec::PaletteTile t;
+      const Rect r = k == 3 ? Rect{192, 0, 37, 5} : Rect{k * 64, 0, 64, 64};
+      ASSERT_TRUE(codec::ExtractReducedPalette(img, r, limits[k], 256, 4096, t));
+      ops.context_tiles.push_back(std::move(t));
+    }
+    codec::PaletteTile plain;
+    ASSERT_TRUE(codec::ExtractPalette(img, {192, 16, 64, 48}, 256, plain));
+    ops.tiles.push_back(plain);
+    std::vector<uint8_t> context;
+    const auto data = enc.Encode(ops, reset, &context);
+    ASSERT_FALSE(context.empty());
+    (frame == 0 ? first_size : later_size) = context.size();
+
+    codec::RegionOps got;
+    std::string err;
+    ASSERT_TRUE(dec.Decode(data, reset, W, H, 16, got, &err, context)) << err;
+    ASSERT_EQ(got.tiles.size(), 5u);
+    // What each tile paints is what the encoder was given.
+    std::vector<uint8_t> want(px.size(), 0), have(px.size(), 0);
+    codec::PaintPalette(plain, want.data(), W * 4);
+    for (const auto& t : ops.context_tiles) codec::PaintPalette(t, want.data(), W * 4);
+    for (const auto& t : got.tiles) codec::PaintPalette(t, have.data(), W * 4);
+    ASSERT_EQ(want, have) << "frame " << frame;
+  }
+  // The statistics carry over: the same kind of content costs less later.
+  EXPECT_LT(later_size, first_size);
+}
+
+TEST(Lossless, ContextTilesBeatDeflateOnAntiAliasedText) {
+  constexpr int W = 64, H = 64;
+  size_t deflate = 0, context = 0;
+  codec::LosslessEncoder a, b;
+  for (int k = 0; k < 24; ++k) {
+    const auto px = SmoothText(W, H, 30 + k, false);
+    codec::RegionOps plain, ctx;
+    codec::PaletteTile t;
+    ASSERT_TRUE(codec::ExtractReducedPalette({px.data(), W, H, W * 4}, {0, 0, W, H}, 16, 256, 4096, t));
+    plain.tiles.push_back(t);
+    ctx.context_tiles.push_back(t);
+    deflate += a.Encode(plain, k == 0).size();
+    std::vector<uint8_t> block;
+    context += b.Encode(ctx, k == 0, &block).size() + block.size();
+  }
+  EXPECT_LT(context, deflate);
+}
+
+TEST(Lossless, ContextTileStreamsWithoutThemAreUnchanged) {
+  // No context tiles: byte for byte what an older encoder wrote, so older
+  // viewers and recordings are unaffected.
+  const auto px = TextTile(64, 64, 5);
+  codec::RegionOps ops;
+  ops.tiles.resize(1);
+  ASSERT_TRUE(codec::ExtractPalette({px.data(), 64, 64, 256}, {0, 0, 64, 64}, 64, ops.tiles[0]));
+  codec::LosslessEncoder a, b;
+  std::vector<uint8_t> context;
+  EXPECT_EQ(a.Encode(ops, true), b.Encode(ops, true, &context));
+  EXPECT_TRUE(context.empty());
+}
+
+TEST(Lossless, CorruptContextTileDataIsRejectedOrHarmless) {
+  constexpr int W = 128, H = 64;
+  const auto px = SmoothText(W, H, 50, false);
+  codec::RegionOps ops;
+  for (int k = 0; k < 2; ++k) {
+    codec::PaletteTile t;
+    ASSERT_TRUE(codec::ExtractReducedPalette({px.data(), W, H, W * 4}, {k * 64, 0, 64, 64}, 16, 256, 4096, t));
+    ops.context_tiles.push_back(std::move(t));
+  }
+  codec::LosslessEncoder enc;
+  std::vector<uint8_t> context;
+  const auto data = enc.Encode(ops, true, &context);
+  {
+    // The block missing or cut short: an error, not a read past the end.
+    codec::LosslessDecoder dec;
+    codec::RegionOps got;
+    EXPECT_FALSE(dec.Decode(data, true, W, H, 16, got));
+    codec::LosslessDecoder dec2;
+    EXPECT_FALSE(dec2.Decode(data, true, W, H, 16, got, nullptr,
+                             std::span<const uint8_t>(context).first(context.size() / 3)));
+  }
+  // Any damage: indices stay inside the palette whatever comes out.
+  for (uint32_t seed = 1; seed <= 200; ++seed) {
+    auto bad = context;
+    bad[Mix(seed) % bad.size()] ^= static_cast<uint8_t>(1 + Mix(seed * 31) % 255);
+    codec::LosslessDecoder dec;
+    codec::RegionOps got;
+    if (dec.Decode(data, true, W, H, 16, got, nullptr, bad)) {
+      for (const auto& t : got.tiles) {
+        for (uint8_t i : t.indices) ASSERT_LT(i, t.colors.size());
+      }
+    }
+  }
+  // A screen smaller than the tiles' rects is refused before any decoding.
+  codec::LosslessDecoder dec;
+  codec::RegionOps got;
+  EXPECT_FALSE(dec.Decode(data, true, 64, 64, 16, got, nullptr, context));
 }

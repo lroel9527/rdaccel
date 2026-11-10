@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstring>
 
+#include "codec/context_tiles.h"
 #include "proto/wire.h"
 
 namespace rdacore::codec {
@@ -278,6 +279,7 @@ void PaintPalette(const PaletteTile& t, uint8_t* bgra, int32_t stride) {
 
 struct LosslessEncoder::Impl {
   z_stream zs{};
+  std::unique_ptr<ContextTileModel> model;  // created with the first context tile
 };
 
 LosslessEncoder::LosslessEncoder() : impl_(std::make_unique<Impl>()) {
@@ -314,8 +316,11 @@ bool GetRectDelta(proto::ByteReader& r, Rect& out, Rect& prev, int32_t width, in
 
 }  // namespace
 
-std::vector<uint8_t> LosslessEncoder::Encode(const RegionOps& ops, bool reset) {
-  if (reset) deflateReset(&impl_->zs);
+std::vector<uint8_t> LosslessEncoder::Encode(const RegionOps& ops, bool reset, std::vector<uint8_t>* context) {
+  if (reset) {
+    deflateReset(&impl_->zs);
+    if (impl_->model) impl_->model->Reset();
+  }
   proto::ByteWriter w;
   Rect prev;
   w.varint(ops.stores.size());
@@ -347,6 +352,24 @@ std::vector<uint8_t> LosslessEncoder::Encode(const RegionOps& ops, bool reset) {
     }
     if (t.colors.size() > 1) PackIndices(t, IndexBits(t.colors.size()), w);
   }
+  if (!ops.context_tiles.empty() && context) {
+    // Rects and palettes here (deflate knows a palette it has seen), the
+    // indices in the context block.
+    std::vector<PaletteTile> ordered = ops.context_tiles;
+    w.varint(ordered.size());
+    for (auto& t : ordered) {
+      OrderForContextModel(t);
+      PutRectDelta(w, t.rect, prev);
+      w.u8(static_cast<uint8_t>(t.colors.size() - 1));
+      for (uint32_t c : t.colors) {
+        w.u8(static_cast<uint8_t>(c));
+        w.u8(static_cast<uint8_t>(c >> 8));
+        w.u8(static_cast<uint8_t>(c >> 16));
+      }
+    }
+    if (!impl_->model) impl_->model = std::make_unique<ContextTileModel>();
+    impl_->model->Encode(ordered, *context);
+  }
   const auto& raw = w.data();
 
   z_stream& zs = impl_->zs;
@@ -371,6 +394,7 @@ std::vector<uint8_t> LosslessEncoder::Encode(const RegionOps& ops, bool reset) {
 struct LosslessDecoder::Impl {
   z_stream zs{};
   bool broken = false;
+  std::unique_ptr<ContextTileModel> model;
 };
 
 LosslessDecoder::LosslessDecoder() : impl_(std::make_unique<Impl>()) { inflateInit(&impl_->zs); }
@@ -378,7 +402,8 @@ LosslessDecoder::LosslessDecoder() : impl_(std::make_unique<Impl>()) { inflateIn
 LosslessDecoder::~LosslessDecoder() { inflateEnd(&impl_->zs); }
 
 bool LosslessDecoder::Decode(std::span<const uint8_t> data, bool reset, int32_t width,
-                             int32_t height, uint32_t slots, RegionOps& ops, std::string* error) {
+                             int32_t height, uint32_t slots, RegionOps& ops, std::string* error,
+                             std::span<const uint8_t> context) {
   auto fail = [&](const char* why) {
     impl_->broken = true;
     if (error) *error = why;
@@ -388,6 +413,7 @@ bool LosslessDecoder::Decode(std::span<const uint8_t> data, bool reset, int32_t 
   if (reset) {
     inflateReset(&zs);
     impl_->broken = false;
+    if (impl_->model) impl_->model->Reset();
   }
   if (impl_->broken) return fail("lossless stream needs a reset after an earlier error");
 
@@ -467,7 +493,35 @@ bool LosslessDecoder::Decode(std::span<const uint8_t> data, bool reset, int32_t 
     if (!r.bytes(PackedSize(t.rect, bits), packed)) return fail("truncated indices");
     if (!UnpackIndices(packed, bits, nc, t)) return fail("palette index out of range");
   }
-  if (!r.at_end()) return fail("trailing lossless data");
+  if (!r.at_end()) {
+    // Context tiles (codec/context_tiles.h): rects and palettes here, the
+    // indices in `context`.
+    if (!r.varint(n) || n == 0 || n > max_count) return fail("bad context tile count");
+    const size_t first = tiles.size();
+    tiles.resize(first + static_cast<size_t>(n));
+    uint64_t pixels = 0;
+    for (size_t k = first; k < tiles.size(); ++k) {
+      PaletteTile& t = tiles[k];
+      uint8_t nc = 0;
+      if (!(GetRectDelta(r, t.rect, prev, width, height) && r.u8(nc)) || nc < 1 || nc >= kContextTileMaxColors) {
+        return fail("bad context tile header");
+      }
+      t.colors.resize(static_cast<size_t>(nc) + 1);
+      for (auto& c : t.colors) {
+        uint8_t b = 0, g = 0, rr = 0;
+        if (!(r.u8(b) && r.u8(g) && r.u8(rr))) return fail("truncated palette");
+        c = b | (g << 8) | (static_cast<uint32_t>(rr) << 16);
+      }
+      pixels += static_cast<uint64_t>(t.rect.w) * t.rect.h;
+    }
+    // As for the deflate part: a frame holds every pixel at most twice.
+    if (pixels > max_count * 2) return fail("context tiles too large");
+    if (!r.at_end()) return fail("trailing lossless data");
+    if (!impl_->model) impl_->model = std::make_unique<ContextTileModel>();
+    if (!impl_->model->Decode(context, std::span<PaletteTile>(tiles).subspan(first))) {
+      return fail("corrupt context tile data");
+    }
+  }
   return true;
 }
 

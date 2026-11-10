@@ -236,7 +236,7 @@ void ViewerSession::Handle(proto::Message&& m) {
   if (lossless_) {
     ok = width_ > 0 &&
          lossless_dec_.Decode(lossless_->data, lossless_->reset, width_, height_,
-                              proto::kTileCacheSlots, ops_);
+                              proto::kTileCacheSlots, ops_, nullptr, lossless_->context);
   }
   const bool needs_screen = !ops_.stores.empty() || !ops_.moves.empty() || !ops_.loads.empty();
   if (ok && needs_screen && !have_keyframe_) ok = false;

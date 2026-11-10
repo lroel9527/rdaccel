@@ -99,6 +99,11 @@ struct HostOptions {
   // See SetTextMode() to switch while streaming.
   bool text_mode = false;
   int text_colors = 16;
+  // Text mode's tiles (2..16 colours) go through the context model
+  // (codec/context_tiles.h), about half the bytes of deflate on text. Only
+  // for a viewer that decodes it (proto::kCapContextTiles); see
+  // SetContextTiles().
+  bool context_tiles = false;
 
   // Video region streams. Off unless an encoder factory is given.
   using EncoderFactory = std::function<std::unique_ptr<codec::IHevcEncoder>(
@@ -142,6 +147,9 @@ class HostSession {
   // exact ones. Not thread-safe against OnFrame.
   void SetTextMode(bool on);
   bool text_mode() const { return options_.text_mode; }
+  // Whether the viewer decodes context tiles (HostOptions::context_tiles).
+  // May change between any two frames.
+  void SetContextTiles(bool on) { options_.context_tiles = on; }
 
   // Makes the next encoded frame a keyframe.
   void RequestKeyframe() { force_keyframe_ = true; }
