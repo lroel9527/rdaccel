@@ -9,8 +9,19 @@ RateController::Decision RateController::Update(uint64_t now_us, const Transport
   Decision d;
   const int64_t drain_bps = st.bandwidth_bps > 0 ? st.bandwidth_bps : target_;
   queue_delay_us_ = drain_bps > 0 ? st.queued_bytes * 8'000'000 / static_cast<uint64_t>(drain_bps) : 0;
-  if (st.rtt_us > 0 && (min_rtt_us_ == 0 || st.rtt_us < min_rtt_us_)) min_rtt_us_ = st.rtt_us;
-  const bool path_queue = min_rtt_us_ > 0 && st.rtt_us > 2 * min_rtt_us_ + max_queue_us_;
+  uint32_t recent_min = 0;
+  if (st.rtt_us > 0) {
+    if (min_rtt_us_ == 0 || st.rtt_us <= min_rtt_us_ || now_us - min_rtt_time_us_ > kMinRttWindowUs) {
+      min_rtt_us_ = st.rtt_us;
+      min_rtt_time_us_ = now_us;
+    }
+    recent_rtt_.emplace_back(now_us, st.rtt_us);
+    while (!recent_rtt_.empty() && now_us - recent_rtt_.front().first > kRecentWindowUs) recent_rtt_.pop_front();
+    recent_min = st.rtt_us;
+    for (const auto& [t, r] : recent_rtt_) recent_min = std::min(recent_min, r);
+  }
+  // A standing queue keeps every recent reading high; jitter does not.
+  const bool path_queue = min_rtt_us_ > 0 && recent_min > 2 * static_cast<uint64_t>(min_rtt_us_) + max_queue_us_;
   // A queue inside the network counts too once the target is at its floor:
   // an encoder that sends more than the path takes even there (VideoToolbox
   // at 300 kbps sends ~500) would otherwise keep that queue standing, with

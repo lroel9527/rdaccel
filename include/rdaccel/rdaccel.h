@@ -43,7 +43,7 @@ extern "C" {
 /* ---- version ------------------------------------------------------------ */
 
 #define RDA_VERSION_MAJOR 1
-#define RDA_VERSION_MINOR 2
+#define RDA_VERSION_MINOR 3
 #define RDA_VERSION_PATCH 0
 /* "rc1" and so on for a pre-release, "" for a release. rda_version() does
  * not include it; rda_version_string() does ("1.0.0-rc1"). */
@@ -320,6 +320,8 @@ typedef struct rda_transport_stats {
   uint64_t bytes_in_flight;
   uint64_t packets_sent;
   uint64_t packets_lost;
+  uint64_t packets_spurious; /* 1.3: of packets_lost, acknowledged after all (late,
+                                not lost); packets_lost - packets_spurious is real loss */
 } rda_transport_stats;
 
 /* Receive callback handed to a transport. `ctx` is the library's. */
@@ -531,6 +533,9 @@ typedef struct rda_host_stats {
   uint64_t packets_sent;
   uint64_t packets_lost; /* detected lost and resent; on very short round trips this
                            * includes late acknowledgements */
+  /* 1.3: of packets_lost, acknowledged after all (late, not lost: jitter,
+   * reordering). packets_lost - packets_spurious is real loss. */
+  uint64_t packets_spurious;
 } rda_host_stats;
 
 RDA_API void rda_host_config_default(rda_host_config* c);

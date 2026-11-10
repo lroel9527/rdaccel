@@ -156,6 +156,7 @@ struct HostStats {
   // zero unless the transport measures the path (UDP). Sampled with rtt_us.
   uint64_t packets_sent = 0;
   uint64_t packets_lost = 0;
+  uint64_t packets_spurious = 0;  // of packets_lost, acknowledged after all (late, not lost)
   // Cursor channel.
   uint64_t cursor_updates = 0;  // position messages
   uint64_t cursor_images = 0;   // images sent (each distinct image once)

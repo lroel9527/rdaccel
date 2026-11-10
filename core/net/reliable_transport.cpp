@@ -135,6 +135,7 @@ bool ReliableTransport::GetStats(TransportStats* out) const {
   out->bytes_in_flight = bytes_in_flight_;
   out->packets_sent = packets_sent_;
   out->packets_lost = packets_lost_;
+  out->packets_spurious = packets_spurious_;
   return true;
 }
 
@@ -247,7 +248,7 @@ void ReliableTransport::Run() {
       const uint64_t since = std::max(last_ack_time_, in_flight_.begin()->second.time);
       if (now >= since + (Pto() << std::min(pto_count_, 6))) {
         auto oldest = in_flight_.begin();
-        MarkLost(oldest->first, oldest->second);
+        MarkLost(oldest->first, oldest->second, now);
         in_flight_.erase(oldest);
         ++pto_count_;
         last_ack_time_ = now;
@@ -386,9 +387,15 @@ bool ReliableTransport::SendOne(uint64_t now) {
   return true;
 }
 
-void ReliableTransport::MarkLost(uint64_t, const SentPacket& p) {
+void ReliableTransport::MarkLost(uint64_t pn, const SentPacket& p, uint64_t now) {
   bytes_in_flight_ -= p.size;
   ++packets_lost_;
+  lost_recent_[pn] = {now, p.size};
+  // Late acknowledgements come within a few round trips; keep it small.
+  while (lost_recent_.size() > 4096 ||
+         (!lost_recent_.empty() && now - lost_recent_.begin()->second.time > 2'000'000 + 4 * srtt_)) {
+    lost_recent_.erase(lost_recent_.begin());
+  }
   AddRange(out_[p.ch].resend, p.offset, p.offset + p.len);
 }
 
@@ -555,6 +562,22 @@ void ReliableTransport::HandleAck(std::span<const uint8_t> payload, uint64_t now
       it = in_flight_.erase(it);
     }
   }
+  // Acknowledged although declared lost: the resend was spurious (the
+  // original was late, not lost: jitter, reordering). Counted only. Loosening
+  // the loss rules on it (as RACK does) was tried: it cut spurious resends
+  // eightfold on a jittery path but found real losses later, and the worst
+  // latency over 200 ms round trips grew from ~450 to ~600 ms
+  // (rdaccel_netsim). A resend costs bandwidth; waiting costs latency.
+  for (const auto& [lo, hi] : ranges) {
+    for (auto it = lost_recent_.lower_bound(lo); it != lost_recent_.end() && it->first <= hi;) {
+      ++packets_spurious_;
+      // It was delivered: count it, or the delivery rate (the bandwidth
+      // estimate) comes out low by every late packet on a jittery path.
+      delivered_ += it->second.size;
+      delivered_time_ = now;
+      it = lost_recent_.erase(it);
+    }
+  }
   if (!newest) return;  // nothing new (duplicate or already declared lost)
   for (int c = 0; c < kChannels; ++c) {
     if (touched[c]) ReleaseAcked(out_[c]);
@@ -590,7 +613,7 @@ void ReliableTransport::HandleAck(std::span<const uint8_t> payload, uint64_t now
   const uint64_t threshold = std::max<uint64_t>(9 * std::max(srtt_, latest_rtt_) / 8, 1000);
   for (auto it = in_flight_.begin(); it != in_flight_.end() && it->first < largest_acked_;) {
     if (largest_acked_ - it->first >= 3 || it->second.time + threshold < now) {
-      MarkLost(it->first, it->second);
+      MarkLost(it->first, it->second, now);
       it = in_flight_.erase(it);
     } else {
       ++it;

@@ -324,6 +324,7 @@ struct TransportStats {
   uint64_t bytes_in_flight = 0;
   uint64_t packets_sent = 0;
   uint64_t packets_lost = 0;
+  uint64_t packets_spurious = 0;  // of packets_lost, acknowledged after all
 };
 
 class Transport;
@@ -386,7 +387,8 @@ class NativeTransport final : public Transport {
     rda_transport_stats s{};
     s.struct_size = sizeof(s);
     if (!t_ || !out || !rda_transport_get_stats(t_, &s)) return false;
-    *out = {s.bandwidth_bps, s.rtt_us, s.queued_bytes, s.bytes_in_flight, s.packets_sent, s.packets_lost};
+    *out = {s.bandwidth_bps, s.rtt_us,       s.queued_bytes,    s.bytes_in_flight,
+            s.packets_sent,  s.packets_lost, s.packets_spurious};
     return true;
   }
 
@@ -431,6 +433,7 @@ inline const rda_transport_vtable& SubclassVtable() {
       out->bytes_in_flight = s.bytes_in_flight;
       out->packets_sent = s.packets_sent;
       out->packets_lost = s.packets_lost;
+      out->packets_spurious = s.packets_spurious;
       return 1;
     };
     t.destroy = [](void* self) { delete static_cast<Transport*>(self); };
@@ -641,6 +644,7 @@ struct HostStats {
   uint64_t encoder_drops = 0;  // pictures the encoder chose not to produce
   uint64_t packets_sent = 0;   // transport packets for the current viewer (UDP)
   uint64_t packets_lost = 0;
+  uint64_t packets_spurious = 0;  // of packets_lost, acknowledged after all
 };
 
 class Host {
@@ -868,6 +872,7 @@ class Host {
     o.encoder_drops = s.encoder_drops;
     o.packets_sent = s.packets_sent;
     o.packets_lost = s.packets_lost;
+    o.packets_spurious = s.packets_spurious;
     return o;
   }
 

@@ -241,6 +241,10 @@ TEST(RateController, SkipsEveryOtherFrameOnANetworkQueueAtTheFloor) {
   st.queued_bytes = 0;
   int skipped = 0;
   st.rtt_us = 240'000;
+  // A queue counts once every reading of the last 250 ms shows it (jitter
+  // is not a queue): nothing is skipped before that.
+  for (int i = 0; i < 7; ++i) skipped += rc.Update(t += 33'000, st).skip_frame;  // 231 ms
+  EXPECT_EQ(skipped, 0);
   for (int i = 0; i < 10; ++i) skipped += rc.Update(t += 33'000, st).skip_frame;
   EXPECT_EQ(skipped, 5);
   EXPECT_EQ(rc.target_bps(), 300'000);
@@ -251,6 +255,48 @@ TEST(RateController, SkipsEveryOtherFrameOnANetworkQueueAtTheFloor) {
   above.Update(0, st);
   st.rtt_us = 240'000;
   EXPECT_FALSE(above.Update(33'000, st).skip_frame);
+}
+
+TEST(RateController, JitterIsNotAQueue) {
+  // A jittery Wi-Fi path: base round trip 30 ms, each reading up to 120 ms
+  // more. The lowest reading of every quarter second stays near the base,
+  // so the target must not be driven to its floor (it was: 300 kbps on a
+  // 4 Mbps path in rdaccel_netsim --delay=15 --jitter=60).
+  session::RateController rc(8'000'000, 300'000, 50);
+  TransportStats st;
+  st.bandwidth_bps = 4'000'000;
+  uint32_t seed = 1;
+  int skipped = 0;
+  for (uint64_t t = 0; t < 10'000'000; t += 33'000) {
+    seed = seed * 1103515245 + 12345;
+    st.rtt_us = 30'000 + (seed >> 8) % 120'000;
+    skipped += rc.Update(t, st).skip_frame;
+  }
+  EXPECT_EQ(skipped, 0);
+  EXPECT_GE(rc.target_bps(), 4'000'000);
+}
+
+TEST(RateController, ABaseDelayThatGrewIsNotAQueueForGood) {
+  // The path moved (another access point, a VPN): 20 ms, then 150 ms for
+  // good. At first that looks like a queue and the target comes down; once
+  // the lowest round trip of the last ten seconds is the new one, the target
+  // grows back instead of staying at its floor for the rest of the session.
+  session::RateController rc(8'000'000, 300'000, 50);
+  TransportStats st;
+  st.bandwidth_bps = 4'000'000;
+  st.rtt_us = 20'000;
+  uint64_t t = 0;
+  for (; t < 2'000'000; t += 33'000) rc.Update(t, st);
+  st.rtt_us = 150'000;
+  for (; t < 4'000'000; t += 33'000) rc.Update(t, st);
+  EXPECT_LT(rc.target_bps(), 4'000'000);  // backed off: it looked like a queue
+  int skipped_late = 0;
+  for (; t < 30'000'000; t += 33'000) {
+    const bool skip = rc.Update(t, st).skip_frame;
+    if (t > 14'000'000) skipped_late += skip;
+  }
+  EXPECT_EQ(skipped_late, 0);
+  EXPECT_GE(rc.target_bps(), 4'000'000);
 }
 
 TEST(RateController, KeepsWhatGoesOutWithinTheEstimateAtTheFloor) {
@@ -550,4 +596,54 @@ TEST(ReliableTransport, CursorStaysFastUnderASaturatingSender) {
   EXPECT_LT(r.p95, r.idle_p95 + 70);
   // Without giving up the path's capacity.
   EXPECT_GT(r.kbps, 1'200);
+}
+
+namespace {
+
+TransportStats SendThrough(const net::LinkConditions& c, size_t bytes) {
+  Sink at_viewer, at_host;
+  auto [a, b] = net::MakeSimulatedLink(c, net::LinkConditions{.delay_ms = c.delay_ms, .jitter_ms = c.jitter_ms});
+  net::ReliableTransport host(std::move(a));
+  net::ReliableTransport viewer(std::move(b), {.client = true});
+  viewer.SetReceiver(at_viewer.Fn());
+  host.SetReceiver(at_host.Fn());
+  const auto video = Pattern(bytes, 7);
+  const auto t0 = std::chrono::steady_clock::now();
+  for (size_t i = 0; i < bytes; i += 20'000) host.Send(Channel::kVideo, std::span(video).subspan(i, std::min<size_t>(20'000, bytes - i)));
+  EXPECT_TRUE(at_viewer.WaitFor(3, video.size()));
+  EXPECT_EQ(at_viewer.got[3], video);
+  std::printf("  %zu bytes in %.1f s\n", bytes,
+              std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+  TransportStats st;
+  EXPECT_TRUE(host.GetStats(&st));
+  return st;
+}
+
+}  // namespace
+
+TEST(ReliableTransport, LateIsNotLostOnAJitteryPath) {
+  // Jittery Wi-Fi: no packet is lost, but each one waits 0-60 ms extra, so
+  // they arrive out of order and late. Every resend is then spurious, and
+  // counted as such.
+  net::LinkConditions c;
+  c.bandwidth_bps = 8'000'000;
+  c.delay_ms = 15;
+  c.jitter_ms = 60;
+  const TransportStats st = SendThrough(c, 2'000'000);
+  std::printf("jittery: sent %llu lost %llu spurious %llu\n", (unsigned long long)st.packets_sent,
+              (unsigned long long)st.packets_lost, (unsigned long long)st.packets_spurious);
+  EXPECT_GT(st.packets_spurious, 0u);  // seen, and counted
+  EXPECT_LE(st.packets_lost, st.packets_spurious + st.packets_sent / 100);  // none was really lost
+}
+
+TEST(ReliableTransport, RealLossIsNotTakenForLateness) {
+  net::LinkConditions c;
+  c.bandwidth_bps = 8'000'000;
+  c.delay_ms = 20;
+  c.loss = 0.02;
+  const TransportStats st = SendThrough(c, 2'000'000);
+  std::printf("lossy: sent %llu lost %llu spurious %llu\n", (unsigned long long)st.packets_sent,
+              (unsigned long long)st.packets_lost, (unsigned long long)st.packets_spurious);
+  EXPECT_GT(st.packets_lost, st.packets_sent / 100);  // the 2% are found
+  EXPECT_LE(st.packets_spurious, st.packets_lost / 10);
 }

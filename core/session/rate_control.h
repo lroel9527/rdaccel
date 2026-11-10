@@ -17,9 +17,15 @@
 //     than 90% of the estimate (an encoder can only go so low per picture);
 //   * a round trip well above the lowest one seen means a queue is building
 //     inside the network (the path slowed down before the bandwidth estimate
-//     noticed), which also counts as a building queue.
+//     noticed), which also counts as a building queue. "Well above" has to
+//     hold for every reading of the last kRecentWindowUs, so jitter (some
+//     readings high, some low) is not a queue; and the lowest one is that of
+//     the last kMinRttWindowUs, so a path whose base delay grew (another
+//     Wi-Fi access point, a VPN) is not taken for a standing queue for good.
 
 #include <cstdint>
+#include <deque>
+#include <utility>
 
 #include "rdacore/transport.h"
 
@@ -43,6 +49,9 @@ class RateController {
   Decision Update(uint64_t now_us, const TransportStats& st, uint64_t sent_bytes = 0,
                   uint64_t total_bytes = 0);
 
+  static constexpr uint64_t kMinRttWindowUs = 10'000'000;
+  static constexpr uint64_t kRecentWindowUs = 250'000;
+
   int64_t target_bps() const { return target_; }
   // What the encoder is asked for: the target, less what it was seen to
   // overshoot by.
@@ -61,7 +70,9 @@ class RateController {
   uint64_t path_skips_ = 0;  // frames considered for skipping on a path queue
   double budget_ = 0;        // bytes that may still go out at the floor
   uint64_t budget_us_ = 0, budget_bytes_ = 0;  // when it was last updated, and the bytes sent then
-  uint32_t min_rtt_us_ = 0;  // lowest smoothed RTT seen
+  uint32_t min_rtt_us_ = 0;       // lowest smoothed RTT of the last kMinRttWindowUs
+  uint64_t min_rtt_time_us_ = 0;  // when it was seen
+  std::deque<std::pair<uint64_t, uint32_t>> recent_rtt_;  // {time, RTT} of the last kRecentWindowUs
   // The last time a queue built up, and the estimate then: the path's rate,
   // which the target then stays near for a while (see Update).
   uint64_t congested_us_ = 0;

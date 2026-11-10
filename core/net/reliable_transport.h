@@ -6,7 +6,9 @@
 //     acknowledges ranges of them, and the sender resends the bytes of
 //     packets it decides are lost (three later packets acknowledged, or
 //     clearly older than one round trip, or no acknowledgement for a probe
-//     timeout). Each channel is its own ordered byte stream, so a lost video
+//     timeout). A packet declared lost that is acknowledged after all (it
+//     was only late: jitter, reordering) is counted as a spurious resend; the
+//     rules stay quick, as waiting longer costs latency. Each channel is its own ordered byte stream, so a lost video
 //     packet never holds up input, cursor or control bytes.
 //   * Congestion control: a simplified BBR. The sender measures the delivery
 //     rate from acknowledgements and the minimum round-trip time, paces
@@ -84,7 +86,7 @@ class ReliableTransport final : public transport::ITransport {
   // Lock held for all of these.
   bool SendOne(uint64_t now);
   void SendAck(uint64_t now);
-  void MarkLost(uint64_t pn, const SentPacket& p);
+  void MarkLost(uint64_t pn, const SentPacket& p, uint64_t now);
   void ReleaseAcked(SendStream& s);
   void OnRateSample(const SentPacket& p, uint64_t now);
   uint64_t QueuedBytes() const;
@@ -115,7 +117,14 @@ class ReliableTransport final : public transport::ITransport {
   uint64_t last_ack_time_ = 0;   // for the probe timeout
   int pto_count_ = 0;
   bool probe_due_ = false;  // a probe timeout fired: send one packet whatever the window
-  uint64_t packets_sent_ = 0, packets_lost_ = 0;
+  uint64_t packets_sent_ = 0, packets_lost_ = 0, packets_spurious_ = 0;
+  // Packets declared lost recently, by number: an acknowledgement for one
+  // means its resend was spurious.
+  struct LostPacket {
+    uint64_t time = 0;  // when declared lost
+    uint32_t size = 0;  // datagram bytes
+  };
+  std::map<uint64_t, LostPacket> lost_recent_;
 
   // RTT.
   uint64_t srtt_ = 0, rttvar_ = 0, latest_rtt_ = 0;

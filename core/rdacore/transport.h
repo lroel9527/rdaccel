@@ -41,6 +41,7 @@ struct TransportStats {
   uint64_t bytes_in_flight = 0;
   uint64_t packets_sent = 0;
   uint64_t packets_lost = 0;   // detected lost (and resent)
+  uint64_t packets_spurious = 0;  // of those, acknowledged after all (late, not lost)
 };
 
 class Transport {
