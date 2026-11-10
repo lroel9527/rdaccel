@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 
 #include "codec/context_tiles.h"
@@ -209,6 +210,42 @@ bool ExtractReducedPalette(const ImageView& img, const Rect& r, int max_colors, 
     weight[k] = std::sqrt(static_cast<float>(counts[k]));
   }
   std::vector<size_t> kept{first};
+  // Faithful: where the picture is smooth, a merged colour shows. A wallpaper
+  // gradient or a translucent panel reduced to 64 colours came out in
+  // bands, with a seam at every tile (each tile picks its own colours);
+  // next to an edge (text against its background) the same error is not
+  // seen. So per colour, the pixels that have no strongly different
+  // neighbour: those must keep their colour, or very nearly.
+  std::vector<uint32_t> smooth;
+  if (faithful) {
+    smooth.assign(n, 0);
+    constexpr int kEdge = 20;  // levels, in any channel
+    auto differs = [&](uint16_t a, uint16_t b) {
+      if (a == b) return false;
+      const uint32_t ca = colors[a], cb = colors[b];
+      return std::abs(static_cast<int>(ca & 255) - static_cast<int>(cb & 255)) > kEdge ||
+             std::abs(static_cast<int>((ca >> 8) & 255) - static_cast<int>((cb >> 8) & 255)) > kEdge ||
+             std::abs(static_cast<int>((ca >> 16) & 255) - static_cast<int>((cb >> 16) & 255)) > kEdge;
+    };
+    for (int32_t y = 0; y < r.h; ++y) {
+      const uint16_t* row = px.data() + static_cast<size_t>(y) * r.w;
+      for (int32_t x = 0; x < r.w; ++x) {
+        const uint16_t v = row[x];
+        const bool edge = (x > 0 && differs(v, row[x - 1])) || (x + 1 < r.w && differs(v, row[x + 1])) ||
+                          (y > 0 && differs(v, row[x - r.w])) || (y + 1 < r.h && differs(v, row[x + r.w]));
+        if (!edge) ++smooth[v];
+      }
+    }
+  }
+  auto smooth_kept = [&] {
+    if (!faithful) return true;
+    constexpr uint32_t kSeen = 3;  // squared distance: one level a channel
+    uint64_t off = 0;
+    for (size_t k = 0; k < n; ++k) {
+      if (nearest_d[k] > kSeen) off += smooth[k];
+    }
+    return off * 200 <= static_cast<uint64_t>(r.w) * r.h;  // half a percent of the tile
+  };
   // Whether what is kept so far stays close to the picture. A photo's tile
   // has most of its pixels far from any of 16 colours; a gradient under
   // text has them a few levels off.
@@ -249,11 +286,11 @@ bool ExtractReducedPalette(const ImageView& img, const Rect& r, int max_colors, 
         }
       }
     }
-    if (!gated || close_enough()) break;
+    if (!gated || (close_enough() && smooth_kept())) break;
     if (limit >= last_limit) {
-      // Not with any number of colours tried: all of them (they fit the
-      // lossless layer as they are), or not a tile for it.
-      if (faithful && plainly_text) return ExtractPalette(img, r, exact_colors, out);
+      // Not with any number of colours tried: not a tile to reduce. (With
+      // up to `exact_colors` it still fits the lossless layer as it is;
+      // whether that is worth it is the caller's to say.)
       return false;
     }
     limit = std::min(last_limit, limit * 2);

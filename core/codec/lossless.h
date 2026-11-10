@@ -50,10 +50,12 @@ bool ExtractPalette(const ImageView& img, const Rect& r, int max_colors, Palette
 // `faithful`: the result must stay close to the picture for every tile, not
 // only for those beyond `exact_colors`. Where `max_colors` are too few (text
 // in several colours: each needs its own shades), twice and then four times
-// as many are tried (64 at most); a tile of up to `exact_colors` that still
-// does not fit keeps all its colours, one with more returns false. Without
-// it, a tile of up to `exact_colors` is reduced to `max_colors` whatever
-// that costs it (a quick first pass).
+// as many are tried (64 at most), and where the picture is smooth (no
+// strongly different neighbour) a pixel must keep its colour to within a
+// level: merged colours show there as bands. A tile that does not fit that
+// way returns false; with up to `exact_colors` it can still be coded as it
+// is (ExtractPalette). Without `faithful`, a tile of up to `exact_colors` is
+// reduced to `max_colors` whatever that costs it (a quick first pass).
 bool ExtractReducedPalette(const ImageView& img, const Rect& r, int max_colors, int exact_colors,
                            int max_source_colors, PaletteTile& out, bool* reduced = nullptr,
                            bool faithful = false);

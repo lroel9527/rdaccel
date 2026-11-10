@@ -1209,7 +1209,8 @@ TEST(Session, TextModePacesVideoPicturesAndStillDeliversThem) {
   EXPECT_LE(pictures, 1u + static_cast<size_t>(kSeconds * 100'000 / 8 * 0.25 / 2000) + 2);
   const size_t before = pictures;
   EXPECT_TRUE(host.work_pending());  // the last frames' tiles are still owed
-  for (int f = 0; f < 10 * kFps && host.work_pending(); ++f) {
+  // ... and then polished: 30 more pictures, at the same pace.
+  for (int f = 0; f < 60 * kFps && host.work_pending(); ++f) {
     t += 1'000'000 / kFps;
     host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
   }

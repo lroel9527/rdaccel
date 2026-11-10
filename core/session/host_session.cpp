@@ -375,8 +375,12 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     pending_sharpen_.clear();
   }
   // Tiles at video quality that the still-screen polish has yet to do.
+  // (Text mode polishes too, with half the pictures and within its video
+  // allowance: without it photos, icons and the wallpaper stayed as blocky
+  // as their first small picture left them.)
   const auto still_frames = static_cast<uint8_t>(
-      options_.still_min_qp > 0 && options_.refine_frames > 0 && !text ? std::clamp(options_.still_refine_frames, 0, static_cast<int>(kUnpolished) - 1) : 0);
+      options_.still_min_qp > 0 && options_.refine_frames > 0 && text ? std::clamp(options_.still_refine_frames / 2, 0, static_cast<int>(kUnpolished) - 1) :
+      options_.still_min_qp > 0 && options_.refine_frames > 0 ? std::clamp(options_.still_refine_frames, 0, static_cast<int>(kUnpolished) - 1) : 0);
   for (const auto& c : changes) polish_[static_cast<size_t>(c.row) * differ_.cols() + c.col] = kUnpolished;
   polish_owed_ = false;
   if (still_frames > 0 && !key) {
@@ -394,7 +398,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   // (Tiles of a held-back picture alone do not make a frame until the video
   // bucket lets a picture out.)
   if (changes.empty() && !key && (refining_ == 0 || hold_video) && refresh.empty() && !regions_to_send &&
-      !sharpen_video_ && !polish_owed_ && (hold_video || !text || carry_video_tiles_.empty())) {
+      !sharpen_video_ && (!polish_owed_ || hold_video) && (hold_video || !text || carry_video_tiles_.empty())) {
     quiet_ = true;
     moving_ = false;
     if (use_regions) FinishRegions(busy, region_changed);
@@ -715,6 +719,11 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
         // on a dark background did, at 16).
         palette = codec::ExtractReducedPalette(frame.bgra, r, options_.text_colors,
                                                options_.lossless_max_colors, 4096, t, nullptr, /*faithful=*/true);
+        // Not text (a gradient, a wallpaper, an icon): the video encoder's,
+        // which is good at these and polishes them once the screen is
+        // still. (Exact, as without text mode for up to 256 colours, such a
+        // tile costs 2-3 kB; a scroll over a textured background came to
+        // more traffic than without text mode.)
       }
     } else {
       palette = options_.lossless && codec::ExtractPalette(frame.bgra, r, max_colors, t);
@@ -1146,7 +1155,9 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   // Still-screen polish: with the screen nearly still, the tiles left at
   // video quality are taken from the next pictures too, and those are coded
   // with the lower QP floor (HostOptions::still_refine_frames).
-  const bool still = still_frames > 0 && quiet_ && !key && !sharpen;
+  // (Not while the video bucket holds pictures back: the tiles would count
+  // pictures that are never made.)
+  const bool still = still_frames > 0 && quiet_ && !key && !sharpen && !hold_video;
   if (still && polish_owed_) {
     std::vector<uint8_t> listed(n_tiles, 0);
     for (const auto& t : region_tiles) listed[tile_index(t)] = 1;
@@ -1200,6 +1211,10 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     mark_video_stale();
   } else if (key || !region_tiles.empty()) {
     encoder_->SetMinQp(still ? options_.still_min_qp : 0);
+    if (text && (still && polish_owed_) != text_polish_rate_) {
+      text_polish_rate_ = still && polish_owed_;
+      SetTextEncoderRate(text_polish_rate_);
+    }
     // (Text mode ends a progressive keyframe without the intra picture: the
     // tiles left at the first picture's quality are refined by the next.)
     video_pts_ = text && video_pts_ != 0
@@ -1396,17 +1411,25 @@ void HostSession::SetTextMode(bool on) {
   SetBitrate(options_.bitrate_bps);
 }
 
+void HostSession::SetTextEncoderRate(bool polish) {
+  // A picture of a quarter second of the video allowance, 2 kB at least (a
+  // hardware encoder's floor for a busy screen), as a rate at one picture
+  // per frame interval: that is how the encoder is clocked (video_pts_).
+  // Pictures that polish a still screen may be of 0.6 s of it: at the small
+  // size the wallpaper and the icons never got clean (5-7 levels off after
+  // 30 pictures); they still come no faster than the allowance lets them.
+  const double picture = std::max(2000.0, TextVideoRate(options_.bitrate_bps) * (polish ? 0.6 : 0.25));
+  encoder_->SetBitrate(static_cast<int64_t>(picture * 8.0 * std::max(1, options_.fps)));
+}
+
 void HostSession::SetBitrate(int64_t bps) {
   options_.bitrate_bps = bps;
   // Text mode: the encoder's share (pictures are paced to it as well, see
   // video_tokens_: hardware encoders do not go as low as they are asked).
   const bool text = options_.text_mode && options_.lossless;
   if (text) {
-    // A picture of a quarter second of the video share, 2 kB at least (a
-    // hardware encoder's floor for a busy screen), as a rate at one picture
-    // per frame interval: that is how the encoder is clocked (video_pts_).
-    const double picture = std::max(2000.0, TextVideoRate(bps) * 0.25);
-    encoder_->SetBitrate(static_cast<int64_t>(picture * 8.0 * std::max(1, options_.fps)));
+    text_polish_rate_ = false;
+    SetTextEncoderRate(false);
   } else {
     encoder_->SetBitrate(bps);
   }

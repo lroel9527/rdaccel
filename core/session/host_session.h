@@ -270,6 +270,9 @@ class HostSession {
   // a bitrate that works out to the picture size wanted (see SetBitrate),
   // every picture is about that size.
   uint64_t video_pts_ = 0;
+  // The encoder is set for polishing pictures (see SetTextEncoderRate).
+  bool text_polish_rate_ = false;
+  void SetTextEncoderRate(bool polish);
   // With a screenful owed (more than kTextCoarseBacklog tiles: the first
   // picture, a new window, a page that scrolled in), tiles the viewer has
   // nothing useful for first go out at kTextCoarseColors: a third of the
