@@ -43,8 +43,8 @@ extern "C" {
 /* ---- version ------------------------------------------------------------ */
 
 #define RDA_VERSION_MAJOR 1
-#define RDA_VERSION_MINOR 4
-#define RDA_VERSION_PATCH 5
+#define RDA_VERSION_MINOR 5
+#define RDA_VERSION_PATCH 0
 /* "rc1" and so on for a pre-release, "" for a release. rda_version() does
  * not include it; rda_version_string() does ("1.0.0-rc1"). */
 #define RDA_VERSION_PRERELEASE ""
@@ -493,6 +493,17 @@ typedef struct rda_host_config {
    * on the shared screen). 0: leave them out, so a viewer in the same
    * process does not film itself. macOS only; Linux captures everything. */
   int32_t capture_own_windows; /* 0 */
+
+  /* 1.5. 1: text mode, for links far too slow for the whole picture (tens
+   * of kbps to a few hundred). The bits go to text that is sharp: text and
+   * UI are reduced to 16 of their own colours (edges stay exact, the shades
+   * of anti-aliasing merge) and are never blurred through the video
+   * encoder; what the link cannot take yet stays as it was and follows
+   * sharp, newest changes first. Photos and video update a few times a
+   * second at most, the bitrate starts low and may follow the path down to
+   * 32 kbps (below min_bitrate_bps), the cursor is sent at most 30 times a
+   * second, video areas are off. See rda_host_set_text_mode(). */
+  int32_t text_mode; /* 0 */
 } rda_host_config;
 
 typedef struct rda_host_stats {
@@ -576,6 +587,12 @@ RDA_API rda_status rda_host_set_cursor_image(rda_host* h, const rda_cursor_image
 
 /* The next encoded frame becomes a full refresh. */
 RDA_API void rda_host_request_keyframe(rda_host* h);
+
+/* 1.5. Turns text mode (rda_host_config.text_mode) on or off while
+ * streaming; takes effect with the next frame. Turning it off refreshes the
+ * whole picture with exact colours. Thread-safe. */
+RDA_API void rda_host_set_text_mode(rda_host* h, int on);
+RDA_API int rda_host_get_text_mode(const rda_host* h);
 
 RDA_API rda_state rda_host_get_state(const rda_host* h);
 /* Sends an application message to the viewer. Thread-safe. RDA_ERR_BUSY

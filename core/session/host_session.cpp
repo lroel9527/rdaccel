@@ -60,6 +60,7 @@ HostSession::HostSession(transport::ITransport* transport,
     transport_->SetReceiver(
         [this](transport::Channel ch, std::span<const uint8_t> bytes) { OnReceive(ch, bytes); });
   }
+  if (options_.text_mode) SetBitrate(options_.bitrate_bps);  // the encoder's share
   SendHello();
 }
 
@@ -136,6 +137,8 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     pending_lossless_.assign(n_tiles, 0);
     pending_lossless_count_ = 0;
     unflattened_.assign(n_tiles, 0);
+    stale_.assign(n_tiles, 0);
+    coarse_.assign(n_tiles, 0);
   }
   // A keyframe starts the progressive sequence over.
   const bool progressive_key = key && options_.progressive && options_.lossless;
@@ -144,6 +147,9 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     pending_lossless_count_ = 0;
     pending_cursor_ = 0;
     std::fill(unflattened_.begin(), unflattened_.end(), 0);
+    std::fill(stale_.begin(), stale_.end(), 0);
+    std::fill(coarse_.begin(), coarse_.end(), 0);
+    urgent_.clear();
     progressive_active_ = progressive_key;
     sharpen_video_ = false;
     progressive_last_us_ = frame.capture_time_us;
@@ -152,7 +158,8 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
 
   // Video areas: their tiles leave the normal path and go to the area's own
   // stream (see EncodeRegions).
-  const bool use_regions = options_.region_encoder_factory && !regions_disabled_;
+  const bool text = options_.text_mode && options_.lossless;
+  const bool use_regions = options_.region_encoder_factory && !regions_disabled_ && !text;
   if (regions_.cols() != differ_.cols() || regions_.rows() != differ_.rows()) {
     regions_.Reset(width_, height_);
   }
@@ -204,8 +211,12 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     // sends nothing, so the owed tiles may use most of the link, and the
     // bucket holds one re-send's worth.
     const bool still = changes.empty() && !key && !holding_back_;
-    const double burst_us = still ? std::max(kLosslessBurstFrames * frame_us, 100'000.0)
-                                  : kLosslessBurstFrames * frame_us;
+    // Text mode: 150 ms of it, so that what a key press changes goes out
+    // at once after a pause (at 100 kbps three frame intervals hold 1.2 kB,
+    // less than one tile of text).
+    const double burst_us = text ? std::max(kLosslessBurstFrames * frame_us, 150'000.0)
+                            : still ? std::max(kLosslessBurstFrames * frame_us, 100'000.0)
+                                    : kLosslessBurstFrames * frame_us;
     const double cap = static_cast<double>(options_.bitrate_bps) / 8.0 * burst_us / 1e6;
     if (!lossless_tokens_set_) {
       lossless_tokens_ = cap;
@@ -219,7 +230,8 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       // screen stops: at 0.4 Mbps a scroll's new rows of text alone need
       // more than the link, and showing every frame beats showing them exact
       // while they fly past.
-      const double share = moving_ ? kLosslessMovingShare
+      const double share = text ? kTextLosslessShare
+                           : moving_ ? kLosslessMovingShare
                            : (progressive_active_ || still) && !holding_back_ ? kProgressiveShare
                                                                               : kLosslessRateShare;
       const double gap_us = static_cast<double>(frame.capture_time_us -
@@ -229,7 +241,20 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     }
     lossless_tokens_us_ = frame.capture_time_us;
     lossless_cap_ = cap;
+    // The video bucket (text mode).
+    const double video_rate = static_cast<double>(options_.bitrate_bps) / 8.0 * kTextVideoShare;
+    if (video_tokens_us_ != 0) {
+      const double gap_us = static_cast<double>(frame.capture_time_us -
+                                                std::min(frame.capture_time_us, video_tokens_us_));
+      video_tokens_ = std::min(video_rate, video_tokens_ + video_rate * gap_us / 1e6);
+    }
+    video_tokens_us_ = frame.capture_time_us;
   }
+  // Text mode: no video picture while the video bucket is overdrawn (a
+  // keyframe goes out regardless).
+  const bool hold_video = text && !key && video_tokens_ < 0;
+  // Text mode: a screenful is owed, so tiles get their quick pass first.
+  const bool coarse_now = text && pending_lossless_count_ > kTextCoarseBacklog;
   // Tiles the viewer shows at first-pass video quality (or copies of such)
   // that have been static for a while get sent again properly.
   std::vector<size_t> refresh;
@@ -265,7 +290,8 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   }
   // Tiles the budget sent as video wait for a nearly still screen (they
   // would take from the video otherwise); a progressive keyframe goes on.
-  if (!key && pending_lossless_count_ > 0 && (progressive_active_ || quiet_)) {
+  // In text mode they were not sent as video, so they need not wait.
+  if (!key && pending_lossless_count_ > 0 && (progressive_active_ || quiet_ || text)) {
     std::vector<uint8_t> listed(n_tiles, 0);
     for (const auto& c : changes) listed[static_cast<size_t>(c.row) * differ_.cols() + c.col] = 1;
     for (size_t idx : refresh) listed[idx] = 1;
@@ -289,10 +315,19 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     const auto n = static_cast<size_t>(std::clamp(
         fits, one ? 1.0 : 0.0,
         static_cast<double>(kMaxProgressivePerFrame)));
+    // Text mode: first what was deferred as it changed, newest first.
+    while (!urgent_.empty() && progressive_sent < n) {
+      const size_t idx = urgent_.back();
+      urgent_.pop_back();
+      if (idx >= n_tiles || !pending_lossless_[idx] || listed[idx] || progressive_now[idx]) continue;
+      refresh.push_back(idx);
+      progressive_now[idx] = 1;
+      ++progressive_sent;
+    }
     const size_t start = pending_cursor_;
     for (size_t k = 0; k < n_tiles && progressive_sent < n && pending_lossless_count_ > 0; ++k) {
       const size_t idx = (start + k) % n_tiles;
-      if (!pending_lossless_[idx]) continue;
+      if (!pending_lossless_[idx] || progressive_now[idx]) continue;
       if (listed[idx]) continue;  // changed anyway: coded normally below
       const auto col = static_cast<int32_t>(idx % differ_.cols());
       const auto row = static_cast<int32_t>(idx / differ_.cols());
@@ -326,7 +361,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   }
   // Tiles at video quality that the still-screen polish has yet to do.
   const auto still_frames = static_cast<uint8_t>(
-      options_.still_min_qp > 0 && options_.refine_frames > 0 ? std::clamp(options_.still_refine_frames, 0, static_cast<int>(kUnpolished) - 1) : 0);
+      options_.still_min_qp > 0 && options_.refine_frames > 0 && !text ? std::clamp(options_.still_refine_frames, 0, static_cast<int>(kUnpolished) - 1) : 0);
   for (const auto& c : changes) polish_[static_cast<size_t>(c.row) * differ_.cols() + c.col] = kUnpolished;
   polish_owed_ = false;
   if (still_frames > 0 && !key) {
@@ -341,8 +376,10 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       polish_owed_ = regions_.RegionOf(col, row) < 0;  // areas have encoders of their own
     }
   }
-  if (changes.empty() && !key && refining_ == 0 && refresh.empty() && !regions_to_send &&
-      !sharpen_video_ && !polish_owed_) {
+  // (Tiles of a held-back picture alone do not make a frame until the video
+  // bucket lets a picture out.)
+  if (changes.empty() && !key && (refining_ == 0 || hold_video) && refresh.empty() && !regions_to_send &&
+      !sharpen_video_ && !polish_owed_ && (hold_video || !text || carry_video_tiles_.empty())) {
     quiet_ = true;
     moving_ = false;
     if (use_regions) FinishRegions(busy, region_changed);
@@ -375,7 +412,8 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
         auto seen = seen_.find(c.prev_hash);
         recurring = seen != seen_.end() && seen->second >= 2;
       }
-      if ((stable || recurring) && !cache_.Find(c.prev_hash)) {
+      // (Not what the viewer does not have: see stale_.)
+      if ((stable || recurring) && !cache_.Find(c.prev_hash) && !stale_[tile_index(c)]) {
         if (!stable) --recurring_budget;
         const uint32_t slot = cache_.Insert(c.prev_hash);
         slot_quality_[slot] = quality_[tile_index(c)];
@@ -431,6 +469,13 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     born = frame_no_;
   }
 
+  // Text mode: many tiles that change every frame are an animation or a
+  // video, not typing (see code_rect).
+  constexpr size_t kTextMaxHotTiles = 8;
+  size_t n_hot = 0;
+  for (bool h : hot) n_hot += h;
+  const bool animation = text && n_hot > kTextMaxHotTiles;
+
   std::vector<tile::Move> moves;
   std::vector<bool> moved;
   std::vector<std::vector<Rect>> residual;
@@ -471,6 +516,31 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   };
   std::vector<uint8_t> move_quality;
   for (const auto& m : moves) move_quality.push_back(quality_under(m.src()));
+  // Whether a moved rect copies from a tile the viewer does not have.
+  std::vector<uint8_t> move_stale;
+  bool any_move_stale = false;
+  for (const auto& m : moves) {
+    const Rect r = m.src();
+    uint8_t st = 0;
+    for (int32_t row = r.y / kTileSize; row <= (r.bottom() - 1) / kTileSize; ++row) {
+      for (int32_t col = r.x / kTileSize; col <= (r.right() - 1) / kTileSize; ++col) {
+        st |= stale_[static_cast<size_t>(row) * differ_.cols() + col];
+      }
+    }
+    move_stale.push_back(st);
+    any_move_stale |= st != 0;
+  }
+  auto moved_in_stale = [&](const Rect& tile_rect) {
+    if (!any_move_stale) return false;
+    for (size_t k = 0; k < moves.size(); ++k) {
+      const Rect& d = moves[k].dst;
+      if (move_stale[k] && d.x < tile_rect.right() && tile_rect.x < d.right() && d.y < tile_rect.bottom() &&
+          tile_rect.y < d.bottom()) {
+        return true;
+      }
+    }
+    return false;
+  };
   // Quality of what each moved tile receives from the moves.
   auto moved_in_quality = [&](const Rect& tile_rect) {
     uint8_t q = kExact;
@@ -487,7 +557,9 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   std::vector<codec::SlotOp> loads;
   std::vector<codec::PaletteTile> lossless_tiles;
   std::vector<tile::TileChange> video_tiles;  // video coded, whole or in part
-  const auto refine_frames = static_cast<uint8_t>(std::clamp(options_.refine_frames, 0, 255));
+  // Text mode: every picture is dear, two refinements must do.
+  const auto refine_frames =
+      static_cast<uint8_t>(std::clamp(text ? std::min(options_.refine_frames, 2) : options_.refine_frames, 0, 255));
   auto set_refine = [&](const tile::TileChange& c, uint8_t v) {
     uint8_t& r = refine_[tile_index(c)];
     refining_ += (v > 0) - (r > 0);
@@ -504,10 +576,20 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   // within the budget of those frames.
   const double lossless_budget = lossless_tokens_;
   double lossless_spent = 0;  // estimated
+  double lossless_raw = 0;    // raw size of the tiles that go out
   bool over_lossless_budget = false;
+  auto owe_lossless = [&](size_t idx) {
+    if (!pending_lossless_[idx]) {
+      pending_lossless_[idx] = 1;
+      ++pending_lossless_count_;
+    }
+  };
   // Codes `r` (all or part of tile `c`) losslessly if it has few colours,
-  // else through the video encoder. Returns true for video.
-  auto code_rect = [&](const tile::TileChange& c, const Rect& r, bool is_hot) {
+  // else through the video encoder. Returns kCodedLossless, kCodedVideo, or
+  // (text mode) kDeferred: nothing was sent, the tile is stale and owed.
+  enum : int { kCodedLossless = 0, kCodedVideo = 1, kDeferred = 2 };
+  bool last_coarse = false;  // the last rect went out at the quick pass's colours
+  auto code_rect = [&](const tile::TileChange& c, const Rect& r, bool is_hot) -> int {
     // Lossless pays off on content that stays, or on a thin sliver; content
     // that keeps changing is cheaper as video unless it is very simple.
     const bool sliver = r.h * 4 <= kTileSize || r.w * 4 <= kTileSize;
@@ -521,44 +603,83 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       max_colors = std::max(std::min(max_colors, r.w * r.h / 6), options_.lossless_max_colors_hot);
     }
     codec::PaletteTile t;
-    if (options_.lossless && codec::ExtractPalette(frame.bgra, r, max_colors, t)) {
+    // Text mode: reduced colours, and what changes every frame is held to
+    // the budget instead of a colour limit (typing must not turn to video).
+    bool palette = false;
+    last_coarse = false;
+    if (text) {
+      const size_t idx = tile_index(c);
+      // The quick pass: a whole tile on its turn, which the viewer has
+      // nothing useful for (stale, or a keyframe's), once.
+      if (coarse_now && !progressive_now.empty() && progressive_now[idx] && !coarse_[idx] &&
+          (progressive_active_ || (stale_[idx] & kStaleText))) {
+        palette = codec::ExtractReducedPalette(frame.bgra, r, kTextCoarseColors, options_.lossless_max_colors,
+                                               4096, t, &last_coarse);
+      }
+      if (!palette) {
+        last_coarse = false;
+        palette = codec::ExtractReducedPalette(frame.bgra, r, options_.text_colors,
+                                               options_.lossless_max_colors, 4096, t);
+      }
+    } else {
+      palette = options_.lossless && codec::ExtractPalette(frame.bgra, r, max_colors, t);
+    }
+    if (palette) {
       if (progressive_key && t.colors.size() > 1) {
         // Video now, lossless later (only whole tiles are keyframe changes).
         // Plain tiles cost next to nothing either way and go right away.
-        const size_t idx = tile_index(c);
-        if (!pending_lossless_[idx]) {
-          pending_lossless_[idx] = 1;
-          ++pending_lossless_count_;
+        owe_lossless(tile_index(c));
+        if (text) {
+          // The picture shows the tile's background until its text comes.
+          FillRect(r, t.colors[0], enc_input_.data(), enc_stride);
+        } else {
+          CopyRectInto(frame.bgra, r, enc_input_.data(), enc_stride);
         }
-        CopyRectInto(frame.bgra, r, enc_input_.data(), enc_stride);
         tile::TileChange part = c;
         part.rect = r;
         video_tiles.push_back(part);
-        return true;
+        return kCodedVideo;
       }
       const bool progressive_turn = !progressive_now.empty() && progressive_now[tile_index(c)];
       const size_t n = t.colors.size();
       const int bits = n <= 1 ? 0 : n <= 2 ? 1 : n <= 4 ? 2 : n <= 16 ? 4 : 8;
       // Plus the rect and the palette size (a plain sliver costs that alone).
       const double raw = 3.0 * static_cast<double>(n) + static_cast<double>(r.w) * r.h * bits / 8.0;
-      if (!key && !progressive_turn && n > 1 && options_.bitrate_bps > 0 &&
-          lossless_spent + raw * kLosslessRawShare > lossless_budget) {
+      // Text mode counts a tile at what tiles have been deflating to, and
+      // lets the first of a frame through while the bucket is not overdrawn
+      // (at these rates one tile is more than a frame's share).
+      const double cost = text ? raw * lossless_ratio_ : raw * kLosslessRawShare;
+      // Text mode, part of an animation (flat-coloured video, a busy
+      // progress display): sent every frame it would take the budget from
+      // the text. It waits its turn with the tiles that are owed, so it
+      // updates as often as the path allows, sharp, and what is typed
+      // meanwhile still goes first.
+      const bool animated = animation && is_hot && !sliver &&
+                            static_cast<int>(n) > options_.lossless_max_colors_hot;
+      const bool over = animated ||
+                        (text ? lossless_budget <= 0 || (lossless_spent > 0 && lossless_spent + cost > lossless_budget)
+                              : lossless_spent + cost > lossless_budget);
+      if (!key && !progressive_turn && n > 1 && options_.bitrate_bps > 0 && over) {
         over_lossless_budget = true;
         // Owed: sent losslessly once it stops changing, within the bucket
         // (the same queue as a progressive keyframe's tiles). Without this
         // the tile stayed at video quality (refresh is off by default).
         const size_t idx = tile_index(c);
-        if (!pending_lossless_[idx]) {
-          pending_lossless_[idx] = 1;
-          ++pending_lossless_count_;
+        owe_lossless(idx);
+        if (text) {
+          // Not as video in between: the viewer keeps what it has.
+          stale_[idx] |= kStaleText;
+          if (!animated && urgent_.size() < 4096) urgent_.push_back(idx);
+          return kDeferred;
         }
         CopyRectInto(frame.bgra, r, enc_input_.data(), enc_stride);
         tile::TileChange part = c;
         part.rect = r;
         video_tiles.push_back(part);
-        return true;
+        return kCodedVideo;
       }
-      lossless_spent += raw * kLosslessRawShare;
+      lossless_spent += cost;
+      lossless_raw += raw;
       if (progressive_turn) {
         // Flattening it now would make the encoder code the change, and at a
         // low bitrate that costs the tiles still refining around it.
@@ -567,13 +688,13 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
         FillRect(r, t.colors[0], enc_input_.data(), enc_stride);
       }
       lossless_tiles.push_back(std::move(t));
-      return false;
+      return kCodedLossless;
     }
     CopyRectInto(frame.bgra, r, enc_input_.data(), enc_stride);
     tile::TileChange part = c;
     part.rect = r;
     video_tiles.push_back(part);
-    return true;
+    return kCodedVideo;
   };
   // The previous frame's pixels of the tile being processed (prev_ is updated
   // as tiles are processed).
@@ -657,9 +778,15 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   const size_t n_changed = changes.size() - refresh.size();
   quiet_ = n_changed * 50 <= n_tiles;
   std::vector<size_t> refine_after;  // tiles that went to video whole
+  std::vector<uint8_t> recoded(text ? n_tiles : 0, 0);
   for (size_t i = 0; i < changes.size(); ++i) {
     const auto& c = changes[i];
     const size_t idx = tile_index(c);
+    // The viewer does not have the tile as it was (text mode): nothing in
+    // it can be taken as unchanged, so it is coded whole.
+    const bool was_stale = stale_[idx] != 0;
+    if (text) recoded[idx] = 1;
+    if (i < n_changed) coarse_[idx] = 0;  // new content
     if (i < n_changed) {
       for (int32_t y = 0; y < c.rect.h; ++y) {
         std::memcpy(prev_tile.data() + static_cast<size_t>(y) * kTileSize * 4,
@@ -676,9 +803,15 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       pending_lossless_[idx] = 0;
       --pending_lossless_count_;
     }
-    if (i < n_changed && !moved.empty() && moved[i]) {
+    if (i < n_changed && !moved.empty() && moved[i] && !was_stale) {
       ++moved_tiles;
       uint8_t q = moved_in_quality(c.rect);
+      if (moved_in_stale(c.rect)) {
+        // Copied from a tile the viewer does not have: owed as a whole.
+        stale_[idx] |= kStaleText;
+        owe_lossless(idx);
+        q = kRough;
+      }
       if (!residual[i].empty()) q = std::min(q, quality_[idx]);  // rows that stayed put
       // Only the rows that did not move or stay put are left to code, and of
       // those, what a dragged window just uncovered can come from the cache.
@@ -696,13 +829,14 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       if (auto slot = cache_.Find(c.hash)) {
         loads.push_back({*slot, c.rect});
         quality_[idx] = slot_quality_[*slot];
+        stale_[idx] = 0;
         continue;
       }
     }
     // A tile that was static and now changes partly (typing into a line
     // that was stored, a menu closing) may get most of its pixels from the
     // slot; hot tiles (video, animation) are left whole.
-    if (i < n_changed && !hot[i]) {
+    if (i < n_changed && !hot[i] && !was_stale) {
       uint8_t q = kExact;
       const auto parts = paint_from_slot(c, c.rect, 0.25, q);
       if (parts.size() != 1 || parts[0] != c.rect) {
@@ -713,12 +847,29 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
         continue;
       }
     }
-    if (code_rect(c, c.rect, i < n_changed && hot[i])) {
+    const int how = code_rect(c, c.rect, i < n_changed && hot[i]);
+    if (how == kDeferred) {
+      quality_[idx] = kRough;
+    } else if (how == kCodedVideo) {
       refine_after.push_back(i);
       quality_[idx] = kRough;
+      stale_[idx] = 0;
     } else {
-      quality_[idx] = kExact;
+      // (A quick pass leaves it rough: it is sent again once the screen is
+      // still, like a tile left at video quality.)
+      quality_[idx] = last_coarse ? kRough : kExact;
+      coarse_[idx] = last_coarse;
+      stale_[idx] = 0;
     }
+  }
+  coarse_count_ = 0;
+  for (uint8_t v : coarse_) coarse_count_ += v;
+  // Text mode: a tile coded again is no longer taken from a picture that
+  // was held back (if it is video again, it is listed anew below). Listing
+  // it with a later picture would paint that picture's flattened tile over
+  // text the viewer has received since.
+  if (text && !carry_video_tiles_.empty()) {
+    std::erase_if(carry_video_tiles_, [&](const tile::TileChange& t) { return recoded[tile_index(t)] != 0; });
   }
   // The viewer takes this frame's video tiles plus the ones still refining,
   // and those of a picture the encoder dropped.
@@ -915,11 +1066,31 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   const uint64_t t1 = capture::MonotonicMicros();
 
   std::optional<codec::HevcAccessUnit> au;
-  if (key || !region_tiles.empty()) {
+  // The viewer does not get these tiles' new content with this frame.
+  auto mark_video_stale = [&] {
+    if (!text) return;
+    for (const auto& t : video_tiles) stale_[tile_index(t)] |= kStaleVideo;
+  };
+  if (hold_video && !region_tiles.empty()) {
+    // Text mode, the video bucket is overdrawn: like a picture the encoder
+    // dropped, except that it was never asked. The encoder's input holds
+    // this frame, so a later picture carries these tiles.
+    carry_video_tiles_.insert(carry_video_tiles_.end(), region_tiles.begin(), region_tiles.end());
+    mark_video_stale();
+  } else if (key || !region_tiles.empty()) {
     encoder_->SetMinQp(still ? options_.still_min_qp : 0);
-    au = encoder_->Encode({enc_input_.data(), width_, height_, enc_stride}, frame.capture_time_us,
-                          key || sharpen);
+    // (Text mode ends a progressive keyframe without the intra picture: the
+    // tiles left at the first picture's quality are refined by the next.)
+    video_pts_ = text && video_pts_ != 0
+                     ? std::min(frame.capture_time_us,
+                                video_pts_ + static_cast<uint64_t>(1'000'000 / std::max(1, options_.fps)))
+                     : frame.capture_time_us;
+    au = encoder_->Encode({enc_input_.data(), width_, height_, enc_stride}, video_pts_, key || (sharpen && !text));
+    if (au && text) {
+      for (auto& st : stale_) st &= static_cast<uint8_t>(~kStaleVideo);
+    }
     if (!au && !key && encoder_->last_error().empty()) {
+      mark_video_stale();
       // The encoder chose to drop this picture (VideoToolbox does at low
       // rates). Its references are intact and its input already holds this
       // frame, so the next picture carries these changes: send the rest of
@@ -993,7 +1164,20 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     lossless_bytes_per_tile_ = 0.7 * lossless_bytes_per_tile_ +
                                0.3 * static_cast<double>(lossless_data.size()) / static_cast<double>(n_lossless);
   }
+  if (n_lossless > 0 && lossless_raw > 256) {
+    lossless_ratio_ = std::clamp(
+        0.8 * lossless_ratio_ + 0.2 * static_cast<double>(lossless_data.size()) / lossless_raw, 0.05, 1.0);
+  }
   const uint64_t t3 = capture::MonotonicMicros();
+  if (text && !au && region_bytes.empty() && lossless_data.empty()) {
+    // Everything this frame changed waits (for the lossless budget, or for
+    // the next video picture): no frame goes out. At these rates even an
+    // empty one a frame interval adds up.
+    --next_frame_id_;
+    std::lock_guard<std::mutex> lock(mu_);
+    ++stats_.frames_skipped;
+    return true;
+  }
 
   std::vector<uint8_t> bytes;
   proto::EncodeTo(proto::FrameBegin{id, frame.capture_time_us}, bytes);
@@ -1032,6 +1216,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   stats_.region_encode_us_total += region_us;
   stats_.lossless_bytes += lossless_data.size();
   lossless_tokens_ -= static_cast<double>(lossless_data.size());
+  video_tokens_ -= static_cast<double>(video_bytes);
   stats_.lossless_tiles += n_lossless;
   stats_.moved_tiles += moved_tiles;
   moving_ = moved_tiles > 0 && over_lossless_budget;
@@ -1060,9 +1245,39 @@ int64_t HostSession::RegionBitrate(const Rect& r) const {
   return bps;
 }
 
+void HostSession::SetTextMode(bool on) {
+  if (on == options_.text_mode) return;
+  options_.text_mode = on;
+  if (on) {
+    // Video areas go back to the normal path.
+    for (const auto& reg : regions_.regions()) {
+      for (size_t idx : TilesOf(reg.rect)) pending_sharpen_.push_back(idx);
+    }
+    regions_.Clear();
+    region_enc_.clear();
+    video_tokens_ = 0;
+    video_tokens_us_ = 0;
+  } else {
+    // Exact colours again, and nothing stale: a full refresh.
+    force_keyframe_ = true;
+  }
+  SetBitrate(options_.bitrate_bps);
+}
+
 void HostSession::SetBitrate(int64_t bps) {
   options_.bitrate_bps = bps;
-  encoder_->SetBitrate(bps);
+  // Text mode: the encoder's share (pictures are paced to it as well, see
+  // video_tokens_: hardware encoders do not go as low as they are asked).
+  const bool text = options_.text_mode && options_.lossless;
+  if (text) {
+    // A picture of a quarter second of the video share, 2 kB at least (a
+    // hardware encoder's floor for a busy screen), as a rate at one picture
+    // per frame interval: that is how the encoder is clocked (video_pts_).
+    const double picture = std::max(2000.0, static_cast<double>(bps) / 8.0 * kTextVideoShare * 0.25);
+    encoder_->SetBitrate(static_cast<int64_t>(picture * 8.0 * std::max(1, options_.fps)));
+  } else {
+    encoder_->SetBitrate(bps);
+  }
   for (auto& [stream, re] : region_enc_) {
     for (const auto& reg : regions_.regions()) {
       if (reg.stream == stream && re.enc) re.enc->SetBitrate(RegionBitrate(reg.rect));

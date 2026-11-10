@@ -37,8 +37,8 @@ struct Counter {
 
 TEST(CApi, Version) {
   EXPECT_EQ(rda_version(), RDA_VERSION);
-  EXPECT_EQ(rda_version(), RDA_MAKE_VERSION(1, 4, 5));
-  EXPECT_STREQ(rda_version_string(), "1.4.5");
+  EXPECT_EQ(rda_version(), RDA_MAKE_VERSION(1, 5, 0));
+  EXPECT_STREQ(rda_version_string(), "1.5.0");
   EXPECT_GT(std::strlen(rda_platform_name()), 0u);
   EXPECT_STREQ(rda_status_str(RDA_ERR_TIMEOUT), "RDA_ERR_TIMEOUT");
   EXPECT_STREQ(rda_status_str(static_cast<rda_status>(-999)), "RDA_ERR_UNKNOWN");
@@ -116,6 +116,30 @@ TEST(CApi, OlderShorterStructsAreAccepted) {
   ASSERT_EQ(rda_pipe_create(&a, &b), RDA_OK);
   rda_transport_destroy(b);
   ASSERT_EQ(rda_host_create(a, &v10, &h), RDA_OK);
+  rda_host_destroy(h);
+
+  // A 1.4 program: its config ends before text_mode (1.5), which stays off.
+  EXPECT_EQ(full.text_mode, 0);
+  rda_host_config v14 = full;
+  v14.struct_size = offsetof(rda_host_config, text_mode);
+  v14.text_mode = 1;  // beyond its struct: must be ignored
+  ASSERT_EQ(rda_pipe_create(&a, &b), RDA_OK);
+  rda_transport_destroy(b);
+  ASSERT_EQ(rda_host_create(a, &v14, &h), RDA_OK);
+  EXPECT_EQ(rda_host_get_text_mode(h), 0);
+  // ... and it can be switched while streaming.
+  rda_host_set_text_mode(h, 1);
+  EXPECT_EQ(rda_host_get_text_mode(h), 1);
+  rda_host_set_text_mode(h, 0);
+  EXPECT_EQ(rda_host_get_text_mode(h), 0);
+  rda_host_destroy(h);
+  rda_host_set_text_mode(nullptr, 1);  // no host: nothing happens
+  EXPECT_EQ(rda_host_get_text_mode(nullptr), 0);
+  full.text_mode = 1;
+  ASSERT_EQ(rda_pipe_create(&a, &b), RDA_OK);
+  rda_transport_destroy(b);
+  ASSERT_EQ(rda_host_create(a, &full, &h), RDA_OK);
+  EXPECT_EQ(rda_host_get_text_mode(h), 1);
   rda_host_destroy(h);
 
   // Stats into a shorter struct: only the known prefix is written.

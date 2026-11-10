@@ -77,6 +77,29 @@ struct HostOptions {
   // within about half the bitrate budget.
   bool progressive = true;
 
+  // Text mode, for links far too slow for the picture as a whole (tens of
+  // kbps to a few hundred): what bits there are go to text that is sharp.
+  //   * Tiles are reduced to `text_colors` of their own colours before the
+  //     lossless layer (codec::ExtractReducedPalette): edges stay where they
+  //     are, the shades of anti-aliasing merge, and a page of text costs
+  //     about 40% of its exact size. Text on a soft gradient or a
+  //     translucent panel (more than lossless_max_colors colours) qualifies
+  //     too, where it would otherwise be video coded and blurred.
+  //   * Text is never sent as video first: tiles beyond the lossless budget
+  //     stay as the viewer has them (stale) and follow, sharp, as the budget
+  //     allows, whether the screen is still or not. A blurred preview costs
+  //     the bits of several sharp tiles.
+  //   * A hardware encoder spends ~2 kB on a picture of a busy screen however
+  //     low its bitrate, so video pictures are paced to a share of the
+  //     bitrate (kTextVideoShare): photos and video update a few times a
+  //     second at most. No video areas, no still-screen polish, two
+  //     refinement pictures.
+  //   * A keyframe's picture shows text tiles as their background colour
+  //     (a few kB instead of tens), and the text follows top to bottom.
+  // See SetTextMode() to switch while streaming.
+  bool text_mode = false;
+  int text_colors = 16;
+
   // Video region streams. Off unless an encoder factory is given.
   using EncoderFactory = std::function<std::unique_ptr<codec::IHevcEncoder>(
       const codec::EncoderConfig&, std::string* error)>;
@@ -114,6 +137,12 @@ class HostSession {
   // encoder gets `bps`, each video area its share of it.
   void SetBitrate(int64_t bps);
 
+  // Turns text mode (HostOptions::text_mode) on or off between frames. Off
+  // makes the next frame a keyframe: the reduced colours are replaced by the
+  // exact ones. Not thread-safe against OnFrame.
+  void SetTextMode(bool on);
+  bool text_mode() const { return options_.text_mode; }
+
   // Makes the next encoded frame a keyframe.
   void RequestKeyframe() { force_keyframe_ = true; }
   // Sends the stream's Hello again (thread-safe), for a viewer that
@@ -128,7 +157,7 @@ class HostSession {
   // last frame instead. Not thread-safe against OnFrame.
   bool work_pending() const {
     return force_keyframe_ || !carry_video_tiles_.empty() || pending_lossless_count_ > 0 || refining_ > 0 ||
-           polish_owed_;
+           polish_owed_ || coarse_count_ > 0;
   }
 
   // The screen as of the last frame passed to OnFrame (BGRA, rows of
@@ -179,6 +208,48 @@ class HostSession {
   static constexpr uint8_t kUnpolished = 255;
   std::vector<uint8_t> polish_;
   bool polish_owed_ = false;  // some tile is waiting for, or in, its polish
+
+  // Text mode. Per tile, what the viewer shows is not what the host had in
+  // the previous frame: kStaleText = part of it waits for the lossless
+  // budget (it is in pending_lossless_ too); kStaleVideo = a video picture
+  // that carries it was held back or dropped. Such a tile is coded whole
+  // when it changes again (nothing in it may be assumed unchanged), is not
+  // stored in the tile cache, and what is copied out of it is owed as well.
+  static constexpr uint8_t kStaleText = 1;
+  static constexpr uint8_t kStaleVideo = 2;
+  std::vector<uint8_t> stale_;
+  // Video pictures are paced by a bucket of bytes that fills at
+  // kTextVideoShare of the bitrate and holds a second of it; a picture goes
+  // out while it is not overdrawn.
+  static constexpr double kTextVideoShare = 0.25;
+  static constexpr double kTextLosslessShare = 0.75;
+  double video_tokens_ = 0;
+  uint64_t video_tokens_us_ = 0;
+  // The encoder's clock in text mode: one frame interval per picture, not
+  // the capture time. Its rate control budgets by elapsed time, so a
+  // picture after a pause of seconds came out at 9 kB (0.7 s of a 100 kbps
+  // path, during which nothing typed gets through). With an even clock, and
+  // a bitrate that works out to the picture size wanted (see SetBitrate),
+  // every picture is about that size.
+  uint64_t video_pts_ = 0;
+  // With a screenful owed (more than kTextCoarseBacklog tiles: the first
+  // picture, a new window, a page that scrolled in), tiles the viewer has
+  // nothing useful for first go out at kTextCoarseColors: a third of the
+  // bytes again, so a page is readable in a third of the time. Such a tile
+  // counts as rough (coarse_ remembers that it had its quick pass) and is
+  // sent again at text_colors once the rest is done and the screen is
+  // nearly still.
+  static constexpr size_t kTextCoarseBacklog = 48;
+  static constexpr int kTextCoarseColors = 4;
+  std::vector<uint8_t> coarse_;
+  size_t coarse_count_ = 0;
+  // Tiles deferred when they changed (not a keyframe's): they go before the
+  // rest of what is owed, newest first, so that what the user is typing
+  // does not wait behind a screenful that is still turning sharp.
+  std::vector<size_t> urgent_;
+  // Deflated size of lossless tiles over their raw (palette + index) size,
+  // a running estimate: what a tile is counted at against the budget.
+  double lossless_ratio_ = 0.4;
 
   // Tile cache bookkeeping (see OnFrame).
   static constexpr uint64_t kStableFrames = 8;

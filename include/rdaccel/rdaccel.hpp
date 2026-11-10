@@ -604,6 +604,8 @@ struct HostConfig {
   bool keep_serving = true;
   // Also capture this process's own windows (rda_host_config.capture_own_windows).
   bool capture_own_windows = false;
+  // Text mode (rda_host_config.text_mode): sharp text on very slow links.
+  bool text_mode = false;
   // Whether a viewer may connect, from its auth token (transport thread).
   // Empty = everyone may.
   std::function<bool(std::span<const uint8_t> token)> auth;
@@ -694,6 +696,7 @@ class Host {
     c.peer_timeout_ms = config.peer_timeout_ms;
     c.keep_serving = config.keep_serving ? 1 : 0;
     c.capture_own_windows = config.capture_own_windows ? 1 : 0;
+    c.text_mode = config.text_mode ? 1 : 0;
     if (!config.encryption_key.empty() && config.encryption_key.size() != 32) {
       create_error_ = "encryption_key must be 32 bytes";
       return;
@@ -828,6 +831,11 @@ class Host {
     rda_host_set_cursor_image(h_, &ci);
   }
 
+  // Text mode on or off while streaming (rda_host_set_text_mode).
+  void SetTextMode(bool on) {
+    if (h_) rda_host_set_text_mode(h_, on ? 1 : 0);
+  }
+  bool text_mode() const { return h_ && rda_host_get_text_mode(h_) != 0; }
   void RequestKeyframe() {
     if (h_) rda_host_request_keyframe(h_);
   }

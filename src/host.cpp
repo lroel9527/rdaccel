@@ -106,13 +106,15 @@ struct Host::Impl {
 
   void PollCursor(std::unique_ptr<capture::ICursorSource> src) {
     const int hz = std::clamp(config.cursor_poll_hz, 1, 1000);
-    const auto period = std::chrono::microseconds(1'000'000 / hz);
+    const auto full_period = std::chrono::microseconds(1'000'000 / hz);
+    // Text mode: a moving pointer at 120 Hz is 16 kbps of positions.
+    const auto text_period = std::chrono::microseconds(1'000'000 / std::min(hz, kTextCursorHz));
     auto next = std::chrono::steady_clock::now();
     capture::CursorSample s;
     CursorImage original;      // as the source reported it
     double sent_factor = 0;    // scale of the image last sent (0 = none sent)
     while (cursor_running) {
-      next += period;
+      next += text_mode ? text_period : full_period;
       std::this_thread::sleep_until(next);
       if (!src->Poll(s)) continue;
       const int32_t w = frame_w, h = frame_h;
@@ -197,6 +199,17 @@ struct Host::Impl {
   int32_t width = 0, height = 0;
 
   std::unique_ptr<session::RateController> rate;  // only touched under submit_mu
+  // Text mode (HostConfig::text_mode): as asked for, and as the session and
+  // the rate controller were last set up (under submit_mu).
+  static constexpr int kTextCursorHz = 30;
+  static constexpr int64_t kTextMinBitrate = 32'000;
+  static constexpr int32_t kTextMaxQueueMs = 150;
+  static constexpr int64_t kTextStartBitrate = 96'000;
+  std::atomic<bool> text_mode{false};
+  bool text_applied = false;
+  int64_t StartBitrate() const {
+    return text_applied ? std::min(config.bitrate_bps, kTextStartBitrate) : config.bitrate_bps;
+  }
 
   mutable std::mutex mu;  // guards the fields below
   uint64_t frames_dropped_congestion = 0;
@@ -411,8 +424,16 @@ struct Host::Impl {
       return false;
     }
     const bool resized = session && (f.bgra.width != width || f.bgra.height != height);
+    const bool want_text = text_mode;
+    if (want_text != text_applied) {
+      text_applied = want_text;
+      if (session) session->SetTextMode(want_text);
+      // Its floor and starting point differ: measure the path anew.
+      rate.reset();
+      log::Info(want_text ? "text mode on" : "text mode off");
+    }
     if (!session || resized) {
-      codec::EncoderConfig cfg{f.bgra.width, f.bgra.height, config.fps, config.bitrate_bps,
+      codec::EncoderConfig cfg{f.bgra.width, f.bgra.height, config.fps, rate ? rate->encoder_bps() : StartBitrate(),
                                config.min_qp};
       std::string err;
       auto enc = platform::CreateHevcEncoder(cfg, config.encoder, &err);
@@ -444,6 +465,7 @@ struct Host::Impl {
       opts.tile_cache = config.tile_cache;
       opts.refresh = config.refresh;
       opts.progressive = config.progressive;
+      opts.text_mode = text_applied;
       if (config.video_regions) {
         const std::string prefer = config.encoder;
         opts.region_encoder_factory = [prefer](const codec::EncoderConfig& c, std::string* e) {
@@ -451,7 +473,7 @@ struct Host::Impl {
         };
       }
       opts.fps = config.fps;
-      opts.bitrate_bps = config.bitrate_bps;
+      opts.bitrate_bps = rate ? rate->encoder_bps() : StartBitrate();
       opts.region_min_qp = config.video_region_min_qp;
       opts.region_bitrate_bps = config.video_region_bitrate_bps;
       opts.own_receiver = false;  // the link receives and passes on
@@ -473,7 +495,7 @@ struct Host::Impl {
         next->AdoptStats(*carry_next);
         carry_next.reset();
       }
-      if (rate && resized) next->SetBitrate(rate->target_bps());
+      if (rate && resized) next->SetBitrate(rate->encoder_bps());
       std::unique_ptr<session::HostSession> old;
       {
         std::lock_guard<std::mutex> l(session_mu);
@@ -492,11 +514,22 @@ struct Host::Impl {
     TransportStats st;
     if (config.adaptive_bitrate && transport->GetStats(&st)) {
       if (!rate) {
+        const int64_t floor = text_applied ? std::min(config.min_bitrate_bps, kTextMinBitrate) : config.min_bitrate_bps;
+        // Text mode: one packet is 96 ms of a 100 kbps path, so the queue
+        // that counts as "building" is longer.
+        const int32_t queue_ms = text_applied ? std::max(config.max_queue_ms, kTextMaxQueueMs) : config.max_queue_ms;
         rate = std::make_unique<session::RateController>(
-            config.bitrate_bps, std::min(config.min_bitrate_bps, config.bitrate_bps), config.max_queue_ms);
+            config.bitrate_bps, std::min(floor, config.bitrate_bps), queue_ms,
+            text_applied ? StartBitrate() : 0, text_applied ? 1.1 : 2.0);
+        if (text_applied) session->SetBitrate(rate->encoder_bps());
       }
       const auto ss = session->stats();
-      const auto d = rate->Update(capture::MonotonicMicros(), st, ss.video_bytes, ss.bytes_sent);
+      // What shows whether the target is used: the encoders' output, or in
+      // text mode, where they hardly send, everything the session sends
+      // (judged by video alone the target only ever came down: 46 kbps on a
+      // 100 kbps path).
+      const auto d = rate->Update(capture::MonotonicMicros(), st, text_applied ? ss.bytes_sent : ss.video_bytes,
+                                  ss.bytes_sent);
       if (d.new_target_bps > 0) session->SetBitrate(d.new_target_bps);
       {
         std::lock_guard<std::mutex> l(mu);
@@ -539,6 +572,7 @@ struct Host::Impl {
 Host::Host(std::unique_ptr<Transport> transport, HostConfig config)
     : impl_(std::make_unique<Impl>()) {
   impl_->config = std::move(config);
+  impl_->text_mode = impl_->config.text_mode;
   impl_->on_state = std::move(impl_->config.on_state);
   impl_->on_message = std::move(impl_->config.on_message);
   if (!impl_->config.encryption_key.empty()) {
@@ -682,6 +716,9 @@ bool Host::SubmitFrame(const ImageView& bgra, uint64_t capture_time_us, std::spa
   f.capture_time_us = capture_time_us;
   return impl_->OnFrame(f, error);
 }
+
+void Host::SetTextMode(bool on) { impl_->text_mode = on; }
+bool Host::text_mode() const { return impl_->text_mode; }
 
 void Host::RequestKeyframe() {
   impl_->WithSession([](session::HostSession& s) { s.RequestKeyframe(); });

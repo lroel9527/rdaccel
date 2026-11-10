@@ -27,6 +27,8 @@ class FakeEncoder final : public codec::IHevcEncoder {
   bool drop_next = false;  // drop the picture, as VideoToolbox may (no error)
   std::vector<bool> keyframe_requests;
   std::vector<int> min_qp;  // per picture: the floor asked for (0 = the encoder's own)
+  size_t pad = 0;           // extra bytes per picture (a real one is kilobytes)
+  size_t* pictures = nullptr;  // counts the pictures produced, if set
 
   std::string name() const override { return "fake"; }
   void SetMinQp(int qp) override { min_qp_now_ = qp; }
@@ -52,6 +54,8 @@ class FakeEncoder final : public codec::IHevcEncoder {
     std::vector<uint8_t> nal = {static_cast<uint8_t>((force_keyframe ? 19 : 1) << 1), 1};
     nal.push_back(static_cast<uint8_t>(img.width & 0xff));
     nal.push_back(static_cast<uint8_t>(img.height & 0xff));
+    nal.resize(nal.size() + pad, 0x55);
+    if (pictures) ++*pictures;
     codec::AppendLengthPrefixed(nal, au.nal_data);
     return au;
   }
@@ -815,4 +819,237 @@ TEST(Session, WorkLeftOwedIsPaidOffByResubmittingTheLastFrame) {
     }
     EXPECT_FALSE(host.work_pending());
   }
+}
+
+// ---- text mode ------------------------------------------------------------
+
+namespace {
+
+// What the viewer shows, copied on every frame.
+struct Shown {
+  std::mutex mu;
+  std::condition_variable cv;
+  std::vector<uint8_t> px;
+  uint64_t last_id = 0;
+  void Attach(session::ViewerSession& viewer) {
+    viewer.SetFrameHandler([this](const tile::ImageView& img, const std::vector<Rect>&, uint64_t id, uint64_t) {
+      std::lock_guard<std::mutex> lock(mu);
+      px.resize(static_cast<size_t>(img.width) * img.height * 4);
+      for (int y = 0; y < img.height; ++y) {
+        std::memcpy(px.data() + static_cast<size_t>(y) * img.width * 4,
+                    img.data + static_cast<size_t>(y) * img.stride, static_cast<size_t>(img.width) * 4);
+      }
+      last_id = id;
+      cv.notify_all();
+    });
+  }
+  // Tiles whose pixels differ from `want` once frame `id` has been shown.
+  std::string Differences(const std::vector<uint8_t>& want, int w, int h, uint64_t id) {
+    std::unique_lock<std::mutex> lock(mu);
+    if (!cv.wait_for(lock, std::chrono::seconds(10), [&] { return last_id >= id; })) return " (frames missing)";
+    std::string bad;
+    for (int ty = 0; ty * 64 < h; ++ty) {
+      for (int tx = 0; tx * 64 < w; ++tx) {
+        size_t n = 0;
+        for (int y = ty * 64; y < std::min(h, ty * 64 + 64); ++y) {
+          for (int x = tx * 64; x < std::min(w, tx * 64 + 64); ++x) {
+            const size_t i = (static_cast<size_t>(y) * w + x) * 4;
+            if (std::memcmp(&want[i], &px[i], 3) != 0) ++n;
+          }
+        }
+        if (n) bad += " (" + std::to_string(tx) + "," + std::to_string(ty) + "):" + std::to_string(n);
+      }
+    }
+    return bad;
+  }
+};
+
+// "Text": pixels of `colors` colours of one hue family, irregular enough
+// that deflate finds little.
+void FillText(std::vector<uint8_t>& px, int w, const Rect& r, uint32_t& seed, int colors) {
+  for (int y = r.y; y < r.bottom(); ++y) {
+    for (int x = r.x; x < r.right(); ++x) {
+      seed = seed * 1103515245u + 12345u;
+      const uint32_t c = (seed >> 16) % static_cast<uint32_t>(colors);
+      uint8_t* p = &px[(static_cast<size_t>(y) * w + x) * 4];
+      p[0] = static_cast<uint8_t>(250 - c * 17);
+      p[1] = static_cast<uint8_t>(250 - c * 16);
+      p[2] = static_cast<uint8_t>(245 - c * 15);
+      p[3] = 255;
+    }
+  }
+}
+
+}  // namespace
+
+TEST(Session, TextModeNeverSendsTextAsVideoAndEndsUpExact) {
+  // Text beyond the budget must not go through the video encoder (the fake
+  // decoder shows black, so it would also show here): it waits and follows
+  // losslessly, within the text share of the bitrate, also while the screen
+  // keeps changing. Twelve colours a tile, so the reduced palette is exact.
+  auto [host_end, viewer_end] = transport::MakeLocalPipe();
+  constexpr int W = 640, H = 384, kFps = 30;
+  constexpr int64_t kBitrate = 400'000;
+  size_t pictures = 0;
+  auto enc = std::make_unique<FakeEncoder>();
+  enc->pictures = &pictures;
+  session::HostSession host(host_end.get(), std::move(enc), W, H,
+                            {.text_mode = true, .fps = kFps, .bitrate_bps = kBitrate});
+  session::ViewerSession viewer(nullptr, std::make_unique<FakeDecoder>());
+  Shown shown;
+  shown.Attach(viewer);
+  viewer.Attach(viewer_end.get());
+
+  std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 250);
+  uint32_t seed = 1;
+  uint64_t t = 1'000'000;
+  host.OnFrame({{px.data(), W, H, W * 4}, {}, t});  // keyframe: a plain screen
+  const uint64_t after_key = host.stats().lossless_bytes;
+  constexpr int kFrames = 60;
+  for (int f = 0; f < kFrames; ++f) {
+    t += 1'000'000 / kFps;
+    for (int ty = 0; ty < H / 64; ++ty) {
+      for (int tx = 0; tx < W / 64; ++tx) {
+        if ((tx + ty + f) % 3 == 0) FillText(px, W, {tx * 64, ty * 64, 64, 64}, seed, 12);
+      }
+    }
+    host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+  }
+  EXPECT_EQ(pictures, 1u) << "text went through the video encoder";
+  const double seconds = static_cast<double>(kFrames) / kFps;
+  const double sent = static_cast<double>(host.stats().lossless_bytes - after_key);
+  // The text share, what the bucket holds (150 ms), and one tile a frame.
+  EXPECT_LE(sent, kBitrate / 8.0 * (0.75 * seconds + 0.15) * 1.25) << sent << " bytes in " << seconds << " s";
+  EXPECT_TRUE(host.work_pending());
+  // Still: the 60 tiles (2 kB each, twice where they had a quick pass first)
+  // take a few seconds.
+  for (int f = 0; f < 20 * kFps && host.work_pending(); ++f) {
+    t += 1'000'000 / kFps;
+    host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+  }
+  EXPECT_FALSE(host.work_pending());
+  EXPECT_EQ(pictures, 1u);
+  const uint64_t frames = host.stats().frames_encoded;
+  PipeStopper stop{host_end, viewer_end};
+  EXPECT_EQ(shown.Differences(px, W, H, frames), "");
+}
+
+TEST(Session, TextModeEndsUpExactAfterScrollingAndEditing) {
+  // Scrolls (copies of what the viewer shows), cached tiles and partial
+  // updates all assume the viewer has the previous frame, which in text
+  // mode it may not (stale tiles). Whatever the order of events, a still
+  // screen must end up exactly right.
+  constexpr int W = 512, H = 448, kFps = 30;
+  for (uint32_t run = 1; run <= 6; ++run) {
+    auto [host_end, viewer_end] = transport::MakeLocalPipe();
+    session::HostSession host(host_end.get(), std::make_unique<FakeEncoder>(), W, H,
+                              {.text_mode = true, .fps = kFps, .bitrate_bps = 60'000 * run});
+    session::ViewerSession viewer(nullptr, std::make_unique<FakeDecoder>());
+    Shown shown;
+    shown.Attach(viewer);
+    viewer.Attach(viewer_end.get());
+    std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 250);
+    uint32_t seed = run * 7919;
+    auto rnd = [&](uint32_t n) { return ((seed = seed * 1103515245u + 12345u) >> 16) % n; };
+    // Lines of "text" 16 pixels high with gaps, as a page has.
+    auto line = [&](int y) {
+      uint32_t s = seed;
+      FillText(px, W, {32, y, W - 64 - static_cast<int>(rnd(200)), 10}, s, 6);
+      seed = s;
+    };
+    for (int y = 16; y + 16 <= H; y += 16) line(y);
+    uint64_t t = 1'000'000;
+    host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+    for (int f = 0; f < 150; ++f) {
+      t += 1'000'000 / kFps;
+      const uint32_t what = rnd(10);
+      if (what < 5) {
+        // Scroll up by one or more lines; new lines come in at the bottom.
+        const int dy = 16 * (1 + static_cast<int>(rnd(4)));
+        std::memmove(px.data(), px.data() + static_cast<size_t>(dy) * W * 4, static_cast<size_t>(H - dy) * W * 4);
+        std::fill(px.begin() + static_cast<ptrdiff_t>(static_cast<size_t>(H - dy) * W * 4), px.end(), 250);
+        for (int y = H - dy; y + 16 <= H; y += 16) line(y);
+      } else if (what < 8) {
+        // Typing: a few characters somewhere.
+        uint32_t s = seed;
+        FillText(px, W, {static_cast<int>(rnd(W - 40)), 16 * static_cast<int>(rnd(H / 16)), 24, 10}, s, 6);
+        seed = s;
+      } else if (what == 8) {
+        // A window appears: a block of other text.
+        const Rect r{64 * static_cast<int>(rnd(4)), 64 * static_cast<int>(rnd(3)), 200, 180};
+        uint32_t s = seed;
+        FillText(px, W, r, s, 9);
+        seed = s;
+      }  // else: nothing changes
+      host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+    }
+    for (int f = 0; f < 120 * kFps && host.work_pending(); ++f) {
+      t += 1'000'000 / kFps;
+      host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+    }
+    EXPECT_FALSE(host.work_pending()) << "run " << run;
+    const uint64_t frames = host.stats().frames_encoded;
+    PipeStopper stop{host_end, viewer_end};
+    EXPECT_EQ(shown.Differences(px, W, H, frames), "") << "run " << run;
+  }
+}
+
+TEST(Session, TextModePacesVideoPicturesAndStillDeliversThem) {
+  // A photo-like area that changes every frame: at 100 kbps a 2 kB picture
+  // is 0.64 s of the video share, so pictures go out a couple of times a
+  // second, not thirty, and the last change still arrives.
+  auto [host_end, viewer_end] = transport::MakeLocalPipe();
+  constexpr int W = 320, H = 192, kFps = 30;
+  size_t pictures = 0;
+  auto enc = std::make_unique<FakeEncoder>();
+  enc->pad = 2000;
+  enc->pictures = &pictures;
+  session::HostSession host(host_end.get(), std::move(enc), W, H,
+                            {.text_mode = true, .fps = kFps, .bitrate_bps = 100'000});
+  std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 250);
+  uint64_t t = 1'000'000;
+  host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+  uint32_t seed = 5;
+  constexpr int kSeconds = 6;
+  for (int f = 0; f < kSeconds * kFps; ++f) {
+    t += 1'000'000 / kFps;
+    for (int y = 0; y < 128; ++y) {
+      for (int x = 0; x < 128; ++x) {
+        seed = seed * 1103515245u + 12345u;
+        std::memcpy(&px[(static_cast<size_t>(y) * W + x) * 4], &seed, 3);  // noise: no palette
+      }
+    }
+    host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+  }
+  // 3.1 kB/s of video share; the first picture after the keyframe waits for
+  // the keyframe's bytes to be paid off.
+  EXPECT_GE(pictures, 4u);
+  EXPECT_LE(pictures, 1u + static_cast<size_t>(kSeconds * 100'000 / 8 * 0.25 / 2000) + 2);
+  const size_t before = pictures;
+  EXPECT_TRUE(host.work_pending());  // the last frames' tiles are still owed
+  for (int f = 0; f < 10 * kFps && host.work_pending(); ++f) {
+    t += 1'000'000 / kFps;
+    host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+  }
+  EXPECT_FALSE(host.work_pending());
+  EXPECT_GT(pictures, before);
+  PipeStopper stop{host_end, viewer_end};
+}
+
+TEST(Session, LeavingTextModeRefreshesTheWholePicture) {
+  auto [host_end, viewer_end] = transport::MakeLocalPipe();
+  constexpr int W = 128, H = 128;
+  session::HostSession host(host_end.get(), std::make_unique<FakeEncoder>(), W, H, {.text_mode = true});
+  std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 250);
+  host.OnFrame({{px.data(), W, H, W * 4}, {}, 1'000'000});
+  EXPECT_FALSE(host.keyframe_pending());
+  host.SetTextMode(true);  // no change
+  EXPECT_FALSE(host.keyframe_pending());
+  host.SetTextMode(false);
+  EXPECT_FALSE(host.text_mode());
+  EXPECT_TRUE(host.keyframe_pending());
+  host.OnFrame({{px.data(), W, H, W * 4}, {}, 1'033'000});
+  host.SetTextMode(true);  // reduced colours need no refresh
+  EXPECT_FALSE(host.keyframe_pending());
+  PipeStopper stop{host_end, viewer_end};
 }

@@ -24,6 +24,7 @@
 //     the last kMinRttWindowUs, so a path whose base delay grew (another
 //     Wi-Fi access point, a VPN) is not taken for a standing queue for good.
 
+#include <algorithm>
 #include <cstdint>
 #include <deque>
 #include <utility>
@@ -34,9 +35,19 @@ namespace rdacore::session {
 
 class RateController {
  public:
-  RateController(int64_t max_bps, int64_t min_bps, int32_t max_queue_ms)
+  // `start_bps`: the target before the path has been measured; 0 = max_bps
+  // (right for a fast path; on one known to be slow the first picture, coded
+  // at max_bps, takes many seconds to get through).
+  // `ceiling`: how far above the estimate the target may grow. Twice suits a
+  // sender that is usually application limited (the estimate is a lower
+  // bound then). One that sends all the path takes (text mode on a slow
+  // path, with a screenful owed) is measured at the path's rate, and a
+  // target above it only fills the bottleneck's queue: 1.1 there.
+  RateController(int64_t max_bps, int64_t min_bps, int32_t max_queue_ms, int64_t start_bps = 0,
+                 double ceiling = 2.0)
       : max_bps_(max_bps), min_bps_(min_bps), max_queue_us_(static_cast<uint64_t>(max_queue_ms) * 1000),
-        target_(max_bps), encoder_(max_bps) {}
+        ceiling_(ceiling), target_(start_bps > 0 ? std::clamp(start_bps, min_bps, max_bps) : max_bps),
+        encoder_(target_) {}
 
   struct Decision {
     bool skip_frame = false;
@@ -66,6 +77,7 @@ class RateController {
  private:
   int64_t max_bps_, min_bps_;
   uint64_t max_queue_us_;
+  double ceiling_;
   int64_t target_;
   uint64_t last_update_us_ = 0;
   bool started_ = false;

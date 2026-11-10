@@ -143,7 +143,7 @@ RateController::Decision RateController::Update(uint64_t now_us, const Transport
     // for its retransmission (a sawtooth of 1-2 s delays every few seconds
     // at 0.4 Mbps). So the ceiling starts at the estimate then and opens up
     // by 10% of it per second, back to twice it after ten seconds.
-    int64_t ceiling = st.bandwidth_bps * 2;
+    auto ceiling = static_cast<int64_t>(static_cast<double>(st.bandwidth_bps) * ceiling_);
     if (congested_us_ != 0) {
       const double opened = std::min(1.0, static_cast<double>(now_us - congested_us_) / 10e6);
       const auto base = static_cast<double>(std::max(st.bandwidth_bps, congested_bps_));

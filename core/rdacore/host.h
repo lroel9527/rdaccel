@@ -95,6 +95,19 @@ struct HostConfig {
   int64_t min_bitrate_bps = 300'000;
   int32_t max_queue_ms = 50;
 
+  // Text mode, for links far too slow for the whole picture (tens of kbps to
+  // a few hundred): the bits go to text that is sharp. Text and UI are
+  // reduced to 16 of their own colours (edges stay exact, the shades of
+  // anti-aliasing merge; about 40% of the exact size) and are never blurred
+  // through the video encoder: what the link cannot take yet stays as it
+  // was and follows sharp, newest changes first. Photos and video update a
+  // few times a second at most, the first picture shows text areas as their
+  // background colour until the text arrives, the bitrate starts low and
+  // may follow the path down to 32 kbps (below `min_bitrate_bps`), and the
+  // cursor is sent at most 30 times a second. Video areas are off.
+  // Host::SetTextMode() switches it while streaming.
+  bool text_mode = false;
+
   // Connection: once a viewer has connected, no bytes from it for this long
   // means it is gone (disconnected, kTimeout). 0 = never time out.
   int32_t peer_timeout_ms = 10'000;
@@ -225,6 +238,12 @@ class Host {
 
   // Makes the next encoded frame a full refresh.
   void RequestKeyframe();
+
+  // Turns text mode (HostConfig::text_mode) on or off; takes effect with the
+  // next frame. Turning it off refreshes the whole picture with exact
+  // colours. Thread-safe.
+  void SetTextMode(bool on);
+  bool text_mode() const;
 
   // Empty until the first frame has been encoded.
   std::string encoder_name() const;

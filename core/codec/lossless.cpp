@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 
 #include "proto/wire.h"
@@ -140,6 +141,126 @@ bool ExtractPalette(const ImageView& img, const Rect& r, int max_colors, Palette
     out.colors[k] = colors[order[k]];
   }
   for (auto& idx : out.indices) idx = remap[idx];
+  return true;
+}
+
+bool ExtractReducedPalette(const ImageView& img, const Rect& r, int max_colors, int exact_colors,
+                           int max_source_colors, PaletteTile& out, bool* reduced) {
+  if (reduced) *reduced = false;
+  max_colors = std::clamp(max_colors, 2, 256);
+  exact_colors = std::clamp(exact_colors, 1, 256);
+  if (ExtractPalette(img, r, max_colors, out)) return true;
+  constexpr int kMaxSource = 4096;
+  max_source_colors = std::clamp(max_source_colors, exact_colors, kMaxSource);
+
+  // Every distinct colour with its pixel count, and each pixel's colour.
+  constexpr int kSlots = kMaxSource * 4;
+  std::vector<uint32_t> keys(kSlots, kEmpty);
+  std::vector<uint16_t> slot_color(kSlots);
+  std::vector<uint32_t> colors, counts;
+  std::vector<uint16_t> px(static_cast<size_t>(r.w) * r.h);
+  uint32_t last = kEmpty;
+  uint16_t last_color = 0;
+  size_t i = 0;
+  for (int32_t y = r.y; y < r.bottom(); ++y) {
+    const uint8_t* p = img.data + static_cast<size_t>(y) * img.stride + static_cast<size_t>(r.x) * 4;
+    for (int32_t x = 0; x < r.w; ++x, p += 4, ++i) {
+      const uint32_t c = Rgb(p);
+      if (c != last) {
+        int slot = static_cast<int>((c * 0x9e3779b1u) >> 18);  // top 14 bits
+        while (keys[slot] != kEmpty && keys[slot] != c) slot = (slot + 1) & (kSlots - 1);
+        if (keys[slot] == kEmpty) {
+          if (static_cast<int>(colors.size()) == max_source_colors) return false;
+          keys[slot] = c;
+          slot_color[slot] = static_cast<uint16_t>(colors.size());
+          colors.push_back(c);
+          counts.push_back(0);
+        }
+        last = c;
+        last_color = slot_color[slot];
+      }
+      ++counts[last_color];
+      px[i] = last_color;
+    }
+  }
+  const size_t n = colors.size();
+  auto dist2 = [&](size_t a, size_t b) {
+    const uint32_t ca = colors[a], cb = colors[b];
+    const int d0 = static_cast<int>(ca & 255) - static_cast<int>(cb & 255);
+    const int d1 = static_cast<int>((ca >> 8) & 255) - static_cast<int>((cb >> 8) & 255);
+    const int d2 = static_cast<int>((ca >> 16) & 255) - static_cast<int>((cb >> 16) & 255);
+    return static_cast<uint32_t>(d0 * d0 + d1 * d1 + d2 * d2);
+  };
+  // Pick the colours to keep: the most frequent first, then again and again
+  // the one that is furthest from those kept, weighted by how many pixels
+  // have it (the square root: a rare colour far away, such as the core of
+  // thin text, still counts). The ramp between background and text ends up
+  // covered evenly.
+  size_t first = 0;
+  for (size_t k = 1; k < n; ++k) {
+    if (counts[k] > counts[first] || (counts[k] == counts[first] && colors[k] < colors[first])) first = k;
+  }
+  std::vector<uint32_t> nearest_d(n);
+  std::vector<uint16_t> nearest(n, 0);
+  std::vector<float> weight(n);
+  for (size_t k = 0; k < n; ++k) {
+    nearest_d[k] = dist2(k, first);
+    weight[k] = std::sqrt(static_cast<float>(counts[k]));
+  }
+  std::vector<size_t> kept{first};
+  while (static_cast<int>(kept.size()) < max_colors) {
+    size_t best = n;
+    float best_score = 0;
+    for (size_t k = 0; k < n; ++k) {
+      const float score = static_cast<float>(nearest_d[k]) * weight[k];
+      if (score > best_score) {
+        best_score = score;
+        best = k;
+      }
+    }
+    if (best == n) break;  // every colour is kept already
+    const auto id = static_cast<uint16_t>(kept.size());
+    kept.push_back(best);
+    for (size_t k = 0; k < n; ++k) {
+      const uint32_t d = dist2(k, best);
+      if (d < nearest_d[k]) {
+        nearest_d[k] = d;
+        nearest[k] = id;
+      }
+    }
+  }
+  if (static_cast<int>(n) > exact_colors) {
+    // Not plainly text: only if the picture survives. A photo's tile has
+    // most of its pixels far from any of 16 colours; a gradient under text
+    // has them a few levels off.
+    constexpr uint32_t kFar = 24 * 24;     // a visible step
+    constexpr double kMaxMeanSquare = 40;  // about 6 levels RMS
+    uint64_t far = 0, sum = 0;
+    for (size_t k = 0; k < n; ++k) {
+      sum += static_cast<uint64_t>(nearest_d[k]) * counts[k];
+      if (nearest_d[k] > kFar) far += counts[k];
+    }
+    const auto total = static_cast<uint64_t>(r.w) * r.h;
+    if (far * 50 > total || static_cast<double>(sum) > kMaxMeanSquare * static_cast<double>(total)) return false;
+  }
+  // Most frequent first (ties by value), as ExtractPalette does.
+  std::vector<uint32_t> kept_count(kept.size(), 0);
+  for (size_t k = 0; k < n; ++k) kept_count[nearest[k]] += counts[k];
+  std::vector<uint16_t> order(kept.size());
+  for (size_t k = 0; k < order.size(); ++k) order[k] = static_cast<uint16_t>(k);
+  std::sort(order.begin(), order.end(), [&](uint16_t a, uint16_t b) {
+    return kept_count[a] != kept_count[b] ? kept_count[a] > kept_count[b] : colors[kept[a]] < colors[kept[b]];
+  });
+  std::vector<uint8_t> rank(kept.size());
+  out.rect = r;
+  out.colors.resize(kept.size());
+  for (size_t k = 0; k < order.size(); ++k) {
+    rank[order[k]] = static_cast<uint8_t>(k);
+    out.colors[k] = colors[kept[order[k]]];
+  }
+  out.indices.resize(px.size());
+  for (size_t k = 0; k < px.size(); ++k) out.indices[k] = rank[nearest[px[k]]];
+  if (reduced) *reduced = true;
   return true;
 }
 

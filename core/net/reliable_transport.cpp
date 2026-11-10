@@ -21,7 +21,7 @@ constexpr double kFecShare = 0.3;
 // Room for the data header: type, packet number, channel, offset.
 constexpr size_t kMaxPayload = kMaxDatagram - 24;
 constexpr uint64_t kInitialCwnd = 32 * kMaxDatagram;
-constexpr uint64_t kMinCwnd = 4 * kMaxDatagram;
+constexpr uint64_t kMinCwnd = 2 * kMaxDatagram;
 constexpr uint64_t kInitialRtt = 100'000;  // us, until measured
 constexpr uint64_t kMaxAckDelay = 5'000;
 constexpr uint64_t kPacingCredit = 15'000;  // us
@@ -184,7 +184,13 @@ uint64_t ReliableTransport::Cwnd() const {
   // Capped: a nonsensical estimate (bogus acknowledgements) must not
   // overflow the conversion.
   const auto bdp = static_cast<uint64_t>(std::min(gain * bw_ * rtt, 1e15));
-  const uint64_t cwnd = std::max(bdp + 4 * kMaxDatagram, kMinCwnd);
+  // On a very slow path four packets are a long queue (0.38 s at 100 kbps,
+  // more than many bottlenecks hold: the overflow showed as 8-17% loss on a
+  // loss-free 100 kbps path), so there the allowance is 100 ms of the
+  // estimate, two packets at least. From 0.4 Mbps up it is four as before.
+  const auto extra = std::clamp(static_cast<uint64_t>(std::min(bw_ * 100'000.0, 1e15)),
+                                static_cast<uint64_t>(2 * kMaxDatagram), static_cast<uint64_t>(4 * kMaxDatagram));
+  const uint64_t cwnd = std::max(bdp + extra, kMinCwnd);
   // Like the pacing rate, the window does not shrink below its initial
   // size before the path has been measured under load.
   return mode_ == Mode::kStartup ? std::max(cwnd, kInitialCwnd) : cwnd;

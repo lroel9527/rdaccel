@@ -34,6 +34,21 @@ struct PaletteTile {
 // distinct colours. Alpha is ignored.
 bool ExtractPalette(const ImageView& img, const Rect& r, int max_colors, PaletteTile& out);
 
+// Like ExtractPalette, but a tile with more colours is reduced to at most
+// `max_colors` of its own colours (each pixel takes the nearest one): the
+// shades of anti-aliasing merge, edges stay where they are, and the tile
+// costs a fraction of the exact one (a page of text at 16 colours deflates
+// to about 40% of its exact size). The most frequent colour, usually the
+// background, is always kept as it is.
+//
+// A tile with up to `exact_colors` colours always qualifies (it is text or
+// UI). One with more, up to `max_source_colors`, qualifies only when the
+// reduction stays close to the picture (text on a soft gradient or a
+// translucent panel does; a photo does not and returns false).
+// `reduced`, if given, tells whether colours were merged.
+bool ExtractReducedPalette(const ImageView& img, const Rect& r, int max_colors, int exact_colors,
+                           int max_source_colors, PaletteTile& out, bool* reduced = nullptr);
+
 // Writes the tile into a BGRA buffer (alpha = 255). The caller guarantees the
 // rect lies inside the buffer.
 void PaintPalette(const PaletteTile& t, uint8_t* bgra, int32_t stride);

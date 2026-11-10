@@ -702,6 +702,7 @@ rdacore::HostConfig ToHostConfig(const rda_host_config& c) {
   o.display_index = c.display_index;
   o.keep_serving = c.keep_serving != 0;
   o.capture_own_windows = c.capture_own_windows != 0;
+  o.text_mode = c.text_mode != 0;
   return o;
 }
 
@@ -779,6 +780,7 @@ void rda_host_config_default(rda_host_config* c) {
   c->display_index = d.display_index;
   c->keep_serving = d.keep_serving;
   c->capture_own_windows = d.capture_own_windows;
+  c->text_mode = d.text_mode;
 }
 
 rda_status rda_host_create(rda_transport* transport, const rda_host_config* config, rda_host** out) {
@@ -910,6 +912,14 @@ void rda_host_request_keyframe(rda_host* h) {
   if (h) h->host->RequestKeyframe();
   RDA_GUARD_END_VOID
 }
+
+void rda_host_set_text_mode(rda_host* h, int on) {
+  RDA_GUARD_BEGIN
+  if (h) h->host->SetTextMode(on != 0);
+  RDA_GUARD_END_VOID
+}
+
+int rda_host_get_text_mode(const rda_host* h) { return h && h->host->text_mode() ? 1 : 0; }
 
 rda_state rda_host_get_state(const rda_host* h) {
   try {
