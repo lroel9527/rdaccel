@@ -1,5 +1,6 @@
 #include "mac/capture_sck.h"
 
+#include "capture/dirty_rects.h"
 #include "mac/displays_mac.h"
 
 #import <CoreMedia/CoreMedia.h>
@@ -78,9 +79,13 @@ using rdacore::capture::StoppedFn;
             static_cast<int32_t>(CVPixelBufferGetBytesPerRow(pb))};
   f.capture_time_us = rdacore::capture::MonotonicMicros();
 
-  // Dirty rects are in points relative to the content rect; convert to
-  // buffer pixels. If anything is missing, leave the list empty, which makes
-  // the tile differ check the whole frame (correct, just slower).
+  // What changed, for the tile comparison. The content rect is in points;
+  // the dirty rects have turned out to be in pixels of the picture, which
+  // on a 2x display is not the same (taking them for points left the menu
+  // bar and whatever was typed unrefreshed). AppendDirtyRect covers both
+  // readings. If anything is missing or no rect has any area,
+  // the list stays empty, which makes the tile differ check the whole frame
+  // (correct, just slower).
   NSArray* dirty = info[SCStreamFrameInfoDirtyRects];
   NSDictionary* content_dict = info[SCStreamFrameInfoContentRect];
   CGRect content = CGRectZero;
@@ -88,16 +93,17 @@ using rdacore::capture::StoppedFn;
       CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)content_dict, &content) &&
       content.size.width > 0) {
     const double scale = f.bgra.width / content.size.width;
+    bool understood = true;
     for (NSDictionary* d in dirty) {
       CGRect r;
-      if (!CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)d, &r)) continue;
-      const auto x0 = static_cast<int32_t>(std::floor((r.origin.x - content.origin.x) * scale));
-      const auto y0 = static_cast<int32_t>(std::floor((r.origin.y - content.origin.y) * scale));
-      const auto x1 = static_cast<int32_t>(std::ceil((CGRectGetMaxX(r) - content.origin.x) * scale));
-      const auto y1 = static_cast<int32_t>(std::ceil((CGRectGetMaxY(r) - content.origin.y) * scale));
-      // Qualified: MacTypes.h also declares a global Rect.
-      f.dirty.push_back(rdacore::Rect{x0, y0, x1 - x0, y1 - y0});
+      if (!CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)d, &r)) {
+        understood = false;
+        break;
+      }
+      rdacore::capture::AppendDirtyRect(r.origin.x, r.origin.y, r.size.width, r.size.height, scale,
+                                        content.origin.x, content.origin.y, f.bgra.width, f.bgra.height, f.dirty);
     }
+    if (!understood) f.dirty.clear();
   }
 
   _fn(f);

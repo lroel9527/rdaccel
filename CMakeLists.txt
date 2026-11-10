@@ -8,7 +8,7 @@ cmake_minimum_required(VERSION 3.24)
 if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET AND NOT DEFINED ENV{MACOSX_DEPLOYMENT_TARGET})
   set(CMAKE_OSX_DEPLOYMENT_TARGET "12.3" CACHE STRING "Minimum macOS version")
 endif()
-project(rdaccel VERSION 1.4.3 LANGUAGES C CXX)
+project(rdaccel VERSION 1.4.4 LANGUAGES C CXX)
 # Pre-release label ("rc1"), empty for a release. The full version, as the
 # library, the packages and the tag (v1.0.0-rc1) show it, is
 # PROJECT_VERSION[-RDACCEL_PRERELEASE].
@@ -338,6 +338,7 @@ if(RDACCEL_BUILD_TESTS)
     tests/test_wire.cpp
     tests/test_messages.cpp
     tests/test_tile_diff.cpp
+    tests/test_dirty_rects.cpp
     tests/test_motion.cpp
     tests/test_tile_cache.cpp
     tests/test_video_region.cpp
