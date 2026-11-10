@@ -831,6 +831,13 @@ struct Shown {
   std::condition_variable cv;
   std::vector<uint8_t> px;
   uint64_t last_id = 0;
+  // Tiles that showed content and then turned into one plain colour again
+  // (every tile of the test's screen has text, so that is a placeholder
+  // coming back), counted over all frames.
+  bool watch_placeholders = false;
+  size_t placeholders_back = 0;
+  std::string where;
+  std::vector<uint8_t> had_content;
   void Attach(session::ViewerSession& viewer) {
     viewer.SetFrameHandler([this](const tile::ImageView& img, const std::vector<Rect>&, uint64_t id, uint64_t) {
       std::lock_guard<std::mutex> lock(mu);
@@ -838,6 +845,27 @@ struct Shown {
       for (int y = 0; y < img.height; ++y) {
         std::memcpy(px.data() + static_cast<size_t>(y) * img.width * 4,
                     img.data + static_cast<size_t>(y) * img.stride, static_cast<size_t>(img.width) * 4);
+      }
+      if (watch_placeholders) {
+        const int cols = (img.width + 63) / 64, rows = (img.height + 63) / 64;
+        had_content.resize(static_cast<size_t>(cols) * rows, 0);
+        for (int ty = 0; ty < rows; ++ty) {
+          for (int tx = 0; tx < cols; ++tx) {
+            const uint8_t* first = &px[(static_cast<size_t>(ty) * 64 * img.width + tx * 64) * 4];
+            bool plain = true;
+            for (int y = ty * 64; y < std::min(img.height, ty * 64 + 64) && plain; ++y) {
+              for (int x = tx * 64; x < std::min(img.width, tx * 64 + 64) && plain; ++x) {
+                plain = std::memcmp(&px[(static_cast<size_t>(y) * img.width + x) * 4], first, 3) == 0;
+              }
+            }
+            uint8_t& had = had_content[static_cast<size_t>(ty) * cols + tx];
+            if (plain && had) {
+              ++placeholders_back;
+              where += " frame " + std::to_string(id) + " tile (" + std::to_string(tx) + "," + std::to_string(ty) + ")";
+            }
+            had = !plain;
+          }
+        }
       }
       last_id = id;
       cv.notify_all();
@@ -1040,6 +1068,68 @@ TEST(Session, TextModeEndsUpExactAfterScrollingAndEditing) {
     const uint64_t frames = host.stats().frames_encoded;
     PipeStopper stop{host_end, viewer_end};
     EXPECT_EQ(shown.Differences(px, W, H, frames), "") << "run " << run;
+  }
+}
+
+TEST(Session, TextModeLeavesNoPlaceholderBehindWhenTilesChangeBeforeTheirTurn) {
+  // After a keyframe the viewer shows text tiles as their background colour
+  // until each one's turn comes. On a slow link that takes a while, and
+  // meanwhile carets blink, a clock ticks, rows get highlighted: tiles
+  // change in part, come back to what they were, scroll. None of that may
+  // treat the placeholder as content the viewer has (blocks of plain colour
+  // stayed on screen, marked as done).
+  constexpr int W = 640, H = 512, kFps = 30;
+  for (int variant = 0; variant < 4; ++variant) {
+    auto [host_end, viewer_end] = transport::MakeLocalPipe();
+    session::HostSession host(host_end.get(), std::make_unique<FakeEncoder>(), W, H,
+                              {.text_mode = true, .context_tiles = variant % 2 == 1, .fps = kFps,
+                               .bitrate_bps = 40'000});
+    session::ViewerSession viewer(nullptr, std::make_unique<FakeDecoder>());
+    Shown shown;
+    shown.watch_placeholders = true;
+    shown.Attach(viewer);
+    viewer.Attach(viewer_end.get());
+    std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 250);
+    uint32_t seed = 77 + static_cast<uint32_t>(variant);
+    for (int y = 8; y + 12 <= H; y += 16) FillText(px, W, {8, y, W - 16, 10}, seed, 6);
+    const std::vector<uint8_t> page = px;
+    auto set = [&](const Rect& r, bool on) {
+      for (int y = r.y; y < r.bottom(); ++y) {
+        for (int x = r.x; x < r.right(); ++x) {
+          uint8_t* p = &px[(static_cast<size_t>(y) * W + x) * 4];
+          if (on) {
+            p[0] = p[1] = p[2] = 20;
+          } else {
+            std::memcpy(p, &page[(static_cast<size_t>(y) * W + x) * 4], 4);
+          }
+        }
+      }
+    };
+    uint64_t t = 1'000'000;
+    host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+    // At 40 kbps the page takes many seconds; all of this happens meanwhile.
+    for (int f = 0; f < 240; ++f) {
+      t += 1'000'000 / kFps;
+      // Carets in tiles all over the screen, on for 15 frames, off for 15.
+      if (f % 15 == 0) {
+        const bool on = (f / 15) % 2 == 1;  // first at frame 15: the tiles have been still a while
+        for (int k = 0; k < 6; ++k) set({40 + k * 97, 30 + k * 80, 2, 14}, on);
+        // A highlighted row that moves down (variants 2 and 3: with a scroll).
+        if (variant >= 2 && f % 60 == 0) {
+          std::memmove(px.data(), px.data() + static_cast<size_t>(32) * W * 4, static_cast<size_t>(H - 32) * W * 4);
+        }
+      }
+      host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+    }
+    for (int f = 0; f < 300 * kFps && host.work_pending(); ++f) {
+      t += 1'000'000 / kFps;
+      host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+    }
+    EXPECT_FALSE(host.work_pending()) << "variant " << variant;
+    const uint64_t frames = host.stats().frames_encoded;
+    PipeStopper stop{host_end, viewer_end};
+    EXPECT_EQ(shown.Differences(px, W, H, frames), "") << "variant " << variant;
+    EXPECT_EQ(shown.placeholders_back, 0u) << "variant " << variant << ":" << shown.where;
   }
 }
 

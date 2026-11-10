@@ -46,8 +46,17 @@ bool ExtractPalette(const ImageView& img, const Rect& r, int max_colors, Palette
 // reduction stays close to the picture (text on a soft gradient or a
 // translucent panel does; a photo does not and returns false).
 // `reduced`, if given, tells whether colours were merged.
+//
+// `faithful`: the result must stay close to the picture for every tile, not
+// only for those beyond `exact_colors`. Where `max_colors` are too few (text
+// in several colours: each needs its own shades), twice and then four times
+// as many are tried (64 at most); a tile of up to `exact_colors` that still
+// does not fit keeps all its colours, one with more returns false. Without
+// it, a tile of up to `exact_colors` is reduced to `max_colors` whatever
+// that costs it (a quick first pass).
 bool ExtractReducedPalette(const ImageView& img, const Rect& r, int max_colors, int exact_colors,
-                           int max_source_colors, PaletteTile& out, bool* reduced = nullptr);
+                           int max_source_colors, PaletteTile& out, bool* reduced = nullptr,
+                           bool faithful = false);
 
 // Writes the tile into a BGRA buffer (alpha = 255). The caller guarantees the
 // rect lies inside the buffer.

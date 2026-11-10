@@ -146,7 +146,7 @@ bool ExtractPalette(const ImageView& img, const Rect& r, int max_colors, Palette
 }
 
 bool ExtractReducedPalette(const ImageView& img, const Rect& r, int max_colors, int exact_colors,
-                           int max_source_colors, PaletteTile& out, bool* reduced) {
+                           int max_source_colors, PaletteTile& out, bool* reduced, bool faithful) {
   if (reduced) *reduced = false;
   max_colors = std::clamp(max_colors, 2, 256);
   exact_colors = std::clamp(exact_colors, 1, 256);
@@ -209,31 +209,10 @@ bool ExtractReducedPalette(const ImageView& img, const Rect& r, int max_colors, 
     weight[k] = std::sqrt(static_cast<float>(counts[k]));
   }
   std::vector<size_t> kept{first};
-  while (static_cast<int>(kept.size()) < max_colors) {
-    size_t best = n;
-    float best_score = 0;
-    for (size_t k = 0; k < n; ++k) {
-      const float score = static_cast<float>(nearest_d[k]) * weight[k];
-      if (score > best_score) {
-        best_score = score;
-        best = k;
-      }
-    }
-    if (best == n) break;  // every colour is kept already
-    const auto id = static_cast<uint16_t>(kept.size());
-    kept.push_back(best);
-    for (size_t k = 0; k < n; ++k) {
-      const uint32_t d = dist2(k, best);
-      if (d < nearest_d[k]) {
-        nearest_d[k] = d;
-        nearest[k] = id;
-      }
-    }
-  }
-  if (static_cast<int>(n) > exact_colors) {
-    // Not plainly text: only if the picture survives. A photo's tile has
-    // most of its pixels far from any of 16 colours; a gradient under text
-    // has them a few levels off.
+  // Whether what is kept so far stays close to the picture. A photo's tile
+  // has most of its pixels far from any of 16 colours; a gradient under
+  // text has them a few levels off.
+  auto close_enough = [&] {
     constexpr uint32_t kFar = 24 * 24;     // a visible step
     constexpr double kMaxMeanSquare = 40;  // about 6 levels RMS
     uint64_t far = 0, sum = 0;
@@ -242,7 +221,42 @@ bool ExtractReducedPalette(const ImageView& img, const Rect& r, int max_colors, 
       if (nearest_d[k] > kFar) far += counts[k];
     }
     const auto total = static_cast<uint64_t>(r.w) * r.h;
-    if (far * 50 > total || static_cast<double>(sum) > kMaxMeanSquare * static_cast<double>(total)) return false;
+    return far * 50 <= total && static_cast<double>(sum) <= kMaxMeanSquare * static_cast<double>(total);
+  };
+  const bool plainly_text = static_cast<int>(n) <= exact_colors;
+  const bool gated = faithful || !plainly_text;
+  int limit = max_colors;
+  const int last_limit = faithful ? std::min(64, max_colors * 4) : max_colors;
+  for (;;) {
+    while (static_cast<int>(kept.size()) < limit) {
+      size_t best = n;
+      float best_score = 0;
+      for (size_t k = 0; k < n; ++k) {
+        const float score = static_cast<float>(nearest_d[k]) * weight[k];
+        if (score > best_score) {
+          best_score = score;
+          best = k;
+        }
+      }
+      if (best == n) break;  // every colour is kept already
+      const auto id = static_cast<uint16_t>(kept.size());
+      kept.push_back(best);
+      for (size_t k = 0; k < n; ++k) {
+        const uint32_t d = dist2(k, best);
+        if (d < nearest_d[k]) {
+          nearest_d[k] = d;
+          nearest[k] = id;
+        }
+      }
+    }
+    if (!gated || close_enough()) break;
+    if (limit >= last_limit) {
+      // Not with any number of colours tried: all of them (they fit the
+      // lossless layer as they are), or not a tile for it.
+      if (faithful && plainly_text) return ExtractPalette(img, r, exact_colors, out);
+      return false;
+    }
+    limit = std::min(last_limit, limit * 2);
   }
   // Most frequent first (ties by value), as ExtractPalette does.
   std::vector<uint32_t> kept_count(kept.size(), 0);

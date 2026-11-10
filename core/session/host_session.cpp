@@ -275,7 +275,10 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   // like the rest; one that is not palette content goes as video and is
   // refined by the encoder instead. The user's choice for a slow link:
   // blurry while it moves, sharp once it stops.
-  if (!key && quiet_ && options_.lossless) {
+  // (Text mode does not wait for a still screen: nothing there is taken
+  // from the video meanwhile, and a clock or a spinner somewhere must not
+  // keep the rest at its quick pass.)
+  if (!key && (quiet_ || text) && options_.lossless) {
     for (size_t i = 0; i < n_tiles; ++i) {
       if (quality_[i] != kRough || refine_[i] != 0 || pending_lossless_[i] ||
           frame_no_ - born_[i] < kRefreshDelay) {
@@ -514,33 +517,46 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     }
     return q;
   };
+  // Text mode: a rect copied out of a tile the viewer does not have would
+  // paint its placeholder (or its old content) over a tile that is fine.
+  // Such copies are not sent; the tiles they would have filled are coded
+  // whole instead (or wait, keeping what they show).
+  std::vector<uint8_t> unmoved;
+  if (text && !moves.empty()) {
+    bool any = false;
+    std::vector<uint8_t> from_stale(moves.size(), 0);
+    for (size_t k = 0; k < moves.size(); ++k) {
+      const Rect r = moves[k].src();
+      for (int32_t row = r.y / kTileSize; row <= (r.bottom() - 1) / kTileSize && !from_stale[k]; ++row) {
+        for (int32_t col = r.x / kTileSize; col <= (r.right() - 1) / kTileSize; ++col) {
+          if (stale_[static_cast<size_t>(row) * differ_.cols() + col]) {
+            from_stale[k] = 1;
+            break;
+          }
+        }
+      }
+      any |= from_stale[k] != 0;
+    }
+    if (any) {
+      unmoved.assign(n_tiles, 0);
+      std::vector<tile::Move> kept;
+      for (size_t k = 0; k < moves.size(); ++k) {
+        if (!from_stale[k]) {
+          kept.push_back(moves[k]);
+          continue;
+        }
+        const Rect& d = moves[k].dst;
+        for (int32_t row = d.y / kTileSize; row <= (d.bottom() - 1) / kTileSize; ++row) {
+          for (int32_t col = d.x / kTileSize; col <= (d.right() - 1) / kTileSize; ++col) {
+            unmoved[static_cast<size_t>(row) * differ_.cols() + col] = 1;
+          }
+        }
+      }
+      moves = std::move(kept);
+    }
+  }
   std::vector<uint8_t> move_quality;
   for (const auto& m : moves) move_quality.push_back(quality_under(m.src()));
-  // Whether a moved rect copies from a tile the viewer does not have.
-  std::vector<uint8_t> move_stale;
-  bool any_move_stale = false;
-  for (const auto& m : moves) {
-    const Rect r = m.src();
-    uint8_t st = 0;
-    for (int32_t row = r.y / kTileSize; row <= (r.bottom() - 1) / kTileSize; ++row) {
-      for (int32_t col = r.x / kTileSize; col <= (r.right() - 1) / kTileSize; ++col) {
-        st |= stale_[static_cast<size_t>(row) * differ_.cols() + col];
-      }
-    }
-    move_stale.push_back(st);
-    any_move_stale |= st != 0;
-  }
-  auto moved_in_stale = [&](const Rect& tile_rect) {
-    if (!any_move_stale) return false;
-    for (size_t k = 0; k < moves.size(); ++k) {
-      const Rect& d = moves[k].dst;
-      if (move_stale[k] && d.x < tile_rect.right() && tile_rect.x < d.right() && d.y < tile_rect.bottom() &&
-          tile_rect.y < d.bottom()) {
-        return true;
-      }
-    }
-    return false;
-  };
   // Quality of what each moved tile receives from the moves.
   auto moved_in_quality = [&](const Rect& tile_rect) {
     uint8_t q = kExact;
@@ -618,8 +634,11 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       }
       if (!palette) {
         last_coarse = false;
+        // Faithful: text in several colours gets 32 or 64 instead of going
+        // to the video encoder (two thirds of a page of highlighted code
+        // on a dark background did, at 16).
         palette = codec::ExtractReducedPalette(frame.bgra, r, options_.text_colors,
-                                               options_.lossless_max_colors, 4096, t);
+                                               options_.lossless_max_colors, 4096, t, nullptr, /*faithful=*/true);
       }
     } else {
       palette = options_.lossless && codec::ExtractPalette(frame.bgra, r, max_colors, t);
@@ -630,7 +649,12 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
         // Plain tiles cost next to nothing either way and go right away.
         owe_lossless(tile_index(c));
         if (text) {
-          // The picture shows the tile's background until its text comes.
+          // The picture shows the tile's background until its text comes:
+          // the viewer does not have the tile. Without the mark a caret
+          // blinking in it before its turn stored the placeholder in the
+          // tile cache and painted it back at every blink, and a partial
+          // change left the rest of it a block of plain colour for good.
+          stale_[tile_index(c)] |= kStaleText;
           FillRect(r, t.colors[0], enc_input_.data(), enc_stride);
         } else {
           CopyRectInto(frame.bgra, r, enc_input_.data(), enc_stride);
@@ -803,15 +827,9 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       pending_lossless_[idx] = 0;
       --pending_lossless_count_;
     }
-    if (i < n_changed && !moved.empty() && moved[i] && !was_stale) {
+    if (i < n_changed && !moved.empty() && moved[i] && !was_stale && !(!unmoved.empty() && unmoved[idx])) {
       ++moved_tiles;
       uint8_t q = moved_in_quality(c.rect);
-      if (moved_in_stale(c.rect)) {
-        // Copied from a tile the viewer does not have: owed as a whole.
-        stale_[idx] |= kStaleText;
-        owe_lossless(idx);
-        q = kRough;
-      }
       if (!residual[i].empty()) q = std::min(q, quality_[idx]);  // rows that stayed put
       // Only the rows that did not move or stay put are left to code, and of
       // those, what a dragged window just uncovered can come from the cache.
@@ -837,7 +855,9 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     // that was stored, a menu closing) may get most of its pixels from the
     // slot; hot tiles (video, animation) are left whole.
     if (i < n_changed && !hot[i] && !was_stale) {
-      uint8_t q = kExact;
+      // What stays of a rough tile stays rough (it is sent again once the
+      // screen is still); calling it exact left it as it was for good.
+      uint8_t q = quality_[idx] == kRough ? kRough : kExact;
       const auto parts = paint_from_slot(c, c.rect, 0.25, q);
       if (parts.size() != 1 || parts[0] != c.rect) {
         for (const Rect& part : parts) {
@@ -853,7 +873,8 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     } else if (how == kCodedVideo) {
       refine_after.push_back(i);
       quality_[idx] = kRough;
-      stale_[idx] = 0;
+      // (A text mode keyframe's placeholder is in the picture, not the tile.)
+      stale_[idx] = text && key && pending_lossless_[idx] ? kStaleText : 0;
     } else {
       // (A quick pass leaves it rough: it is sent again once the screen is
       // still, like a tile left at video quality.)

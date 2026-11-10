@@ -241,6 +241,48 @@ TEST(Lossless, ReducedPaletteTakesTextOnAGradientButNotAPhoto) {
   EXPECT_FALSE(codec::ExtractReducedPalette({photo.data(), W, H, W * 4}, {0, 0, W, H}, 16, 256, 4096, t));
 }
 
+TEST(Lossless, FaithfulReductionTakesMoreColoursForTextInSeveralColours) {
+  // Highlighted code on a dark background: five text colours, each with its
+  // own shades towards the background. 16 colours leave visible steps; the
+  // tile must not be given up on (it would be video coded) but get more.
+  constexpr int W = 64, H = 64;
+  std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4);
+  const int bg[3] = {40, 33, 30};
+  const int fg[5][3] = {{225, 220, 217}, {163, 94, 252}, {240, 217, 102}, {51, 150, 252}, {102, 204, 128}};
+  for (int y = 0; y < H; ++y) {
+    for (int x = 0; x < W; ++x) {
+      uint8_t* p = &px[(static_cast<size_t>(y) * W + x) * 4];
+      const uint32_t r = Mix(static_cast<uint32_t>(y * W + x) + 99);
+      const int* f = fg[(x / 13 + y / 16) % 5];
+      const int level = r % 100 < 72 ? 0 : 1 + static_cast<int>((r >> 8) % 24);  // of 24
+      for (int c = 0; c < 3; ++c) p[c] = static_cast<uint8_t>(bg[c] + (f[c] - bg[c]) * level / 24);
+      p[3] = 255;
+    }
+  }
+  const ImageView img{px.data(), W, H, W * 4};
+  codec::PaletteTile t;
+  // The quick way reduces it whatever it looks like; the faithful one takes more.
+  ASSERT_TRUE(codec::ExtractReducedPalette(img, {0, 0, W, H}, 16, 256, 4096, t));
+  EXPECT_EQ(t.colors.size(), 16u);
+  bool reduced = false;
+  ASSERT_TRUE(codec::ExtractReducedPalette(img, {0, 0, W, H}, 16, 256, 4096, t, &reduced, true));
+  EXPECT_GT(t.colors.size(), 16u);
+  EXPECT_LE(t.colors.size(), 64u);
+  std::vector<uint8_t> out(px.size(), 0);
+  codec::PaintPalette(t, out.data(), W * 4);
+  size_t far = 0;
+  for (size_t i = 0; i < px.size(); i += 4) {
+    int d2 = 0;
+    for (int c = 0; c < 3; ++c) d2 += (px[i + c] - out[i + c]) * (px[i + c] - out[i + c]);
+    far += d2 > 24 * 24;
+  }
+  EXPECT_LE(far * 50, static_cast<size_t>(W) * H);
+  // A photo is still not text.
+  std::vector<uint8_t> photo(px.size());
+  for (size_t i = 0; i < photo.size(); ++i) photo[i] = static_cast<uint8_t>(Mix(static_cast<uint32_t>(i)));
+  EXPECT_FALSE(codec::ExtractReducedPalette({photo.data(), W, H, W * 4}, {0, 0, W, H}, 16, 256, 4096, t, nullptr, true));
+}
+
 // ---- context tiles ---------------------------------------------------------
 
 TEST(Lossless, ContextTilesRoundTripAcrossFramesAndResets) {
