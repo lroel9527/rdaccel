@@ -288,6 +288,34 @@ TEST(RateController, TheFirstTinyEstimatesAreNoEstimate) {
   EXPECT_TRUE(slow.Update(2'100'000, st).skip_frame);
 }
 
+TEST(RateController, ATargetNothingUsesDoesNotGrow) {
+  // A 1 Mbps path, the estimate right at it, the screen still (the encoder
+  // sends ~20 kbps): the target must not climb to twice the path, where the
+  // next burst would overfill it.
+  session::RateController rc(8'000'000, 300'000, 50);
+  TransportStats st;
+  st.bandwidth_bps = 1'000'000;
+  st.rtt_us = 200'000;
+  uint64_t t = 0, sent = 1;
+  for (int i = 0; i < 20; ++i) rc.Update(t += 250'000, st, sent += 600);  // down 10% a step to the ceiling
+  const int64_t settled = rc.target_bps();
+  EXPECT_LE(settled, 2'000'000);
+  // A target well above what it sends, and still nothing: no growth at all.
+  for (int i = 0; i < 40; ++i) rc.Update(t += 250'000, st, sent += 600);
+  EXPECT_LE(rc.target_bps(), settled);
+  // An encoder that pushes against a low target (a busy screen at the
+  // floor) still gets more.
+  session::RateController low(8'000'000, 300'000, 50);
+  st.bandwidth_bps = 4'000'000;
+  for (int i = 0; i < 12; ++i) low.Update(t += 250'000, st);
+  TransportStats q = st;
+  q.queued_bytes = 60'000;  // a queue: down to 85% of the estimate
+  low.Update(t += 250'000, q);
+  const int64_t before = low.target_bps();
+  for (int i = 0; i < 8; ++i) low.Update(t += 250'000, st, sent += static_cast<uint64_t>(before / 8 / 4));
+  EXPECT_GT(low.target_bps(), before);
+}
+
 TEST(RateController, JitterIsNotAQueue) {
   // A jittery Wi-Fi path: base round trip 30 ms, each reading up to 120 ms
   // more. The lowest reading of every quarter second stays near the base,

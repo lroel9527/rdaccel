@@ -17,8 +17,9 @@
 //     than 90% of the estimate (an encoder can only go so low per picture);
 //   * a round trip well above the lowest one seen means a queue is building
 //     inside the network (the path slowed down before the bandwidth estimate
-//     noticed), which also counts as a building queue. "Well above" has to
-//     hold for every reading of the last kRecentWindowUs, so jitter (some
+//     noticed), which also counts as a building queue: max_queue_ms above
+//     the lowest one. That has to hold for every reading of the last
+//     kRecentWindowUs, so jitter (some
 //     readings high, some low) is not a queue; and the lowest one is that of
 //     the last kMinRttWindowUs, so a path whose base delay grew (another
 //     Wi-Fi access point, a VPN) is not taken for a standing queue for good.
@@ -74,6 +75,9 @@ class RateController {
   uint64_t path_skips_ = 0;  // frames considered for skipping on a path queue
   double budget_ = 0;        // bytes that may still go out at the floor
   uint64_t budget_us_ = 0, budget_bytes_ = 0;  // when it was last updated, and the bytes sent then
+  // What the encoders produced at the last target update, to tell whether
+  // they push against the target (see Update: the target grows only then).
+  uint64_t growth_sent_ = 0, growth_us_ = 0;
   bool seen_update_ = false;
   uint64_t first_update_us_ = 0;
   bool estimate_credible_ = false;

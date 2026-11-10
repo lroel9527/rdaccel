@@ -36,8 +36,12 @@ RateController::Decision RateController::Update(uint64_t now_us, const Transport
     recent_min = st.rtt_us;
     for (const auto& [t, r] : recent_rtt_) recent_min = std::min(recent_min, r);
   }
-  // A standing queue keeps every recent reading high; jitter does not.
-  const bool path_queue = min_rtt_us_ > 0 && recent_min > 2 * static_cast<uint64_t>(min_rtt_us_) + max_queue_us_;
+  // A standing queue keeps every recent reading high; jitter does not. As
+  // only the lowest reading of the last 250 ms counts, the line can be the
+  // queue the session allows (max_queue_ms) above the base: twice the base
+  // plus that (the line for single readings) let a 100 ms queue stand on a
+  // 200 ms path unseen, and the target sat at twice a 1 Mbps path.
+  const bool path_queue = min_rtt_us_ > 0 && recent_min > static_cast<uint64_t>(min_rtt_us_) + max_queue_us_;
   // A queue inside the network counts too once the target is at its floor:
   // an encoder that sends more than the path takes even there (VideoToolbox
   // at 300 kbps sends ~500) would otherwise keep that queue standing, with
@@ -91,6 +95,20 @@ RateController::Decision RateController::Update(uint64_t now_us, const Transport
   last_update_us_ = now_us;
   if (st.bandwidth_bps <= 0) return d;
 
+  // Whether the encoders use the target: their output since the last update
+  // at half of it or more. Raising a target nothing uses only stores up an
+  // overshoot: on a 1 Mbps path a scroll's pause let it climb to ~2 Mbps,
+  // and the next burst of scrolling overfilled the path (p95 0.75 s).
+  bool encoders_use_it = true;  // not known (no sent_bytes): as before
+  if (sent_bytes > 0) {
+    if (growth_us_ != 0 && now_us > growth_us_ && sent_bytes >= growth_sent_) {
+      const double out_bps = static_cast<double>(sent_bytes - growth_sent_) * 8e6 / static_cast<double>(now_us - growth_us_);
+      encoders_use_it = out_bps * 2 >= static_cast<double>(target_);
+    }
+    growth_sent_ = sent_bytes;
+    growth_us_ = now_us;
+  }
+
   int64_t next;
   const bool skipped = skipped_ > 0;
   skipped_ = 0;
@@ -133,6 +151,7 @@ RateController::Decision RateController::Update(uint64_t now_us, const Transport
     }
     next = std::min(target_ + target_ / 4, std::max(ceiling, min_bps_));
     next = std::max(next, target_ * 9 / 10);
+    if (!encoders_use_it) next = std::min(next, target_);  // hold (or come down), never grow
   }
   target_ = std::clamp(next, min_bps_, max_bps_);
 
