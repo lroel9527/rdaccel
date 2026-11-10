@@ -204,7 +204,7 @@ struct Host::Impl {
   static constexpr int kTextCursorHz = 30;
   static constexpr int64_t kTextMinBitrate = 32'000;
   static constexpr int32_t kTextMaxQueueMs = 150;
-  static constexpr int64_t kTextStartBitrate = 96'000;
+  static constexpr int64_t kTextStartBitrate = 4'000'000;
   std::atomic<bool> text_mode{false};
   bool text_applied = false;
   int64_t StartBitrate() const {
@@ -520,7 +520,7 @@ struct Host::Impl {
         const int32_t queue_ms = text_applied ? std::max(config.max_queue_ms, kTextMaxQueueMs) : config.max_queue_ms;
         rate = std::make_unique<session::RateController>(
             config.bitrate_bps, std::min(floor, config.bitrate_bps), queue_ms,
-            text_applied ? StartBitrate() : 0, text_applied ? 1.1 : 2.0);
+            text_applied ? StartBitrate() : 0);
         if (text_applied) session->SetBitrate(rate->encoder_bps());
       }
       const auto ss = session->stats();

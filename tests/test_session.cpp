@@ -1133,6 +1133,49 @@ TEST(Session, TextModeLeavesNoPlaceholderBehindWhenTilesChangeBeforeTheirTurn) {
   }
 }
 
+TEST(Session, TextModeSendsTheWholeScreenAtOnceWhenThePathTakesIt) {
+  // Saving traffic is not sending slowly: at a bitrate that covers a
+  // screenful of text in half a second, the keyframe carries all of it. No
+  // placeholders, nothing owed afterwards, and a window dragged across the
+  // screen right away is exact in every frame it is shown.
+  constexpr int W = 640, H = 512, kFps = 30;
+  auto [host_end, viewer_end] = transport::MakeLocalPipe();
+  size_t pictures = 0;
+  auto enc = std::make_unique<FakeEncoder>();
+  enc->pictures = &pictures;
+  session::HostSession host(host_end.get(), std::move(enc), W, H,
+                            {.text_mode = true, .context_tiles = true, .fps = kFps, .bitrate_bps = 4'000'000});
+  session::ViewerSession viewer(nullptr, std::make_unique<FakeDecoder>());
+  Shown shown;
+  shown.watch_placeholders = true;
+  shown.Attach(viewer);
+  viewer.Attach(viewer_end.get());
+  std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 250);
+  uint32_t seed = 3;
+  for (int y = 8; y + 12 <= H; y += 16) FillText(px, W, {8, y, W - 16, 10}, seed, 6);
+  uint64_t t = 1'000'000;
+  host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+  EXPECT_FALSE(host.work_pending()) << "text was left for later";
+  EXPECT_EQ(shown.Differences(px, W, H, 1), "");
+  const std::vector<uint8_t> page = px;
+  for (int f = 1; f <= 40; ++f) {
+    t += 1'000'000 / kFps;
+    px = page;
+    // A block of the page ("a window") moving 5 pixels a frame.
+    for (int y = 0; y < 160; ++y) {
+      std::memcpy(&px[(static_cast<size_t>(100 + f * 3 + y) * W + 40 + f * 5) * 4],
+                  &page[(static_cast<size_t>(200 + y) * W + 300) * 4], 200 * 4);
+    }
+    host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+    EXPECT_FALSE(host.work_pending()) << "frame " << f;
+  }
+  EXPECT_EQ(pictures, 1u);
+  const uint64_t frames = host.stats().frames_encoded;
+  PipeStopper stop{host_end, viewer_end};
+  EXPECT_EQ(shown.Differences(px, W, H, frames), "");
+  EXPECT_EQ(shown.placeholders_back, 0u) << shown.where;
+}
+
 TEST(Session, TextModePacesVideoPicturesAndStillDeliversThem) {
   // A photo-like area that changes every frame: at 100 kbps a 2 kB picture
   // is 0.64 s of the video share, so pictures go out a couple of times a

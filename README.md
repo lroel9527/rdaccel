@@ -3,7 +3,7 @@
 面向极低带宽的远程桌面加速库。画面按区域分类传输：没变的区域不发，平移的区域只发拷贝指令，以前出现过的内容从接收端缓存贴回，文字和界面走无损调色板层，只有视频类区域交给硬件 HEVC 编码（macOS VideoToolbox，Linux FFmpeg）。
 
 - 静止桌面几十 kbps，打字约 50 kbps，滚动和拖窗 1 Mbps 以内，文字保持无损（[评测](docs/benchmarks.md)）
-- 文字模式（`text_mode`）：50–200 kbps 的链路上 1 秒出第一幅画面，文字清晰、先到（100 kbps 上一屏 1080p 文字约 7 秒看全），打字延迟约 50 ms（[架构](docs/architecture.md#文字模式)）
+- 文字模式（`text_mode`）：省流量。文字减色后用专门的编码立刻发出，视频类内容有固定额度；快链路上流量是普通模式的 1/3 到 1/7，画面从第一幅就清楚（[架构](docs/architecture.md#文字模式)）
 - 自带 UDP 传输：丢包重传、BBR 式拥塞控制、自适应码率，0.4 Mbps 的链路上也不超发
 - 光标走独立通道，链路占满时指针照样跟手
 - XChaCha20-Poly1305 加密（密钥由应用提供）、连接状态、认证钩子、输入事件和应用消息通道
@@ -50,7 +50,7 @@ host.StartScreenCapture();  // 或者每帧调用 host.SubmitFrame(...)
 # 1) 安装后 find_package（或 pkg-config）
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 cmake --install build --prefix /opt/rdaccel
-# CMake：find_package(rdaccel 1.6 REQUIRED) + target_link_libraries(app PRIVATE rdaccel::rdaccel)
+# CMake：find_package(rdaccel 1.7 REQUIRED) + target_link_libraries(app PRIVATE rdaccel::rdaccel)
 # 其他构建系统：PKG_CONFIG_PATH=/opt/rdaccel/lib/pkgconfig pkg-config --cflags --libs rdaccel
 #   （静态库加 --static，会带上 FFmpeg/X11 等依赖）
 
