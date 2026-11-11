@@ -218,7 +218,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     // Text mode: 150 ms of it, so that what a key press changes goes out
     // at once after a pause (at 100 kbps three frame intervals hold 1.2 kB,
     // less than one tile of text).
-    const double burst_us = text ? std::max(kLosslessBurstFrames * frame_us, 150'000.0)
+    const double burst_us = text ? std::max(kLosslessBurstFrames * frame_us, 300'000.0)
                             : still ? std::max(kLosslessBurstFrames * frame_us, 100'000.0)
                                     : kLosslessBurstFrames * frame_us;
     const double cap = static_cast<double>(options_.bitrate_bps) / 8.0 * burst_us / 1e6;
@@ -247,10 +247,13 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     lossless_cap_ = cap;
     // The video bucket (text mode).
     const double video_rate = TextVideoRate(options_.bitrate_bps);
+    const double video_burst = TextVideoBurst(options_.bitrate_bps);
     if (video_tokens_us_ != 0) {
       const double gap_us = static_cast<double>(frame.capture_time_us -
                                                 std::min(frame.capture_time_us, video_tokens_us_));
-      video_tokens_ = std::min(video_rate, video_tokens_ + video_rate * gap_us / 1e6);
+      video_tokens_ = std::min(video_burst, video_tokens_ + video_rate * gap_us / 1e6);
+    } else {
+      video_tokens_ = video_burst;
     }
     video_tokens_us_ = frame.capture_time_us;
   }
@@ -763,6 +766,21 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
                             frame.capture_time_us - std::min(frame.capture_time_us, hot_since) >=
                                 kTextAnimationIntervalUs &&
                             static_cast<int>(n) > options_.lossless_max_colors_hot;
+      // While the video bucket holds a burst, an animation's tile goes
+      // through the video encoder instead: every frame, a little soft, and
+      // sharp again once it stops (it is rough, so it is sent losslessly
+      // then). A page that scrolls without its tiles matching as copies
+      // (smooth scrolling re-renders the text at every offset) is such an
+      // "animation": updated twice a second it left rows of older text
+      // standing, which looks worse than a moment of softness.
+      if (animated && !key && !hold_video && video_tokens_ > 4 * std::max(2000.0, TextVideoRate(options_.bitrate_bps) * 0.25)) {
+        owe_lossless(tile_index(c));  // exact once it stops changing
+        CopyRectInto(frame.bgra, r, enc_input_.data(), enc_stride);
+        tile::TileChange part = c;
+        part.rect = r;
+        video_tiles.push_back(part);
+        return kCodedVideo;
+      }
       const bool over = animated ||
                         (text ? lossless_budget <= 0 || (lossless_spent > 0 && lossless_spent + cost > lossless_budget)
                               : lossless_spent + cost > lossless_budget);
@@ -1211,10 +1229,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     mark_video_stale();
   } else if (key || !region_tiles.empty()) {
     encoder_->SetMinQp(still ? options_.still_min_qp : 0);
-    if (text && (still && polish_owed_) != text_polish_rate_) {
-      text_polish_rate_ = still && polish_owed_;
-      SetTextEncoderRate(text_polish_rate_);
-    }
+    if (text) SetTextPictureSize(still && polish_owed_);
     // (Text mode ends a progressive keyframe without the intra picture: the
     // tiles left at the first picture's quality are refined by the next.)
     video_pts_ = text && video_pts_ != 0
@@ -1411,14 +1426,21 @@ void HostSession::SetTextMode(bool on) {
   SetBitrate(options_.bitrate_bps);
 }
 
-void HostSession::SetTextEncoderRate(bool polish) {
+void HostSession::SetTextPictureSize(bool polish) {
   // A picture of a quarter second of the video allowance, 2 kB at least (a
-  // hardware encoder's floor for a busy screen), as a rate at one picture
-  // per frame interval: that is how the encoder is clocked (video_pts_).
-  // Pictures that polish a still screen may be of 0.6 s of it: at the small
-  // size the wallpaper and the icons never got clean (5-7 levels off after
-  // 30 pictures); they still come no faster than the allowance lets them.
-  const double picture = std::max(2000.0, TextVideoRate(options_.bitrate_bps) * (polish ? 0.6 : 0.25));
+  // hardware encoder's floor for a busy screen); pictures that polish a
+  // still screen 0.6 s of it (at the small size the wallpaper and the icons
+  // never got clean). While the bucket holds a burst, a sixth of what it
+  // holds: the first pictures of something new are large, the ones after
+  // them smaller, down to the allowance. Never more than a quarter second
+  // of the bitrate, or 80 kB. Given to the encoder as a rate at one picture
+  // per frame interval: that is how it is clocked (video_pts_).
+  const double base = std::max(2000.0, TextVideoRate(options_.bitrate_bps) * (polish ? 0.6 : 0.25));
+  const double most = std::min(80'000.0, static_cast<double>(options_.bitrate_bps) / 8.0 * 0.25);
+  const double picture = std::max(base, std::min(most, std::max(0.0, video_tokens_) / 6.0));
+  // Small changes are not worth an encoder reconfiguration.
+  if (text_picture_bytes_ > 0 && picture > 0.85 * text_picture_bytes_ && picture < 1.15 * text_picture_bytes_) return;
+  text_picture_bytes_ = picture;
   encoder_->SetBitrate(static_cast<int64_t>(picture * 8.0 * std::max(1, options_.fps)));
 }
 
@@ -1428,8 +1450,8 @@ void HostSession::SetBitrate(int64_t bps) {
   // video_tokens_: hardware encoders do not go as low as they are asked).
   const bool text = options_.text_mode && options_.lossless;
   if (text) {
-    text_polish_rate_ = false;
-    SetTextEncoderRate(false);
+    text_picture_bytes_ = 0;
+    SetTextPictureSize(false);
   } else {
     encoder_->SetBitrate(bps);
   }

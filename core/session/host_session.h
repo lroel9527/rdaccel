@@ -260,7 +260,21 @@ class HostSession {
   std::vector<uint64_t> last_change_us_;
   std::vector<uint8_t> animated_;        // per tile: deferred as part of an animation
   std::vector<uint64_t> lossless_sent_us_;  // per tile: capture time it last went out losslessly
-  static constexpr double kTextLosslessShare = 0.75;
+  // The bucket holds this much (and two seconds of the bitrate at most), and
+  // starts full: the long-run allowance is unchanged, but what comes all at
+  // once (the first picture, full screen, a window or an input method's
+  // candidates appearing over a wallpaper) gets pictures large enough to
+  // look right at once and is polished within a second or two, instead of
+  // standing there in blocks while 5 kB pictures arrive four a second. A
+  // film empties the bucket and then runs at the allowance.
+  static constexpr double kTextVideoBurst = 400'000;
+  static double TextVideoBurst(int64_t bps) {
+    return std::min(kTextVideoBurst, static_cast<double>(bps) / 8.0 * 2.0);
+  }
+  // Text may use all of the bitrate: the allowance is on video, and what
+  // the path cannot take is held back by the rate control's queue limit.
+  // (At three quarters a fast scroll left rows of older text standing.)
+  static constexpr double kTextLosslessShare = 1.0;
   double video_tokens_ = 0;
   uint64_t video_tokens_us_ = 0;
   // The encoder's clock in text mode: one frame interval per picture, not
@@ -270,9 +284,9 @@ class HostSession {
   // a bitrate that works out to the picture size wanted (see SetBitrate),
   // every picture is about that size.
   uint64_t video_pts_ = 0;
-  // The encoder is set for polishing pictures (see SetTextEncoderRate).
-  bool text_polish_rate_ = false;
-  void SetTextEncoderRate(bool polish);
+  // The picture size the encoder is set for (see SetTextPictureSize), 0 = not set.
+  double text_picture_bytes_ = 0;
+  void SetTextPictureSize(bool polish);
   // With a screenful owed (more than kTextCoarseBacklog tiles: the first
   // picture, a new window, a page that scrolled in), tiles the viewer has
   // nothing useful for first go out at kTextCoarseColors: a third of the

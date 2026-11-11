@@ -946,8 +946,8 @@ TEST(Session, TextModeNeverSendsTextAsVideoAndEndsUpExact) {
   EXPECT_EQ(pictures, 1u) << "text went through the video encoder";
   const double seconds = static_cast<double>(kFrames) / kFps;
   const double sent = static_cast<double>(host.stats().lossless_bytes - after_key);
-  // The text share, what the bucket holds (150 ms), and one tile a frame.
-  EXPECT_LE(sent, kBitrate / 8.0 * (0.75 * seconds + 0.15) * 1.25) << sent << " bytes in " << seconds << " s";
+  // The bitrate, what the bucket holds (300 ms), and one tile a frame.
+  EXPECT_LE(sent, kBitrate / 8.0 * (seconds + 0.3) * 1.25) << sent << " bytes in " << seconds << " s";
   EXPECT_TRUE(host.work_pending());
   // Still: the 60 tiles (2 kB each, twice where they had a quick pass first)
   // take a few seconds.
@@ -1176,6 +1176,48 @@ TEST(Session, TextModeSendsTheWholeScreenAtOnceWhenThePathTakesIt) {
   EXPECT_EQ(shown.placeholders_back, 0u) << shown.where;
 }
 
+TEST(Session, TextModeKeepsUpWithTextThatChangesEverywhereAndEndsUpExact) {
+  // Smooth scrolling re-renders the text at every offset: no tile matches a
+  // copy, every tile changes in every frame. Sent losslessly that is far
+  // too much, and sent twice a second rows of older text stood on screen.
+  // While the video bucket holds its burst the tiles go through the video
+  // encoder, a picture a frame; once the page stops, the text is exact.
+  constexpr int W = 640, H = 384, kFps = 30;
+  auto [host_end, viewer_end] = transport::MakeLocalPipe();
+  size_t pictures = 0;
+  auto enc = std::make_unique<FakeEncoder>();
+  enc->pad = 3000;
+  enc->pictures = &pictures;
+  session::HostSession host(host_end.get(), std::move(enc), W, H,
+                            {.text_mode = true, .context_tiles = true, .fps = kFps, .bitrate_bps = 4'000'000});
+  session::ViewerSession viewer(nullptr, std::make_unique<FakeDecoder>());
+  Shown shown;
+  shown.Attach(viewer);
+  viewer.Attach(viewer_end.get());
+  std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 250);
+  for (size_t i = 3; i < px.size(); i += 4) px[i] = 255;
+  uint32_t seed = 11;
+  uint64_t t = 1'000'000;
+  host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+  constexpr int kMoving = 75;  // 2.5 s
+  for (int f = 0; f < kMoving; ++f) {
+    t += 1'000'000 / kFps;
+    FillText(px, W, {0, 0, W, H}, seed, 6);  // all of it, new every frame
+    host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+  }
+  // After the first half second (until then it is not known to be an
+  // animation), a picture for nearly every frame.
+  EXPECT_GE(pictures, static_cast<size_t>(kMoving - kFps / 2 - 10)) << pictures << " pictures in " << kMoving << " frames";
+  for (int f = 0; f < 60 * kFps && host.work_pending(); ++f) {
+    t += 1'000'000 / kFps;
+    host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+  }
+  EXPECT_FALSE(host.work_pending());
+  const uint64_t frames = host.stats().frames_encoded;
+  PipeStopper stop{host_end, viewer_end};
+  EXPECT_EQ(shown.Differences(px, W, H, frames), "");
+}
+
 TEST(Session, TextModePacesVideoPicturesAndStillDeliversThem) {
   // A photo-like area that changes every frame: at 100 kbps a 2 kB picture
   // is 0.64 s of the video share, so pictures go out a couple of times a
@@ -1203,10 +1245,10 @@ TEST(Session, TextModePacesVideoPicturesAndStillDeliversThem) {
     }
     host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
   }
-  // 3.1 kB/s of video share; the first picture after the keyframe waits for
-  // the keyframe's bytes to be paid off.
+  // 3.1 kB/s of video share, after the burst the bucket starts with (two
+  // seconds of the bitrate, 25 kB): not thirty pictures a second for long.
   EXPECT_GE(pictures, 4u);
-  EXPECT_LE(pictures, 1u + static_cast<size_t>(kSeconds * 100'000 / 8 * 0.25 / 2000) + 2);
+  EXPECT_LE(pictures, 1u + static_cast<size_t>((kSeconds * 100'000 / 8 * 0.25 + 25'000) / 2000) + 2);
   const size_t before = pictures;
   EXPECT_TRUE(host.work_pending());  // the last frames' tiles are still owed
   // ... and then polished: 30 more pictures, at the same pace.
