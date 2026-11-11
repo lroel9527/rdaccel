@@ -29,11 +29,14 @@ class FakeEncoder final : public codec::IHevcEncoder {
   std::vector<int> min_qp;  // per picture: the floor asked for (0 = the encoder's own)
   size_t pad = 0;           // extra bytes per picture (a real one is kilobytes)
   size_t* pictures = nullptr;  // counts the pictures produced, if set
+  int64_t* bitrate = nullptr;  // the last bitrate set, if set
 
   std::string name() const override { return "fake"; }
   void SetMinQp(int qp) override { min_qp_now_ = qp; }
   const std::string& last_error() const override { return err_; }
-  void SetBitrate(int64_t) override {}
+  void SetBitrate(int64_t bps) override {
+    if (bitrate) *bitrate = bps;
+  }
   std::optional<codec::HevcAccessUnit> Encode(const tile::ImageView& img, uint64_t,
                                               bool force_keyframe) override {
     err_.clear();
@@ -1218,24 +1221,30 @@ TEST(Session, TextModeKeepsUpWithTextThatChangesEverywhereAndEndsUpExact) {
   EXPECT_EQ(shown.Differences(px, W, H, frames), "");
 }
 
-TEST(Session, TextModePacesVideoPicturesAndStillDeliversThem) {
-  // A photo-like area that changes every frame: at 100 kbps a 2 kB picture
-  // is 0.64 s of the video share, so pictures go out a couple of times a
-  // second, not thirty, and the last change still arrives.
+TEST(Session, TextModeCodesMotionAsWithoutIt) {
+  // A photo-like area that changes every frame, 20 kB pictures on a 20 Mbps
+  // path: a picture every frame, at the whole bitrate, as without text mode
+  // (a fixed video allowance made a full-screen transition a second of
+  // blocks), and polished once it stops.
   auto [host_end, viewer_end] = transport::MakeLocalPipe();
   constexpr int W = 320, H = 192, kFps = 30;
   size_t pictures = 0;
+  int64_t bitrate = 0;
   auto enc = std::make_unique<FakeEncoder>();
-  enc->pad = 2000;
+  enc->pad = 20'000;
   enc->pictures = &pictures;
+  enc->bitrate = &bitrate;
   session::HostSession host(host_end.get(), std::move(enc), W, H,
-                            {.text_mode = true, .fps = kFps, .bitrate_bps = 100'000});
+                            {.text_mode = true, .fps = kFps, .bitrate_bps = 20'000'000});
+  host.SetBitrate(20'000'000);
+  EXPECT_EQ(bitrate, 20'000'000);
   std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 250);
   uint64_t t = 1'000'000;
   host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
   uint32_t seed = 5;
-  constexpr int kSeconds = 6;
-  for (int f = 0; f < kSeconds * kFps; ++f) {
+  constexpr int kFrames = 3 * kFps;
+  const size_t first = pictures;
+  for (int f = 0; f < kFrames; ++f) {
     t += 1'000'000 / kFps;
     for (int y = 0; y < 128; ++y) {
       for (int x = 0; x < 128; ++x) {
@@ -1245,13 +1254,9 @@ TEST(Session, TextModePacesVideoPicturesAndStillDeliversThem) {
     }
     host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
   }
-  // 3.1 kB/s of video share, after the burst the bucket starts with (two
-  // seconds of the bitrate, 25 kB): not thirty pictures a second for long.
-  EXPECT_GE(pictures, 4u);
-  EXPECT_LE(pictures, 1u + static_cast<size_t>((kSeconds * 100'000 / 8 * 0.25 + 25'000) / 2000) + 2);
+  EXPECT_EQ(pictures - first, static_cast<size_t>(kFrames));
   const size_t before = pictures;
-  EXPECT_TRUE(host.work_pending());  // the last frames' tiles are still owed
-  // ... and then polished: 30 more pictures, at the same pace.
+  EXPECT_TRUE(host.work_pending());  // refinement and the still-screen polish
   for (int f = 0; f < 60 * kFps && host.work_pending(); ++f) {
     t += 1'000'000 / kFps;
     host.OnFrame({{px.data(), W, H, W * 4}, {}, t});

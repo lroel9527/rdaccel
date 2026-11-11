@@ -44,7 +44,7 @@ extern "C" {
 
 #define RDA_VERSION_MAJOR 1
 #define RDA_VERSION_MINOR 9
-#define RDA_VERSION_PATCH 0
+#define RDA_VERSION_PATCH 1
 /* "rc1" and so on for a pre-release, "" for a release. rda_version() does
  * not include it; rda_version_string() does ("1.0.0-rc1"). */
 #define RDA_VERSION_PRERELEASE ""
@@ -500,11 +500,9 @@ typedef struct rda_host_config {
    * areas keep theirs), coded compactly and sent at once; this is where
    * the saving is, three to seven times on text. Motion (a scroll, a zoom
    * to full screen, a film) goes through the video encoder as without text
-   * mode, and what is text is sent again exactly once it stops. Video has
-   * an allowance of 1 Mbps with a burst for what appears all at once, and
-   * the cursor is sent at most 60 times a second. On a slow path the
-   * bitrate may follow it down to 32 kbps (below min_bitrate_bps). See
-   * rda_host_set_text_mode(). */
+   * mode, and what is text is sent again exactly once it stops. Video and
+   * the bitrate are as without text mode (1.9.1); the cursor is sent at
+   * most 60 times a second. See rda_host_set_text_mode(). */
   int32_t text_mode; /* 0 */
 } rda_host_config;
 

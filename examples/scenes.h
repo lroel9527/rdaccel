@@ -146,6 +146,31 @@ inline void Video(const Scene& s, Image& img, uint64_t i) {
   }
 }
 
+// A window zooming to full screen and back (an app entering and leaving
+// full screen): every 4 s it grows from the middle half of the screen to all
+// of it in half a second, stays a second and a half, and shrinks back. Its
+// content is the middle of the screenshot, scaled to the window.
+inline void Zoom(const Scene& s, Image& img, uint64_t i) {
+  const int f = static_cast<int>(i % 120);
+  double k;  // 0: the window, 1: full screen
+  if (f < 15) k = f / 15.0;
+  else if (f < 60) k = 1;
+  else if (f < 75) k = 1 - (f - 60) / 15.0;
+  else return;
+  k = k * k * (3 - 2 * k);  // eased
+  const rdaccel::Rect src{s.w / 4, s.h / 4, s.w / 2, s.h / 2};
+  const double rw = src.w + (s.w - src.w) * k, rh = src.h + (s.h - src.h) * k;
+  const int x0 = static_cast<int>((s.w - rw) / 2), y0 = static_cast<int>((s.h - rh) / 2);
+  const int x1 = x0 + static_cast<int>(rw), y1 = y0 + static_cast<int>(rh);
+  for (int y = std::max(0, y0); y < std::min(s.h, y1); ++y) {
+    const int sy = src.y + static_cast<int>((y - y0) * src.h / rh);
+    for (int x = std::max(0, x0); x < std::min(s.w, x1); ++x) {
+      const int sx = src.x + static_cast<int>((x - x0) * src.w / rw);
+      std::memcpy(s.px(img, x, y), s.bgpx(std::min(sx, s.w - 1), std::min(sy, s.h - 1)), 4);
+    }
+  }
+}
+
 using SceneFn = std::function<void(const Scene&, Image&, uint64_t)>;
 
 struct Scenario {
@@ -160,6 +185,7 @@ const Scenario kScenarios[] = {
     {"typing", Typing},
     {"scroll", Scroll},
     {"drag", Drag},
+    {"zoom", Zoom},
     {"video", [](const Scene& s, Image& img, uint64_t i) {
        Spinner(s, img, i);
        Video(s, img, i);

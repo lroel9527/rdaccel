@@ -101,9 +101,8 @@ struct HostConfig {
   // compactly and sent at once: three to seven times less on text. Motion
   // (a scroll, a zoom to full screen, a film) goes through the video
   // encoder as without text mode, and what is text is sent again exactly
-  // once it stops. Video has an allowance of 1 Mbps with a burst, the
-  // cursor is sent at most 60 times a second, and on a slow path the
-  // bitrate may follow it down to 32 kbps (below `min_bitrate_bps`).
+  // once it stops. Video (and the bitrate) is as without text mode; the
+  // cursor is sent at most 60 times a second.
   // Host::SetTextMode() switches it while streaming.
   bool text_mode = false;
 

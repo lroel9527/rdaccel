@@ -7,7 +7,8 @@
 //                  [--bandwidth=4000000] [--delay=20] [--jitter=0] [--loss=0] [--queue-ms=200]
 //                  [--drop-to=BPS --drop-at=SECONDS]   bandwidth change mid-run
 //                  [--bitrate=8000000] [--min-bitrate=300000] [--cc=1] [--abr=1] [--max-queue-ms=50] [--regions=1] [--progressive=1]
-//                  [--text=1]     text mode (sharp text on very slow links)
+//                  [--text=1]     text mode (the same experience, less traffic on text)
+//                  --scenario: idle typing scroll drag zoom video pause pointer
 //                  [--warmup=3]   seconds left out of the steady-state numbers
 //                  [--cursor=1]   also move the mouse pointer (cursor channel) and
 //                                 report how long positions take to arrive

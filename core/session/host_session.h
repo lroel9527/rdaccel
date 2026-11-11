@@ -93,12 +93,10 @@ struct HostOptions {
   //     encoder as a whole, as without text mode, and what is text is sent
   //     again exactly once it stops. So does text beyond the lossless
   //     budget. Tiles wait as the viewer has them (stale) only with a
-  //     keyframe on a slow path, or while the video bucket holds pictures
-  //     back.
-  //   * Video has a fixed allowance however fast the path is
-  //     (kTextVideoMaxRate, and kTextVideoShare of the bitrate on a slow
-  //     one), with a burst (kTextVideoBurst) for what appears all at once.
-  //     No video areas; the still-screen polish with half the pictures.
+  //     keyframe on a slow path.
+  //   * Video (motion, photos, video areas, refinement and the still-screen
+  //     polish) is coded as without text mode, at the same bitrate: the
+  //     mode saves on text, not by making what moves look worse.
   // See SetTextMode() to switch while streaming.
   bool text_mode = false;
   int text_colors = 16;
@@ -243,49 +241,10 @@ class HostSession {
   // frame, which no budget covers.
   static constexpr uint8_t kStalePlaceholder = 4;
   std::vector<uint8_t> stale_;
-  // Video pictures are paced by a bucket of bytes that fills at
-  // kTextVideoShare of the bitrate and holds a second of it; a picture goes
-  // out while it is not overdrawn.
-  static constexpr double kTextVideoShare = 0.25;
-  // ... and at most this many bytes a second however fast the path is: the
-  // mode is as much for saving traffic on a good link as for a slow one.
-  // Text goes out as fast as the path takes it (it is small); what would
-  // run up the bill is video, so that is what has a fixed allowance.
-  // 1 Mbps: enough for a scroll or a film to stay smooth. (At 160 kbps,
-  // the first setting, anything that moved for more than a few seconds
-  // dropped to a few pictures a second: the experience comes first, the
-  // saving second.)
-  static constexpr double kTextVideoMaxRate = 125'000;
-  static double TextVideoRate(int64_t bps) {
-    return std::min(static_cast<double>(bps) / 8.0 * kTextVideoShare, kTextVideoMaxRate);
-  }
-  // The bucket holds this much (and two seconds of the bitrate at most), and
-  // starts full: the long-run allowance is unchanged, but what comes all at
-  // once (the first picture, full screen, a window or an input method's
-  // candidates appearing over a wallpaper) gets pictures large enough to
-  // look right at once and is polished within a second or two, instead of
-  // standing there in blocks while 5 kB pictures arrive four a second. A
-  // film empties the bucket and then runs at the allowance.
-  static constexpr double kTextVideoBurst = 400'000;
-  static double TextVideoBurst(int64_t bps) {
-    return std::min(kTextVideoBurst, static_cast<double>(bps) / 8.0 * 2.0);
-  }
   // Text may use all of the bitrate: the allowance is on video, and what
   // the path cannot take is held back by the rate control's queue limit.
   // (At three quarters a fast scroll left rows of older text standing.)
   static constexpr double kTextLosslessShare = 1.0;
-  double video_tokens_ = 0;
-  uint64_t video_tokens_us_ = 0;
-  // The encoder's clock in text mode: one frame interval per picture, not
-  // the capture time. Its rate control budgets by elapsed time, so a
-  // picture after a pause of seconds came out at 9 kB (0.7 s of a 100 kbps
-  // path, during which nothing typed gets through). With an even clock, and
-  // a bitrate that works out to the picture size wanted (see SetBitrate),
-  // every picture is about that size.
-  uint64_t video_pts_ = 0;
-  // The picture size the encoder is set for (see SetTextPictureSize), 0 = not set.
-  double text_picture_bytes_ = 0;
-  void SetTextPictureSize(bool polish);
   // With a screenful owed (more than kTextCoarseBacklog tiles: the first
   // picture, a new window, a page that scrolled in), tiles the viewer has
   // nothing useful for first go out at kTextCoarseColors: a third of the

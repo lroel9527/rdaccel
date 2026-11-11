@@ -202,15 +202,12 @@ struct Host::Impl {
   std::unique_ptr<session::RateController> rate;  // only touched under submit_mu
   // Text mode (HostConfig::text_mode): as asked for, and as the session and
   // the rate controller were last set up (under submit_mu).
+  // The rate control is the same either way: a lower start and floor (for
+  // slow paths) left full-screen transitions in blocks on a fast one.
   static constexpr int kTextCursorHz = 60;
-  static constexpr int64_t kTextMinBitrate = 32'000;
-  static constexpr int32_t kTextMaxQueueMs = 150;
-  static constexpr int64_t kTextStartBitrate = 4'000'000;
   std::atomic<bool> text_mode{false};
   bool text_applied = false;
-  int64_t StartBitrate() const {
-    return text_applied ? std::min(config.bitrate_bps, kTextStartBitrate) : config.bitrate_bps;
-  }
+  int64_t StartBitrate() const { return config.bitrate_bps; }
 
   mutable std::mutex mu;  // guards the fields below
   uint64_t frames_dropped_congestion = 0;
@@ -429,8 +426,6 @@ struct Host::Impl {
     if (want_text != text_applied) {
       text_applied = want_text;
       if (session) session->SetTextMode(want_text);
-      // Its floor and starting point differ: measure the path anew.
-      rate.reset();
       log::Info(want_text ? "text mode on" : "text mode off");
     }
     if (!session || resized) {
@@ -515,14 +510,8 @@ struct Host::Impl {
     TransportStats st;
     if (config.adaptive_bitrate && transport->GetStats(&st)) {
       if (!rate) {
-        const int64_t floor = text_applied ? std::min(config.min_bitrate_bps, kTextMinBitrate) : config.min_bitrate_bps;
-        // Text mode: one packet is 96 ms of a 100 kbps path, so the queue
-        // that counts as "building" is longer.
-        const int32_t queue_ms = text_applied ? std::max(config.max_queue_ms, kTextMaxQueueMs) : config.max_queue_ms;
         rate = std::make_unique<session::RateController>(
-            config.bitrate_bps, std::min(floor, config.bitrate_bps), queue_ms,
-            text_applied ? StartBitrate() : 0);
-        if (text_applied) session->SetBitrate(rate->encoder_bps());
+            config.bitrate_bps, std::min(config.min_bitrate_bps, config.bitrate_bps), config.max_queue_ms);
       }
       const auto ss = session->stats();
       // What shows whether the target is used: the encoders' output, or in
