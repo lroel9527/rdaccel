@@ -95,16 +95,15 @@ struct HostConfig {
   int64_t min_bitrate_bps = 300'000;
   int32_t max_queue_ms = 50;
 
-  // Text mode: as little traffic as possible with text that is sharp, on a
-  // metered or a slow link. Text and UI are reduced to 16 of their own
-  // colours (more where 16 would show; edges stay exact), coded compactly,
-  // and never go through the video encoder first. They are sent as fast as
-  // the path takes them: on a good link the screen is complete with the
-  // first picture. Video (photos, films, animations) has a fixed allowance,
-  // 160 kbps at most, and the cursor is sent at most 30 times a second.
-  // Only where the path really is slow does text wait (it stays as it was
-  // and follows sharp, newest changes first; the bitrate may follow the
-  // path down to 32 kbps, below `min_bitrate_bps`). Video areas are off.
+  // Text mode: the same experience with less traffic. Text and UI that
+  // stand still, or change in a few places (typing), are reduced to 16 of
+  // their own colours (more where 16 would show; only at edges), coded
+  // compactly and sent at once: three to seven times less on text. Motion
+  // (a scroll, a zoom to full screen, a film) goes through the video
+  // encoder as without text mode, and what is text is sent again exactly
+  // once it stops. Video has an allowance of 1 Mbps with a burst, the
+  // cursor is sent at most 60 times a second, and on a slow path the
+  // bitrate may follow it down to 32 kbps (below `min_bitrate_bps`).
   // Host::SetTextMode() switches it while streaming.
   bool text_mode = false;
 

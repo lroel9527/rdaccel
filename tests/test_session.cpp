@@ -859,7 +859,9 @@ struct Shown {
               }
             }
             uint8_t& had = had_content[static_cast<size_t>(ty) * cols + tx];
-            if (plain && had) {
+            // (All black is the fake decoder's video picture: content on
+            // its way, not a placeholder.)
+            if (plain && had && (first[0] | first[1] | first[2]) != 0) {
               ++placeholders_back;
               where += " frame " + std::to_string(id) + " tile (" + std::to_string(tx) + "," + std::to_string(ty) + ")";
             }
@@ -910,11 +912,11 @@ void FillText(std::vector<uint8_t>& px, int w, const Rect& r, uint32_t& seed, in
 
 }  // namespace
 
-TEST(Session, TextModeNeverSendsTextAsVideoAndEndsUpExact) {
-  // Text beyond the budget must not go through the video encoder (the fake
-  // decoder shows black, so it would also show here): it waits and follows
-  // losslessly, within the text share of the bitrate, also while the screen
-  // keeps changing. Twelve colours a tile, so the reduced palette is exact.
+TEST(Session, TextModeKeepsTextWithinTheBitrateAndEndsUpExact) {
+  // Text beyond the budget goes as video first, as without text mode (a
+  // tile left as it was among new ones looks worse than a soft one), and
+  // follows losslessly, within the bitrate. Twelve colours a tile, so the
+  // reduced palette is exact.
   auto [host_end, viewer_end] = transport::MakeLocalPipe();
   constexpr int W = 640, H = 384, kFps = 30;
   constexpr int64_t kBitrate = 400'000;
@@ -943,7 +945,6 @@ TEST(Session, TextModeNeverSendsTextAsVideoAndEndsUpExact) {
     }
     host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
   }
-  EXPECT_EQ(pictures, 1u) << "text went through the video encoder";
   const double seconds = static_cast<double>(kFrames) / kFps;
   const double sent = static_cast<double>(host.stats().lossless_bytes - after_key);
   // The bitrate, what the bucket holds (300 ms), and one tile a frame.
@@ -956,7 +957,6 @@ TEST(Session, TextModeNeverSendsTextAsVideoAndEndsUpExact) {
     host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
   }
   EXPECT_FALSE(host.work_pending());
-  EXPECT_EQ(pictures, 1u);
   const uint64_t frames = host.stats().frames_encoded;
   PipeStopper stop{host_end, viewer_end};
   EXPECT_EQ(shown.Differences(px, W, H, frames), "");

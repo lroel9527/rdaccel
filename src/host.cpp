@@ -107,7 +107,8 @@ struct Host::Impl {
   void PollCursor(std::unique_ptr<capture::ICursorSource> src) {
     const int hz = std::clamp(config.cursor_poll_hz, 1, 1000);
     const auto full_period = std::chrono::microseconds(1'000'000 / hz);
-    // Text mode: a moving pointer at 120 Hz is 16 kbps of positions.
+    // Text mode: a moving pointer at 120 Hz is 16 kbps of positions; at 60
+    // it still moves with every frame of a 60 Hz screen.
     const auto text_period = std::chrono::microseconds(1'000'000 / std::min(hz, kTextCursorHz));
     auto next = std::chrono::steady_clock::now();
     capture::CursorSample s;
@@ -201,7 +202,7 @@ struct Host::Impl {
   std::unique_ptr<session::RateController> rate;  // only touched under submit_mu
   // Text mode (HostConfig::text_mode): as asked for, and as the session and
   // the rate controller were last set up (under submit_mu).
-  static constexpr int kTextCursorHz = 30;
+  static constexpr int kTextCursorHz = 60;
   static constexpr int64_t kTextMinBitrate = 32'000;
   static constexpr int32_t kTextMaxQueueMs = 150;
   static constexpr int64_t kTextStartBitrate = 4'000'000;

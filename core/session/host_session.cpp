@@ -139,10 +139,6 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     unflattened_.assign(n_tiles, 0);
     stale_.assign(n_tiles, 0);
     coarse_.assign(n_tiles, 0);
-    animated_.assign(n_tiles, 0);
-    hot_since_us_.assign(n_tiles, 0);
-    last_change_us_.assign(n_tiles, 0);
-    lossless_sent_us_.assign(n_tiles, 0);
   }
   // A keyframe starts the progressive sequence over.
   const bool progressive_key = key && options_.progressive && options_.lossless;
@@ -163,7 +159,9 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   // Video areas: their tiles leave the normal path and go to the area's own
   // stream (see EncodeRegions).
   const bool text = options_.text_mode && options_.lossless;
-  const bool use_regions = options_.region_encoder_factory && !regions_disabled_ && !text;
+  // (Video areas as without text mode: a film in its own cropped stream is
+  // both smoother and cheaper than in full-screen pictures.)
+  const bool use_regions = options_.region_encoder_factory && !regions_disabled_;
   if (regions_.cols() != differ_.cols() || regions_.rows() != differ_.rows()) {
     regions_.Reset(width_, height_);
   }
@@ -199,6 +197,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       CopyRectInto(frame.bgra, c.rect, prev_.data(), width_ * 4);
       quality_[idx] = kRough;
       born_[idx] = frame_no_;
+      stale_[idx] = 0;  // the area's picture brings it up to date
       return true;
     });
   }
@@ -342,11 +341,6 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       const size_t idx = (start + k) % n_tiles;
       if (!pending_lossless_[idx] || progressive_now[idx]) continue;
       if (listed[idx]) continue;  // changed anyway: coded normally below
-      // An animation's tile: not yet again.
-      if (animated_[idx] && frame.capture_time_us - std::min(frame.capture_time_us, lossless_sent_us_[idx]) <
-                                kTextAnimationIntervalUs) {
-        continue;
-      }
       const auto col = static_cast<int32_t>(idx % differ_.cols());
       const auto row = static_cast<int32_t>(idx / differ_.cols());
       if (regions_.RegionOf(col, row) >= 0) {
@@ -489,23 +483,20 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
                                                 frame.capture_time_us - hot_us <= kHotHoldUs));
     hot_us = hot[i] ? frame.capture_time_us : 0;
     born = frame_no_;
-    // Since when it has kept changing: with gaps of up to kHotHoldUs (a
-    // film that pans slowly leaves a tile as it is for a frame now and
-    // then).
-    uint64_t& since = hot_since_us_[tile_index(changes[i])];
-    uint64_t& last = last_change_us_[tile_index(changes[i])];
-    if (key || since == 0 || frame.capture_time_us - std::min(frame.capture_time_us, last) > kHotHoldUs) {
-      since = frame.capture_time_us;
-    }
-    last = frame.capture_time_us;
   }
 
-  // Text mode: many tiles that change every frame are an animation or a
-  // video, not typing (see code_rect).
+  // Text mode: many tiles that change frame after frame are motion (a
+  // scroll that re-renders its text, a window zooming to full screen, a
+  // film), not typing. Motion goes through the video encoder as a whole,
+  // as without text mode: every tile of it in the same picture, a little
+  // soft, and what is text is sent again exactly once it stops. Deciding
+  // tile by tile (this one sharp now, that one later, a third as video)
+  // showed the screen cut into pieces of different ages for as long as it
+  // moved. A few such tiles (typing, a caret, a clock) stay exact.
   constexpr size_t kTextMaxHotTiles = 8;
   size_t n_hot = 0;
   for (bool h : hot) n_hot += h;
-  bool animation = text && n_hot > kTextMaxHotTiles;
+  bool mass_motion = text && n_hot > kTextMaxHotTiles;
 
   std::vector<tile::Move> moves;
   std::vector<bool> moved;
@@ -525,7 +516,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     // Text mode: a tile that keeps changing and gets less than half of its
     // pixels from copies has not moved; something in it has (a film that
     // pans: its tiles match a strip here and there). It is coded as a
-    // whole, which is what the animation allowance looks at.
+    // whole.
     if (text) {
       for (size_t i = 0; i < changes.size(); ++i) {
         if (!moved[i] || !hot[i]) continue;
@@ -539,13 +530,10 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     }
     size_t moved_count = 0;
     for (bool b : moved) moved_count += b;
-    // Where most of what changes moves, what else changes every frame is
-    // what the motion uncovers (the trail of a dragged window), not an
-    // animation. (A film matches a copy here and there; most of its tiles
-    // do not.)
+    // (Tiles that are copied are not the ones in question.)
     size_t hot_unmoved = 0;
     for (size_t i = 0; i < changes.size(); ++i) hot_unmoved += hot[i] && !moved[i];
-    if (hot_unmoved <= kTextMaxHotTiles || moved_count >= hot_unmoved) animation = false;
+    if (hot_unmoved <= kTextMaxHotTiles) mass_motion = false;
     const double hold = static_cast<double>(options_.bitrate_bps) / 8.0 * kLosslessBurstFrames * frame_us / 1e6;
     if (moves.size() > 64 && moves.size() > 6 * moved_count && options_.bitrate_bps > 0 &&
         kBytesPerMove * static_cast<double>(moves.size()) > 0.5 * hold) {
@@ -687,7 +675,6 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   // (text mode) kDeferred: nothing was sent, the tile is stale and owed.
   enum : int { kCodedLossless = 0, kCodedVideo = 1, kDeferred = 2 };
   bool last_coarse = false;  // the last rect went out at the quick pass's colours
-  bool whole_tile = false;   // code_rect is coding a tile that changed as a whole
   auto code_rect = [&](const tile::TileChange& c, const Rect& r, bool is_hot) -> int {
     // Lossless pays off on content that stays, or on a thin sliver; content
     // that keeps changing is cheaper as video unless it is very simple.
@@ -702,11 +689,18 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       max_colors = std::max(std::min(max_colors, r.w * r.h / 6), options_.lossless_max_colors_hot);
     }
     codec::PaletteTile t;
-    // Text mode: reduced colours, and what changes every frame is held to
-    // the budget instead of a colour limit (typing must not turn to video).
+    // Text mode: reduced colours. What changes every frame is exact while it
+    // is a few tiles (typing must not turn to video); as part of motion
+    // (see mass_motion) it follows the rule for hot tiles: exact with very
+    // few colours, else video now and, as it may be text, owed exactly.
     bool palette = false;
     last_coarse = false;
-    if (text) {
+    const bool in_motion = text && mass_motion && is_hot && !sliver && !key &&
+                           (progressive_now.empty() || !progressive_now[tile_index(c)]);
+    if (in_motion) {
+      palette = codec::ExtractPalette(frame.bgra, r, max_colors, t);
+      if (!palette) owe_lossless(tile_index(c));
+    } else if (text) {
       const size_t idx = tile_index(c);
       // The quick pass: a whole tile on its turn, which the viewer has
       // nothing useful for (stale, or a keyframe's), once.
@@ -753,37 +747,8 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       // lets the first of a frame through while the bucket is not overdrawn
       // (at these rates one tile is more than a frame's share).
       const double cost = text ? raw * lossless_ratio_ : raw * kLosslessRawShare;
-      // Text mode, part of an animation (flat-coloured video, a busy
-      // progress display): sent every frame it would take the budget from
-      // the text. It waits its turn with the tiles that are owed, so it
-      // updates as often as the path allows, sharp, and what is typed
-      // meanwhile still goes first.
-      // Only tiles that change as a whole: what a dragged window or a
-      // scroll leaves to code next to its copies is not an animation (held
-      // back, the window left a trail that was repaired twice a second).
-      const uint64_t hot_since = hot_since_us_[tile_index(c)];
-      const bool animated = animation && whole_tile && !sliver && hot_since != 0 &&
-                            frame.capture_time_us - std::min(frame.capture_time_us, hot_since) >=
-                                kTextAnimationIntervalUs &&
-                            static_cast<int>(n) > options_.lossless_max_colors_hot;
-      // While the video bucket holds a burst, an animation's tile goes
-      // through the video encoder instead: every frame, a little soft, and
-      // sharp again once it stops (it is rough, so it is sent losslessly
-      // then). A page that scrolls without its tiles matching as copies
-      // (smooth scrolling re-renders the text at every offset) is such an
-      // "animation": updated twice a second it left rows of older text
-      // standing, which looks worse than a moment of softness.
-      if (animated && !key && !hold_video && video_tokens_ > 4 * std::max(2000.0, TextVideoRate(options_.bitrate_bps) * 0.25)) {
-        owe_lossless(tile_index(c));  // exact once it stops changing
-        CopyRectInto(frame.bgra, r, enc_input_.data(), enc_stride);
-        tile::TileChange part = c;
-        part.rect = r;
-        video_tiles.push_back(part);
-        return kCodedVideo;
-      }
-      const bool over = animated ||
-                        (text ? lossless_budget <= 0 || (lossless_spent > 0 && lossless_spent + cost > lossless_budget)
-                              : lossless_spent + cost > lossless_budget);
+      const bool over = text ? lossless_budget <= 0 || (lossless_spent > 0 && lossless_spent + cost > lossless_budget)
+                             : lossless_spent + cost > lossless_budget;
       if ((!key || text) && !progressive_turn && n > 1 && options_.bitrate_bps > 0 && over) {
         over_lossless_budget = true;
         // Owed: sent losslessly once it stops changing, within the bucket
@@ -791,10 +756,13 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
         // the tile stayed at video quality (refresh is off by default).
         const size_t idx = tile_index(c);
         owe_lossless(idx);
-        if (text) {
-          // Not as video in between: the viewer keeps what it has.
+        // Text mode waits only where it must: with a keyframe (whose
+        // picture shows the tile's background meanwhile), or while the video
+        // bucket holds pictures back. Otherwise as without text mode, video
+        // now and exact later: a tile left as it was among tiles that are
+        // new looks worse than one that is soft for a moment.
+        if (text && (key || hold_video)) {
           stale_[idx] |= kStaleText;
-          animated_[idx] = animated;
           if (key) {
             stale_[idx] |= kStalePlaceholder;
             // A keyframe's picture covers the whole screen: there the tile
@@ -805,7 +773,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
             // painted it back at every blink, and a partial change left
             // the rest of it a block of plain colour for good.
             FillRect(r, t.colors[0], enc_input_.data(), enc_stride);
-          } else if (!animated && urgent_.size() < 4096) {
+          } else if (urgent_.size() < 4096) {
             urgent_.push_back(idx);
           }
           return kDeferred;
@@ -960,6 +928,10 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
         }
       }
       quality_[idx] = q;
+      // Text mode: what was copied from video quality may be text that went
+      // as video while it moved; it is owed exactly like the tile it came
+      // from (which is not where it was any more).
+      if (text && q != kExact) owe_lossless(idx);
       continue;
     }
     // Tile cache, part 2: content the viewer has kept. Like moves, the
@@ -969,6 +941,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
         loads.push_back({*slot, c.rect});
         quality_[idx] = slot_quality_[*slot];
         stale_[idx] = 0;
+        if (text && quality_[idx] != kExact) owe_lossless(idx);
         continue;
       }
     }
@@ -985,14 +958,11 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
           if (code_rect(c, part, hot[i])) q = kRough;
         }
         quality_[idx] = q;
+        if (text && q != kExact) owe_lossless(idx);
         continue;
       }
     }
-    // (Not one that is part of a scroll or a drag and is coded whole only
-    // because its copies could not be used.)
-    whole_tile = !(i < n_changed && !moved.empty() && moved[i]);
     const int how = code_rect(c, c.rect, i < n_changed && hot[i]);
-    whole_tile = false;
     if (how == kDeferred) {
       quality_[idx] = kRough;
     } else if (how == kCodedVideo) {
@@ -1006,8 +976,6 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       quality_[idx] = last_coarse ? kRough : kExact;
       coarse_[idx] = last_coarse;
       stale_[idx] = 0;
-      animated_[idx] = 0;
-      lossless_sent_us_[idx] = frame.capture_time_us;
     }
   }
   coarse_count_ = 0;
@@ -1411,12 +1379,6 @@ void HostSession::SetTextMode(bool on) {
   if (on == options_.text_mode) return;
   options_.text_mode = on;
   if (on) {
-    // Video areas go back to the normal path.
-    for (const auto& reg : regions_.regions()) {
-      for (size_t idx : TilesOf(reg.rect)) pending_sharpen_.push_back(idx);
-    }
-    regions_.Clear();
-    region_enc_.clear();
     video_tokens_ = 0;
     video_tokens_us_ = 0;
   } else {
@@ -1427,21 +1389,27 @@ void HostSession::SetTextMode(bool on) {
 }
 
 void HostSession::SetTextPictureSize(bool polish) {
-  // A picture of a quarter second of the video allowance, 2 kB at least (a
-  // hardware encoder's floor for a busy screen); pictures that polish a
-  // still screen 0.6 s of it (at the small size the wallpaper and the icons
-  // never got clean). While the bucket holds a burst, a sixth of what it
+  // A picture of a frame interval of the video allowance (so that motion
+  // keeps its frame rate), 2 kB at least (a hardware encoder's floor for a
+  // busy screen); pictures that polish a still screen 2.4 times that (at
+  // the small size the wallpaper and the icons never got clean). While the
+  // bucket holds a burst, a sixth of what it
   // holds: the first pictures of something new are large, the ones after
   // them smaller, down to the allowance. Never more than a quarter second
   // of the bitrate, or 80 kB. Given to the encoder as a rate at one picture
   // per frame interval: that is how it is clocked (video_pts_).
-  const double base = std::max(2000.0, TextVideoRate(options_.bitrate_bps) * (polish ? 0.6 : 0.25));
+  const double per_frame = TextVideoRate(options_.bitrate_bps) / std::max(1, options_.fps);
+  const double base = std::max(2000.0, per_frame * (polish ? 2.4 : 1.0));
   const double most = std::min(80'000.0, static_cast<double>(options_.bitrate_bps) / 8.0 * 0.25);
   const double picture = std::max(base, std::min(most, std::max(0.0, video_tokens_) / 6.0));
-  // Small changes are not worth an encoder reconfiguration.
-  if (text_picture_bytes_ > 0 && picture > 0.85 * text_picture_bytes_ && picture < 1.15 * text_picture_bytes_) return;
-  text_picture_bytes_ = picture;
-  encoder_->SetBitrate(static_cast<int64_t>(picture * 8.0 * std::max(1, options_.fps)));
+  // In steps of two from the base, so the encoder is not set anew for
+  // every picture while the bucket runs down.
+  double step = base;
+  while (step * 2 <= picture) step *= 2;
+  if (step == text_picture_bytes_) return;
+  text_picture_bytes_ = step;
+  const double picture_set = step;
+  encoder_->SetBitrate(static_cast<int64_t>(picture_set * 8.0 * std::max(1, options_.fps)));
 }
 
 void HostSession::SetBitrate(int64_t bps) {

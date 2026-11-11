@@ -85,17 +85,20 @@ struct HostOptions {
   //     merge. Text on a soft gradient or a translucent panel (more than
   //     lossless_max_colors colours) qualifies too, where it would otherwise
   //     be video coded and blurred.
-  //   * Text is never sent as video first (that is paying twice). It goes
-  //     out as fast as the path takes it: a keyframe carries the whole
-  //     screen's text if half a second of the bitrate covers it. Only tiles
-  //     beyond the lossless budget (a slow path) stay as the viewer has
-  //     them (stale) and follow, sharp, as the budget allows.
+  //   * Text that stands still, or changes in a few tiles (typing), goes
+  //     out exactly and at once: a keyframe carries the whole screen's text
+  //     if half a second of the bitrate covers it.
+  //   * Motion (many tiles changing frame after frame: a scroll that
+  //     re-renders, a zoom to full screen, a film) goes through the video
+  //     encoder as a whole, as without text mode, and what is text is sent
+  //     again exactly once it stops. So does text beyond the lossless
+  //     budget. Tiles wait as the viewer has them (stale) only with a
+  //     keyframe on a slow path, or while the video bucket holds pictures
+  //     back.
   //   * Video has a fixed allowance however fast the path is
   //     (kTextVideoMaxRate, and kTextVideoShare of the bitrate on a slow
-  //     one), in pictures of a quarter second of it: photos and films
-  //     update a few times a second at most. No video areas, no
-  //     still-screen polish, two refinement pictures. Many tiles that change
-  //     as a whole every frame (an animation) are sent twice a second.
+  //     one), with a burst (kTextVideoBurst) for what appears all at once.
+  //     No video areas; the still-screen polish with half the pictures.
   // See SetTextMode() to switch while streaming.
   bool text_mode = false;
   int text_colors = 16;
@@ -248,18 +251,14 @@ class HostSession {
   // mode is as much for saving traffic on a good link as for a slow one.
   // Text goes out as fast as the path takes it (it is small); what would
   // run up the bill is video, so that is what has a fixed allowance.
-  static constexpr double kTextVideoMaxRate = 20'000;  // 160 kbps
+  // 1 Mbps: enough for a scroll or a film to stay smooth. (At 160 kbps,
+  // the first setting, anything that moved for more than a few seconds
+  // dropped to a few pictures a second: the experience comes first, the
+  // saving second.)
+  static constexpr double kTextVideoMaxRate = 125'000;
   static double TextVideoRate(int64_t bps) {
     return std::min(static_cast<double>(bps) / 8.0 * kTextVideoShare, kTextVideoMaxRate);
   }
-  // Tiles of an animation (see code_rect) are sent again at most this often.
-  static constexpr uint64_t kTextAnimationIntervalUs = 500'000;
-  // An animation is a tile that has changed in every frame for that long
-  // (per tile: since when, 0 = it has not), in a frame where little moves.
-  std::vector<uint64_t> hot_since_us_;
-  std::vector<uint64_t> last_change_us_;
-  std::vector<uint8_t> animated_;        // per tile: deferred as part of an animation
-  std::vector<uint64_t> lossless_sent_us_;  // per tile: capture time it last went out losslessly
   // The bucket holds this much (and two seconds of the bitrate at most), and
   // starts full: the long-run allowance is unchanged, but what comes all at
   // once (the first picture, full screen, a window or an input method's

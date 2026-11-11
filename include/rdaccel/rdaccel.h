@@ -43,8 +43,8 @@ extern "C" {
 /* ---- version ------------------------------------------------------------ */
 
 #define RDA_VERSION_MAJOR 1
-#define RDA_VERSION_MINOR 8
-#define RDA_VERSION_PATCH 2
+#define RDA_VERSION_MINOR 9
+#define RDA_VERSION_PATCH 0
 /* "rc1" and so on for a pre-release, "" for a release. rda_version() does
  * not include it; rda_version_string() does ("1.0.0-rc1"). */
 #define RDA_VERSION_PRERELEASE ""
@@ -494,18 +494,17 @@ typedef struct rda_host_config {
    * process does not film itself. macOS only; Linux captures everything. */
   int32_t capture_own_windows; /* 0 */
 
-  /* 1.5. 1: text mode: as little traffic as possible with text that is
-   * sharp, on a metered or a slow link. Text and UI are reduced to 16 of
-   * their own colours (more where 16 would show; edges stay exact, the
-   * shades of anti-aliasing merge), coded compactly, and never sent through
-   * the video encoder first. They go out as fast as the path takes them: on
-   * a good link the screen is complete with the first picture. What is held
-   * to a fixed allowance is video (photos, films, animations: 160 kbps at
-   * most, a few pictures a second), and the cursor is sent at most 30 times
-   * a second. Only where the path really is slow does text wait: it then
-   * stays as it was and follows sharp, newest changes first, and the bitrate
-   * may follow the path down to 32 kbps (below min_bitrate_bps). Video areas
-   * are off. See rda_host_set_text_mode(). */
+  /* 1.5. 1: text mode: the same experience with less traffic. Text and UI
+   * that stand still, or change in a few places (typing), are reduced to 16
+   * of their own colours (more where 16 would show; only at edges, smooth
+   * areas keep theirs), coded compactly and sent at once; this is where
+   * the saving is, three to seven times on text. Motion (a scroll, a zoom
+   * to full screen, a film) goes through the video encoder as without text
+   * mode, and what is text is sent again exactly once it stops. Video has
+   * an allowance of 1 Mbps with a burst for what appears all at once, and
+   * the cursor is sent at most 60 times a second. On a slow path the
+   * bitrate may follow it down to 32 kbps (below min_bitrate_bps). See
+   * rda_host_set_text_mode(). */
   int32_t text_mode; /* 0 */
 } rda_host_config;
 
