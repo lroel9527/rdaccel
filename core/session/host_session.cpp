@@ -264,6 +264,9 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   // half of this frame's share of the bitrate.
   size_t progressive_sent = 0;
   std::vector<uint8_t> progressive_now(n_tiles, 0);
+  // What the owed tiles of this frame may come to, and what the ones coded
+  // so far are counted at (see where they are coded).
+  double owed_budget = 0, owed_spent = 0;
   // Once the screen is nearly still, every tile left at video quality (sent
   // as video for want of budget, moved or copied from such a tile, or the
   // first picture's) is owed too, and goes out losslessly within the bucket
@@ -296,11 +299,17 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     // By time rather than per frame: frames the transport made us skip
     // leave their share to the next one.
     const double frame_us = 1e6 / std::max(1, options_.fps);
+    // At most kOwedMaxUs of it in one frame: a frame is on its way for as
+    // long as its bytes take, and nothing else arrives meanwhile. (Six
+    // frame intervals at 30 Hz were 200 ms; with the picture that refines
+    // the video tiles in the same frame, 30 kB at 0.4 Mbps: most of a
+    // second each time a scroll stopped.)
     const double dt_us = std::clamp(
         static_cast<double>(frame.capture_time_us - std::min(frame.capture_time_us, progressive_last_us_)),
-        frame_us, 6 * frame_us);
+        frame_us, std::max(frame_us, std::min(6 * frame_us, kOwedMaxUs)));
     const double budget =
         static_cast<double>(options_.bitrate_bps) / 8.0 * dt_us / 1e6 * kProgressiveShare;
+    owed_budget = std::min(budget, std::max(0.0, lossless_tokens_));
     // Within the lossless bucket too: a progressive keyframe right after a
     // drop would otherwise send its tiles faster than the path takes them.
     const double per_tile = std::max(lossless_bytes_per_tile_, 64.0);
@@ -781,6 +790,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       }
       lossless_spent += cost;
       lossless_raw += raw;
+      if (progressive_turn) owed_spent += raw * lossless_ratio_;
       if (progressive_turn) {
         // Flattening it now would make the encoder code the change, and at a
         // low bitrate that costs the tiles still refining around it.
@@ -880,9 +890,22 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   quiet_ = n_changed * 50 <= n_tiles;
   std::vector<size_t> refine_after;  // tiles that went to video whole
   std::vector<uint8_t> recoded(text ? n_tiles : 0, 0);
+  size_t put_back = 0;  // owed tiles left for the next frame
   for (size_t i = 0; i < changes.size(); ++i) {
     const auto& c = changes[i];
     const size_t idx = tile_index(c);
+    // Owed tiles were picked by what a tile costs on average, and a tile of
+    // dense text costs several times that: once the ones coded come to the
+    // frame's share, the rest keep their turn for the next frame (the first
+    // always goes).
+    if (i >= n_changed && progressive_now[idx] && owed_spent > 0 && owed_spent >= owed_budget &&
+        options_.bitrate_bps > 0) {
+      progressive_now[idx] = 0;
+      if (put_back == 0) pending_cursor_ = idx;
+      ++put_back;
+      --progressive_sent;
+      continue;
+    }
     // The viewer does not have the tile as it was (text mode): nothing in
     // it can be taken as unchanged, so it is coded whole.
     const bool was_stale = stale_[idx] != 0;
@@ -1334,7 +1357,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   stats_.moved_tiles += moved_tiles;
   moving_ = moved_tiles > 0 && over_lossless_budget;
   stats_.cached_tiles += n_loads;
-  stats_.refreshed_tiles += refresh.size() - progressive_sent;
+  stats_.refreshed_tiles += refresh.size() - put_back - progressive_sent;
   stats_.progressive_tiles += progressive_sent;
   stats_.lossless_us_total += (t1 - t0) + (t3 - t2);
   return true;

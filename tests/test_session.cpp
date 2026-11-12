@@ -1396,3 +1396,48 @@ TEST(Session, TheEncoderSeesTheScreenJustOutsideWhatTheViewerTakesFromAPicture) 
   EXPECT_GT(further, 64u);  // still one colour there
   PipeStopper stop{host_end, viewer_end};
 }
+
+TEST(Session, OwedTextGoesOutAFewTilesAFrameOnASlowPath) {
+  // A screenful of dense text that went as video while it moved, on a
+  // 0.4 Mbps path where frames come 200 ms apart (the transport skips the
+  // ones in between). Each frame may bring a tenth of a second's worth of
+  // the text that is owed, counted at what the tiles really come to: a
+  // frame is on its way for as long as its bytes take. (They were picked by
+  // the average cost of a tile and by up to six frame intervals: 8 kB and
+  // more in a frame, 15 with what the bucket held.)
+  constexpr int W = 640, H = 384, kFps = 30;
+  constexpr int64_t kBitrate = 400'000;
+  auto [host_end, viewer_end] = transport::MakeLocalPipe();
+  session::HostSession host(host_end.get(), std::make_unique<FakeEncoder>(), W, H,
+                            {.text_mode = true, .context_tiles = true, .fps = kFps, .bitrate_bps = kBitrate});
+  session::ViewerSession viewer(nullptr, std::make_unique<FakeDecoder>());
+  Shown shown;
+  shown.Attach(viewer);
+  viewer.Attach(viewer_end.get());
+  std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 250);
+  for (size_t i = 3; i < px.size(); i += 4) px[i] = 255;
+  uint32_t seed = 21;
+  uint64_t t = 1'000'000;
+  host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+  for (int f = 0; f < 30; ++f) {  // motion: all of it new in every frame
+    t += 1'000'000 / kFps;
+    FillText(px, W, {0, 0, W, H}, seed, 6);
+    host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+  }
+  uint64_t before = host.stats().lossless_bytes;
+  uint64_t most = 0;
+  int frames = 0;
+  for (; frames < 600 && host.work_pending(); ++frames) {
+    t += 200'000;
+    host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+    const uint64_t now = host.stats().lossless_bytes;
+    most = std::max(most, now - before);
+    before = now;
+  }
+  EXPECT_FALSE(host.work_pending());
+  // A tenth of a second is 5 kB; the last tile of a frame may go over.
+  EXPECT_LE(most, 7000u) << "in " << frames << " frames";
+  const uint64_t encoded = host.stats().frames_encoded;
+  PipeStopper stop{host_end, viewer_end};
+  EXPECT_EQ(shown.Differences(px, W, H, encoded), "");
+}
