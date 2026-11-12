@@ -8,7 +8,7 @@ cmake_minimum_required(VERSION 3.24)
 if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET AND NOT DEFINED ENV{MACOSX_DEPLOYMENT_TARGET})
   set(CMAKE_OSX_DEPLOYMENT_TARGET "12.3" CACHE STRING "Minimum macOS version")
 endif()
-project(rdaccel VERSION 1.9.1 LANGUAGES C CXX)
+project(rdaccel VERSION 1.9.2 LANGUAGES C CXX)
 # Pre-release label ("rc1"), empty for a release. The full version, as the
 # library, the packages and the tag (v1.0.0-rc1) show it, is
 # PROJECT_VERSION[-RDACCEL_PRERELEASE].
@@ -196,6 +196,7 @@ if(APPLE)
     "-framework VideoToolbox"
     "-framework ScreenCaptureKit"
     "-framework IOSurface"
+    "-framework IOKit"
   )
 else()
   find_package(PkgConfig REQUIRED)
@@ -272,7 +273,7 @@ if(RDACCEL_INSTALL)
   # `pkg-config --static` does not expand FFmpeg's own static dependencies:
   # rdaccel links the shared FFmpeg/X11 libraries, as the CMake package does.
   if(APPLE)
-    set(RDA_PC_LIBS_PRIVATE "-lz -lc++ -framework Foundation -framework AppKit -framework Carbon -framework CoreGraphics -framework CoreMedia -framework CoreVideo -framework VideoToolbox -framework ScreenCaptureKit -framework IOSurface")
+    set(RDA_PC_LIBS_PRIVATE "-lz -lc++ -framework Foundation -framework AppKit -framework Carbon -framework CoreGraphics -framework CoreMedia -framework CoreVideo -framework VideoToolbox -framework ScreenCaptureKit -framework IOSurface -framework IOKit")
   else()
     string(JOIN " " RDA_PC_LIBS_PRIVATE ${FFMPEG_LDFLAGS} ${X11_LDFLAGS} ${PIPEWIRE_LDFLAGS} -lz -lstdc++ -lm -pthread)
   endif()

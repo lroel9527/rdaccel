@@ -4,6 +4,7 @@
 
 #import <Carbon/Carbon.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <IOKit/pwr_mgt/IOPMLib.h>
 #include <dispatch/dispatch.h>
 #include <pthread.h>
 
@@ -50,8 +51,30 @@ CGEventFlags Flags(uint32_t mods) {
   return f;
 }
 
+// Tells the power manager a user is active, at most once a second. Posted
+// events alone do not wake a display that is off: on a locked Mac the
+// display turns off after a while and the lock screen then takes no posted
+// keys until something turns it back on. This turns it on with the first
+// injected event, and keeps the Mac from idling into display sleep or the
+// screen lock while someone works remotely, as for a local user.
+void DeclareUserActivity() {
+  static std::atomic<int64_t> last_ms{0};
+  static std::mutex mu;
+  static IOPMAssertionID id = kIOPMNullAssertionID;
+  const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now().time_since_epoch())
+                          .count();
+  int64_t last = last_ms.load(std::memory_order_relaxed);
+  if (last != 0 && now - last < 1000) return;
+  if (!last_ms.compare_exchange_strong(last, now)) return;  // another thread does it
+  std::lock_guard lock(mu);
+  const IOReturn r = IOPMAssertionDeclareUserActivity(CFSTR("rdaccel remote input"), kIOPMUserActiveLocal, &id);
+  if (r != kIOReturnSuccess) log::Debug("input: IOPMAssertionDeclareUserActivity failed: " + std::to_string(r));
+}
+
 void Post(CGEventRef ev) {
   if (!ev) return;
+  DeclareUserActivity();
   CGEventPost(kCGHIDEventTap, ev);
   CFRelease(ev);
 }
