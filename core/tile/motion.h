@@ -20,6 +20,7 @@
 //      remaining rows are left to code.
 
 #include <cstdint>
+#include <functional>
 #include <span>
 #include <vector>
 
@@ -38,6 +39,16 @@ struct Move {
 struct MotionOptions {
   size_t min_changed_tiles = 6;  // below this, plain coding is cheap anyway
   int max_vectors = 3;
+  // Unchanged tiles inside the moving area (a blank page, a flat window
+  // body) are made part of the moves, so that the pieces around them join
+  // into a few large ones. Their pixels are the same before and after, but
+  // only where the copy's source is what it is here: a receiver that shows
+  // the source less exactly than the tile it lands on (video quality next
+  // to a lossless tile) would copy that over a tile which was fine, and
+  // nothing would ever send it again, as it did not change. With this set,
+  // such a tile is only added when the function returns true for the rect
+  // it would be copied from. Unset: always (the pixels are exact copies).
+  std::function<bool(const Rect& src)> may_copy_unchanged;
 };
 
 // Finds moves that explain some of `changes`. `moved[i]` is set for every

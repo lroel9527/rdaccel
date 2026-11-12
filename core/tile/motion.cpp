@@ -247,8 +247,9 @@ std::vector<Move> DetectMoves(const ImageView& prev, const ImageView& cur,
     }
 
     // Unchanged tiles inside the moving area (blank page, flat window body)
-    // also match the shifted picture. Copying them changes nothing, but it
-    // lets the pieces around them join into a few large moves.
+    // also match the shifted picture. Copying them changes nothing where the
+    // source is shown exactly (see MotionOptions::may_copy_unchanged), and
+    // it lets the pieces around them join into a few large moves.
     if (!partial.empty()) {
       Rect box = partial.front();
       for (const Rect& r : partial) {
@@ -270,6 +271,7 @@ std::vector<Move> DetectMoves(const ImageView& prev, const ImageView& cur,
           r.h = std::min(r.h, cur.height - r.y);
           const int32_t sx = r.x - dx, sy = r.y - dy;
           if (sx < 0 || sy < 0 || sx + r.w > prev.width || sy + r.h > prev.height) continue;
+          if (opts.may_copy_unchanged && !opts.may_copy_unchanged({sx, sy, r.w, r.h})) continue;
           if (SameRect(cur, r, prev, sx, sy)) partial.push_back(r);
         }
       }

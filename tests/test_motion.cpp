@@ -110,3 +110,41 @@ TEST(Motion, NothingDetectedForUnrelatedContent) {
   EXPECT_TRUE(tile::DetectMoves(View(prev), View(cur), changes, moved, residual).empty());
   for (bool m : moved) EXPECT_FALSE(m);
 }
+
+TEST(Motion, AnUnchangedTileJoinsTheMoveOnlyWhereItsSourceMayBeCopied) {
+  // A blank block that looks the same before and after a scroll by 7: the
+  // tile at (2,2) and the 7 rows below it.
+  auto page = Noise(3);
+  const auto more = Noise(4);
+  page.insert(page.end(), more.begin(), more.begin() + static_cast<size_t>(7) * W * 4);
+  for (int y = 128; y < 192 + 7; ++y) {
+    for (int x = 128; x < 192; ++x) std::memset(&page[(static_cast<size_t>(y) * W + x) * 4], 255, 4);
+  }
+  const std::vector<uint8_t> prev(page.begin(), page.begin() + static_cast<size_t>(W) * H * 4);
+  const std::vector<uint8_t> cur(page.begin() + static_cast<size_t>(7) * W * 4, page.end());
+  tile::TileDiffer differ;
+  differ.Diff(View(prev), {});
+  const auto changes = differ.Diff(View(cur), {});
+  for (const auto& c : changes) ASSERT_FALSE(c.col == 2 && c.row == 2);
+  const Rect blank{128, 128, 64, 64};
+  auto covers_blank = [&](const std::vector<tile::Move>& moves) {
+    for (const auto& m : moves) {
+      if (m.dst.intersects(blank)) return true;
+    }
+    return false;
+  };
+  std::vector<bool> moved;
+  std::vector<std::vector<Rect>> residual;
+  EXPECT_TRUE(covers_blank(tile::DetectMoves(View(prev), View(cur), changes, moved, residual)));
+  tile::MotionOptions opts;
+  std::vector<Rect> asked;
+  opts.may_copy_unchanged = [&](const Rect& src) {
+    asked.push_back(src);
+    return false;
+  };
+  const auto moves = tile::DetectMoves(View(prev), View(cur), changes, moved, residual, opts);
+  EXPECT_FALSE(moves.empty());
+  EXPECT_FALSE(covers_blank(moves));
+  ASSERT_EQ(asked.size(), 1u);
+  EXPECT_EQ(asked[0], (Rect{128, 135, 64, 64}));
+}

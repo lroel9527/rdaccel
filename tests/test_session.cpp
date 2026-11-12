@@ -30,6 +30,7 @@ class FakeEncoder final : public codec::IHevcEncoder {
   size_t pad = 0;           // extra bytes per picture (a real one is kilobytes)
   size_t* pictures = nullptr;  // counts the pictures produced, if set
   int64_t* bitrate = nullptr;  // the last bitrate set, if set
+  std::vector<uint8_t>* input = nullptr;  // the last picture's input (BGRA, tightly packed), if set
 
   std::string name() const override { return "fake"; }
   void SetMinQp(int qp) override { min_qp_now_ = qp; }
@@ -40,6 +41,13 @@ class FakeEncoder final : public codec::IHevcEncoder {
   std::optional<codec::HevcAccessUnit> Encode(const tile::ImageView& img, uint64_t,
                                               bool force_keyframe) override {
     err_.clear();
+    if (input) {
+      input->resize(static_cast<size_t>(img.width) * img.height * 4);
+      for (int y = 0; y < img.height; ++y) {
+        std::memcpy(input->data() + static_cast<size_t>(y) * img.width * 4,
+                    img.data + static_cast<size_t>(y) * img.stride, static_cast<size_t>(img.width) * 4);
+      }
+    }
     keyframe_requests.push_back(force_keyframe);
     min_qp.push_back(min_qp_now_);
     if (fail_next) {
@@ -1281,5 +1289,110 @@ TEST(Session, LeavingTextModeRefreshesTheWholePicture) {
   host.OnFrame({{px.data(), W, H, W * 4}, {}, 1'033'000});
   host.SetTextMode(true);  // reduced colours need no refresh
   EXPECT_FALSE(host.keyframe_pending());
+  PipeStopper stop{host_end, viewer_end};
+}
+
+// ---- what a copy and the encoder's picture may bring into a tile -----------
+
+namespace {
+
+void FillNoise(std::vector<uint8_t>& px, int w, const Rect& r, uint32_t& seed) {
+  for (int y = r.y; y < r.bottom(); ++y) {
+    for (int x = r.x; x < r.right(); ++x) {
+      seed = seed * 1103515245u + 12345u;
+      uint8_t* p = &px[(static_cast<size_t>(y) * w + x) * 4];
+      std::memcpy(p, &seed, 3);  // no palette: video
+      p[3] = 255;
+    }
+  }
+}
+
+}  // namespace
+
+TEST(Session, AScrollDoesNotCopyVideoQualityIntoATileThatDidNotChange) {
+  // A page of photo-like content (video quality at the viewer; the fake
+  // decoder shows it black) with a blank block in it, scrolled by 7 pixels.
+  // The blank tile looks the same before and after, and matches the scroll
+  // too: made part of the move, its last 7 rows were copied from the tile
+  // below, as the viewer has it, and stayed like that, since the tile had
+  // not changed and counted as exact.
+  for (const bool text : {false, true}) {
+    constexpr int W = 512, H = 384, kFps = 30;
+    auto [host_end, viewer_end] = transport::MakeLocalPipe();
+    session::HostSession host(host_end.get(), std::make_unique<FakeEncoder>(), W, H,
+                              {.text_mode = text, .fps = kFps, .bitrate_bps = 20'000'000});
+    session::ViewerSession viewer(nullptr, std::make_unique<FakeDecoder>());
+    Shown shown;
+    shown.Attach(viewer);
+    viewer.Attach(viewer_end.get());
+    std::vector<uint8_t> page(static_cast<size_t>(W) * (H + 7) * 4);
+    uint32_t seed = 3;
+    FillNoise(page, W, {0, 0, W, H + 7}, seed);
+    // Blank: the tile at (2,2) and the 7 rows that scroll into it.
+    for (int y = 128; y < 192 + 7; ++y) {
+      for (int x = 128; x < 192; ++x) {
+        const uint8_t white[4] = {255, 255, 255, 255};
+        std::memcpy(&page[(static_cast<size_t>(y) * W + x) * 4], white, 4);
+      }
+    }
+    uint64_t t = 1'000'000;
+    auto settle = [&](const uint8_t* px) {
+      for (int f = 0; f < 60 * kFps && (f < 10 || host.work_pending()); ++f) {
+        t += 1'000'000 / kFps;
+        host.OnFrame({{px, W, H, W * 4}, {}, t});
+      }
+    };
+    host.OnFrame({{page.data(), W, H, W * 4}, {}, t});
+    settle(page.data());
+    const uint8_t* scrolled = page.data() + static_cast<size_t>(7) * W * 4;
+    t += 1'000'000 / kFps;
+    host.OnFrame({{scrolled, W, H, W * 4}, {}, t});
+    EXPECT_GT(host.stats().moved_tiles, 0u);
+    settle(scrolled);
+    const uint64_t frames = host.stats().frames_encoded;
+    PipeStopper stop{host_end, viewer_end};
+    const std::vector<uint8_t> want(scrolled, scrolled + static_cast<size_t>(W) * H * 4);
+    const std::string bad = shown.Differences(want, W, H, frames);
+    EXPECT_EQ(bad.find(" (2,2):"), std::string::npos) << "text mode " << text << ":" << bad;
+  }
+}
+
+TEST(Session, TheEncoderSeesTheScreenJustOutsideWhatTheViewerTakesFromAPicture) {
+  // Text on the left (lossless: one plain colour in the encoder's picture),
+  // a photo on the right. When the photo changes, the two columns of text
+  // pixels next to it are the screen's in the encoder's input, so that the
+  // photo's outermost pixels get their colour from what is really beside
+  // them; further away the text stays flattened.
+  constexpr int W = 256, H = 128, kFps = 30;
+  auto [host_end, viewer_end] = transport::MakeLocalPipe();
+  std::vector<uint8_t> input;
+  auto enc = std::make_unique<FakeEncoder>();
+  enc->input = &input;
+  session::HostSession host(host_end.get(), std::move(enc), W, H,
+                            {.text_mode = true, .fps = kFps, .bitrate_bps = 20'000'000});
+  std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 255);
+  uint32_t seed = 9;
+  FillText(px, W, {0, 0, 128, H}, seed, 3);
+  FillNoise(px, W, {128, 0, 128, H}, seed);
+  uint64_t t = 1'000'000;
+  host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+  for (int f = 0; f < 60 * kFps && host.work_pending(); ++f) {
+    t += 1'000'000 / kFps;
+    host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+  }
+  FillNoise(px, W, {128, 0, 64, 64}, seed);  // the photo's top left tile
+  t += 1'000'000 / kFps;
+  input.clear();
+  host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+  ASSERT_EQ(input.size(), px.size());
+  size_t beside = 0, further = 0;
+  for (int y = 0; y < 64; ++y) {
+    for (int x = 120; x < 128; ++x) {
+      const size_t i = (static_cast<size_t>(y) * W + x) * 4;
+      (x >= 126 ? beside : further) += std::memcmp(&input[i], &px[i], 3) != 0;
+    }
+  }
+  EXPECT_EQ(beside, 0u);
+  EXPECT_GT(further, 64u);  // still one colour there
   PipeStopper stop{host_end, viewer_end};
 }

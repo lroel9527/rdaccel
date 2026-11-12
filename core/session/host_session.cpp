@@ -484,8 +484,23 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   std::vector<bool> moved;
   std::vector<std::vector<Rect>> residual;
   if (!key && options_.detect_moves) {
+    // An unchanged tile is only made part of a move when the viewer shows
+    // what would be copied into it exactly. Copied from tiles at video
+    // quality (or stale ones), a lossless tile was left with a band or an
+    // edge of slightly different colours, for good: it had not changed, so
+    // nothing recorded that it was no longer exact.
+    tile::MotionOptions motion;
+    motion.may_copy_unchanged = [&](const Rect& src) {
+      for (int32_t row = src.y / kTileSize; row <= (src.bottom() - 1) / kTileSize; ++row) {
+        for (int32_t col = src.x / kTileSize; col <= (src.right() - 1) / kTileSize; ++col) {
+          const size_t idx = static_cast<size_t>(row) * differ_.cols() + col;
+          if (quality_[idx] != kExact || stale_[idx] != 0) return false;
+        }
+      }
+      return true;
+    };
     moves = tile::DetectMoves({prev_.data(), width_, height_, enc_stride}, frame.bgra, changes,
-                              moved, residual);
+                              moved, residual, motion);
     // Copies are cheap one at a time, but content that moves while it
     // changes (a video panning over a detailed picture) matches in a
     // thousand strips, each a copy plus slivers to code: 6-8 kB a frame
@@ -1159,6 +1174,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       }
     }
   }
+  if (!key) SurroundVideoRects(frame, region_tiles);
   const uint64_t t1 = capture::MonotonicMicros();
 
   std::optional<codec::HevcAccessUnit> au;
@@ -1322,6 +1338,52 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   stats_.progressive_tiles += progressive_sent;
   stats_.lossless_us_total += (t1 - t0) + (t3 - t2);
   return true;
+}
+
+void HostSession::SurroundVideoRects(const capture::CapturedFrame& frame,
+                                     const std::vector<tile::TileChange>& taken) {
+  if (taken.empty()) return;
+  const size_t n_tiles = static_cast<size_t>(differ_.cols()) * differ_.rows();
+  // Per tile: taken whole, or the parts of it that are.
+  std::vector<uint8_t> whole(n_tiles, 0);
+  std::unordered_map<size_t, std::vector<Rect>> parts;
+  auto index_of = [&](const tile::TileChange& t) { return static_cast<size_t>(t.row) * differ_.cols() + t.col; };
+  for (const auto& t : taken) {
+    const int32_t tw = std::min(kTileSize, width_ - t.col * kTileSize);
+    const int32_t th = std::min(kTileSize, height_ - t.row * kTileSize);
+    if (t.rect.w == tw && t.rect.h == th) {
+      whole[index_of(t)] = 1;
+    } else {
+      parts[index_of(t)].push_back(t.rect);
+    }
+  }
+  const int32_t stride = width_ * 4;
+  for (const auto& t : taken) {
+    const Rect& r = t.rect;
+    const int32_t x0 = std::max(0, r.x - kVideoSurround), x1 = std::min(width_, r.right() + kVideoSurround);
+    const int32_t y0 = std::max(0, r.y - kVideoSurround), y1 = std::min(height_, r.bottom() + kVideoSurround);
+    for (int32_t y = y0; y < y1; ++y) {
+      const bool inside_rows = y >= r.y && y < r.bottom();
+      for (int32_t x = x0; x < x1; ++x) {
+        if (inside_rows && x == r.x) {
+          x = r.right() - 1;  // the rect itself
+          continue;
+        }
+        const int32_t col = x / kTileSize, row = y / kTileSize;
+        const size_t idx = static_cast<size_t>(row) * differ_.cols() + col;
+        if (whole[idx] || regions_.RegionOf(col, row) >= 0) continue;
+        if (const auto it = parts.find(idx); it != parts.end()) {
+          bool in_part = false;
+          for (const Rect& p : it->second) {
+            in_part |= x >= p.x && x < p.right() && y >= p.y && y < p.bottom();
+          }
+          if (in_part) continue;
+        }
+        std::memcpy(enc_input_.data() + static_cast<size_t>(y) * stride + static_cast<size_t>(x) * 4,
+                    frame.bgra.data + static_cast<size_t>(y) * frame.bgra.stride + static_cast<size_t>(x) * 4, 4);
+      }
+    }
+  }
 }
 
 std::vector<size_t> HostSession::TilesOf(const Rect& r) const {

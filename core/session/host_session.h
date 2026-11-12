@@ -196,6 +196,19 @@ class HostSession {
                      uint64_t frame_id, std::vector<uint8_t>& out, size_t& bytes, size_t& pictures,
                      uint64_t& us);
   void FinishRegions(const std::vector<uint8_t>& busy, const std::vector<uint8_t>& changed);
+  // The encoder's picture is not the screen: lossless tiles are one plain
+  // colour in it, and tiles the viewer got by a copy or from its cache are
+  // whatever was there before. Colour is coded at half resolution, so the
+  // outermost pixels of a rect the viewer takes from the picture took on
+  // some of the colour next to them: a line of the wrong tint along the
+  // edge of a wallpaper or an icon, 28 levels off where the tile beside it
+  // still held a frame of a full-screen transition, and there for good (the
+  // tile counted as polished). Before a picture is coded, the pixels within
+  // kVideoSurround of each rect taken from it (`taken`) that are not taken
+  // themselves are given the screen's content. Not in video areas, which
+  // the full-screen picture does not follow.
+  static constexpr int32_t kVideoSurround = 2;
+  void SurroundVideoRects(const capture::CapturedFrame& frame, const std::vector<tile::TileChange>& taken);
   void Send(transport::Channel ch, const proto::Message& m);
 
   transport::ITransport* transport_;
