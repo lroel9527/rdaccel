@@ -2,12 +2,14 @@
 
 面向极低带宽的远程桌面加速库。画面按区域分类传输：没变的区域不发，平移的区域只发拷贝指令，以前出现过的内容从接收端缓存贴回，文字和界面走无损调色板层，只有视频类区域交给硬件 HEVC 编码（macOS VideoToolbox，Linux FFmpeg）。
 
+当前版本 1.9.2。[rdmachine](https://github.com/lroel9527/rdmachine)（对标 NoMachine 的 Mac 远程桌面）就建在 rdaccel 之上：画面、光标、输入和传输由 rdaccel 负责，登录、会话和界面由 rdmachine 负责。
+
 - 静止桌面几十 kbps，打字约 50 kbps，滚动和拖窗 1 Mbps 以内，文字保持无损（[评测](docs/benchmarks.md)）
 - 文字模式（`text_mode`）：体验和普通模式一样，流量更少。静止和打字省 3–7 倍（文字减色后用专门的编码），滚动和拖窗省三到六成（[架构](docs/architecture.md#文字模式)）
 - 自带 UDP 传输：丢包重传、BBR 式拥塞控制、自适应码率，0.4 Mbps 的链路上也不超发
 - 光标走独立通道，链路占满时指针照样跟手
 - XChaCha20-Poly1305 加密（密钥由应用提供）、连接状态、认证钩子、输入事件和应用消息通道
-- 稳定的 C ABI，加一层只有头文件的 C++ 包装；支持 macOS（Apple Silicon）和 Linux（X11、Wayland）
+- 稳定的 C ABI，加一层只有头文件的 C++ 包装；支持 macOS 12.3+（Apple Silicon 和 Intel）和 Linux（X11、Wayland）
 
 ## 用法
 
@@ -60,7 +62,7 @@ cmake --install build --prefix /opt/rdaccel
 #    （共享库 + 头文件 + CMake/pkg-config 文件 + serve/view 等工具）
 ```
 
-版本变化见 [CHANGELOG](CHANGELOG.md)。1.0 之前次版本之间可能不兼容，1.0 之后同一主版本内只加不改。
+版本变化见 [CHANGELOG](CHANGELOG.md)。同一主版本内接口只加不改（见[发版](docs/releasing.md)）。
 
 跨两台机器试用：
 
