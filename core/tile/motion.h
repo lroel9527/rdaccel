@@ -65,4 +65,9 @@ std::vector<Move> DetectMoves(const ImageView& prev, const ImageView& cur,
 void ApplyMoves(std::span<const Move> moves, uint8_t* bgra, int32_t width, int32_t height,
                 std::vector<uint8_t>& scratch);
 
+// The same for a plane of one byte a pixel (something kept per pixel that
+// has to follow the picture, such as HostSession's pixel quality).
+void ApplyMovesToPlane(std::span<const Move> moves, uint8_t* plane, int32_t width, int32_t height,
+                       std::vector<uint8_t>& scratch);
+
 }  // namespace rdacore::tile

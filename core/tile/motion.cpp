@@ -286,11 +286,13 @@ std::vector<Move> DetectMoves(const ImageView& prev, const ImageView& cur,
   return moves;
 }
 
-void ApplyMoves(std::span<const Move> moves, uint8_t* bgra, int32_t width, int32_t height,
-                std::vector<uint8_t>& scratch) {
+namespace {
+
+void ApplyMovesTo(std::span<const Move> moves, uint8_t* px, size_t bytes_per_pixel, int32_t width,
+                  int32_t height, std::vector<uint8_t>& scratch) {
   if (moves.empty()) return;
-  const size_t stride = static_cast<size_t>(width) * 4;
-  scratch.assign(bgra, bgra + stride * height);
+  const size_t stride = static_cast<size_t>(width) * bytes_per_pixel;
+  scratch.assign(px, px + stride * height);
   for (const Move& m : moves) {
     const Rect s = m.src();
     // Callers validate moves; this only guards memory.
@@ -299,11 +301,23 @@ void ApplyMoves(std::span<const Move> moves, uint8_t* bgra, int32_t width, int32
       continue;
     }
     for (int32_t y = 0; y < m.dst.h; ++y) {
-      std::memcpy(bgra + (m.dst.y + y) * stride + static_cast<size_t>(m.dst.x) * 4,
-                  scratch.data() + (s.y + y) * stride + static_cast<size_t>(s.x) * 4,
-                  static_cast<size_t>(m.dst.w) * 4);
+      std::memcpy(px + (m.dst.y + y) * stride + static_cast<size_t>(m.dst.x) * bytes_per_pixel,
+                  scratch.data() + (s.y + y) * stride + static_cast<size_t>(s.x) * bytes_per_pixel,
+                  static_cast<size_t>(m.dst.w) * bytes_per_pixel);
     }
   }
+}
+
+}  // namespace
+
+void ApplyMoves(std::span<const Move> moves, uint8_t* bgra, int32_t width, int32_t height,
+                std::vector<uint8_t>& scratch) {
+  ApplyMovesTo(moves, bgra, 4, width, height, scratch);
+}
+
+void ApplyMovesToPlane(std::span<const Move> moves, uint8_t* plane, int32_t width, int32_t height,
+                       std::vector<uint8_t>& scratch) {
+  ApplyMovesTo(moves, plane, 1, width, height, scratch);
 }
 
 }  // namespace rdacore::tile

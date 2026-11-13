@@ -1441,3 +1441,117 @@ TEST(Session, OwedTextGoesOutAFewTilesAFrameOnASlowPath) {
   PipeStopper stop{host_end, viewer_end};
   EXPECT_EQ(shown.Differences(px, W, H, encoded), "");
 }
+
+namespace {
+
+// A page of text lines with a tile-aligned photo in it (tiles (5..6, 2..3)),
+// taller than the screen so that it can scroll.
+std::vector<uint8_t> PageWithAPhoto(int w, int page_h) {
+  std::vector<uint8_t> page(static_cast<size_t>(w) * page_h * 4, 250);
+  uint32_t seed = 11;
+  for (int y = 4; y + 12 <= page_h; y += 16) FillText(page, w, {8, y, w - 16, 10}, seed, 6);
+  FillNoise(page, w, {320, 128, 128, 128}, seed);
+  return page;
+}
+
+}  // namespace
+
+TEST(Session, TextModeDoesNotSendThePageAgainAfterAScrollPastAPhoto) {
+  // A scroll is one copy of the page, and it was as good as the worst tile
+  // under it: with one photo (video quality) on the page, every tile counted
+  // as copied from video, and once the scroll stopped all the text went out
+  // again, which the viewer showed exactly already, and the photo was coded,
+  // refined and polished a second time. Per pixel, the text is exact and the
+  // photo, polished before the scroll, is as good as it gets.
+  constexpr int W = 512, H = 448, kFps = 30, kStep = 3, kSteps = 20;
+  auto [host_end, viewer_end] = transport::MakeLocalPipe();
+  auto enc = std::make_unique<FakeEncoder>();
+  size_t pictures = 0;
+  enc->pictures = &pictures;
+  session::HostSession host(host_end.get(), std::move(enc), W, H,
+                            {.text_mode = true, .context_tiles = true, .fps = kFps, .bitrate_bps = 20'000'000});
+  session::ViewerSession viewer(nullptr, std::make_unique<FakeDecoder>());
+  Shown shown;
+  shown.Attach(viewer);
+  viewer.Attach(viewer_end.get());
+  const auto page = PageWithAPhoto(W, H + kStep * kSteps);
+  uint64_t t = 1'000'000;
+  auto show = [&](int offset) {
+    t += 1'000'000 / kFps;
+    host.OnFrame({{page.data() + static_cast<size_t>(offset) * W * 4, W, H, W * 4}, {}, t});
+  };
+  auto settle = [&](int offset) {
+    for (int f = 0; f < 60 * kFps && (f < 10 || host.work_pending()); ++f) show(offset);
+  };
+  show(0);
+  settle(0);  // the photo has had its polish
+  const auto before = host.stats();
+  const size_t pictures_before = pictures;
+  for (int i = 1; i <= kSteps; ++i) show(i * kStep);
+  const auto moved = host.stats();
+  EXPECT_GT(moved.moved_tiles, before.moved_tiles);
+  settle(kStep * kSteps);
+  const auto after = host.stats();
+  // Nothing is sent again once it stops: no text, and no picture.
+  EXPECT_EQ(after.progressive_tiles, before.progressive_tiles);
+  EXPECT_EQ(after.lossless_tiles, moved.lossless_tiles);
+  EXPECT_EQ(pictures, pictures_before);
+  // The viewer shows the text exactly and the photo as it had it (black:
+  // at this width the fake decoder paints nothing), 60 pixels further up.
+  std::vector<uint8_t> want(page.begin() + static_cast<ptrdiff_t>(static_cast<size_t>(kStep * kSteps) * W * 4),
+                            page.begin() + static_cast<ptrdiff_t>(static_cast<size_t>(kStep * kSteps + H) * W * 4));
+  for (int y = 128 - kStep * kSteps; y < 256 - kStep * kSteps; ++y) {
+    std::memset(&want[(static_cast<size_t>(y) * W + 320) * 4], 0, 128 * 4);
+  }
+  for (size_t i = 3; i < want.size(); i += 4) want[i] = 255;
+  const uint64_t frames = after.frames_encoded;
+  PipeStopper stop{host_end, viewer_end};
+  EXPECT_EQ(shown.Differences(want, W, H, frames), "");
+}
+
+TEST(Session, TextModeCodesAgainWhatScrolledBeforeItWasPolished) {
+  // The other side of the same rule: video that never had its polish (here
+  // the scroll starts right after the first picture) may be text that went
+  // as video, or a photo at first-pass quality. Tiles that hold any of it
+  // are owed once the scroll stops, as they always were.
+  constexpr int W = 512, H = 448, kFps = 30, kStep = 3, kSteps = 20;
+  auto [host_end, viewer_end] = transport::MakeLocalPipe();
+  auto enc = std::make_unique<FakeEncoder>();
+  size_t pictures = 0;
+  enc->pictures = &pictures;
+  session::HostSession host(host_end.get(), std::move(enc), W, H,
+                            {.text_mode = true, .context_tiles = true, .fps = kFps, .bitrate_bps = 20'000'000});
+  session::ViewerSession viewer(nullptr, std::make_unique<FakeDecoder>());
+  Shown shown;
+  shown.Attach(viewer);
+  viewer.Attach(viewer_end.get());
+  const auto page = PageWithAPhoto(W, H + kStep * kSteps);
+  uint64_t t = 1'000'000;
+  auto show = [&](int offset) {
+    t += 1'000'000 / kFps;
+    host.OnFrame({{page.data() + static_cast<size_t>(offset) * W * 4, W, H, W * 4}, {}, t});
+  };
+  show(0);
+  for (int i = 1; i <= kSteps; ++i) show(i * kStep);
+  const size_t pictures_moving = pictures;
+  const auto moved = host.stats();
+  for (int f = 0; f < 60 * kFps && (f < 10 || host.work_pending()); ++f) show(kStep * kSteps);
+  EXPECT_FALSE(host.work_pending());
+  EXPECT_GT(pictures, pictures_moving);
+  // Only the tiles the photo is in now (rows 1 to 3 of columns 5 and 6): the
+  // text around it was exact all along.
+  const auto after = host.stats();
+  EXPECT_GE(after.progressive_tiles - moved.progressive_tiles, 1u);
+  EXPECT_LE(after.progressive_tiles - moved.progressive_tiles, 6u);
+  EXPECT_EQ(after.lossless_tiles, moved.lossless_tiles);
+  // (The fake decoder paints nothing at this width: the photo stays black.)
+  std::vector<uint8_t> want(page.begin() + static_cast<ptrdiff_t>(static_cast<size_t>(kStep * kSteps) * W * 4),
+                            page.begin() + static_cast<ptrdiff_t>(static_cast<size_t>(kStep * kSteps + H) * W * 4));
+  for (int y = 128 - kStep * kSteps; y < 256 - kStep * kSteps; ++y) {
+    std::memset(&want[(static_cast<size_t>(y) * W + 320) * 4], 0, 128 * 4);
+  }
+  for (size_t i = 3; i < want.size(); i += 4) want[i] = 255;
+  const uint64_t frames = after.frames_encoded;
+  PipeStopper stop{host_end, viewer_end};
+  EXPECT_EQ(shown.Differences(want, W, H, frames), "");
+}

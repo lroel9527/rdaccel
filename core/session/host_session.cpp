@@ -132,6 +132,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     born_.assign(n_tiles, 0);
     hot_us_.assign(n_tiles, 0);
     quality_.assign(n_tiles, kRough);
+    pixel_quality_.assign(static_cast<size_t>(width_) * height_, kPxVideo);
     tile_slot_.assign(n_tiles, -1);
     tile_slot_hash_.assign(n_tiles, 0);
     pending_lossless_.assign(n_tiles, 0);
@@ -599,6 +600,12 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       moves = std::move(kept);
     }
   }
+  // The pixels' quality goes where the pixels go (the moves are final here).
+  tile::ApplyMovesToPlane(moves, pixel_quality_.data(), width_, height_, pixel_quality_scratch_);
+  // A video area's picture covers all of its tiles, changed or not.
+  if (!regions_.regions().empty()) {
+    for (const auto& reg : regions_.regions()) SetPixelQuality(reg.rect, kPxVideo);
+  }
   std::vector<uint8_t> move_quality;
   for (const auto& m : moves) move_quality.push_back(quality_under(m.src()));
   // Whether a moved rect copies from a tile the viewer has older content
@@ -679,7 +686,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   // (text mode) kDeferred: nothing was sent, the tile is stale and owed.
   enum : int { kCodedLossless = 0, kCodedVideo = 1, kDeferred = 2 };
   bool last_coarse = false;  // the last rect went out at the quick pass's colours
-  auto code_rect = [&](const tile::TileChange& c, const Rect& r, bool is_hot) -> int {
+  auto code_rect_as = [&](const tile::TileChange& c, const Rect& r, bool is_hot) -> int {
     // Lossless pays off on content that stays, or on a thin sliver; content
     // that keeps changing is cheaper as video unless it is very simple.
     const bool sliver = r.h * 4 <= kTileSize || r.w * 4 <= kTileSize;
@@ -807,6 +814,16 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     video_tiles.push_back(part);
     return kCodedVideo;
   };
+  // The same, keeping pixel_quality_ up to date with what `r` is now.
+  std::vector<uint8_t> lossless_px;  // per lossless_tiles entry
+  auto code_rect = [&](const tile::TileChange& c, const Rect& r, bool is_hot) -> int {
+    const int how = code_rect_as(c, r, is_hot);
+    // (The quick pass's colours are not the tile's own: it is sent again.)
+    const uint8_t px = how == kCodedLossless && !last_coarse ? kPxExact : kPxVideo;
+    SetPixelQuality(r, px);
+    if (how == kCodedLossless) lossless_px.push_back(px);
+    return how;
+  };
   // The previous frame's pixels of the tile being processed (prev_ is updated
   // as tiles are processed).
   std::vector<uint8_t> prev_tile(static_cast<size_t>(kTileSize) * kTileSize * 4);
@@ -851,6 +868,8 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
           loads.push_back({static_cast<uint32_t>(slot), run, static_cast<uint32_t>(x0 - c.rect.x),
                            static_cast<uint32_t>(y - c.rect.y)});
           matched += static_cast<int64_t>(run.w) * run.h;
+          // (If the slot is given up below, the caller codes all of `r`.)
+          SetPixelQuality(run, slot_quality_[slot] == kExact ? kPxExact : kPxVideo);
         } else {
           rest.push_back(run);
         }
@@ -931,7 +950,8 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
         !(!unmoved.empty() && unmoved[idx])) {
       ++moved_tiles;
       uint8_t q = moved_in_quality(c.rect);
-      if (was_stale || moved_in_tainted(c.rect)) {
+      const bool tainted = was_stale || moved_in_tainted(c.rect);
+      if (tainted) {
         // The copies go (see kStalePlaceholder); the tile is owed whole.
         stale_[idx] |= kStaleText;
         owe_lossless(idx);
@@ -945,11 +965,28 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
           if (code_rect(c, part, hot[i])) q = kRough;
         }
       }
-      quality_[idx] = q;
       // Text mode: what was copied from video quality may be text that went
       // as video while it moved; it is owed exactly like the tile it came
-      // from (which is not where it was any more).
-      if (text && q != kExact) owe_lossless(idx);
+      // from (which is not where it was any more). Whether it was, is
+      // looked up pixel by pixel (pixel_quality_): a move is as good as the
+      // worst tile under its source, and a scroll is one move of the whole
+      // page, so by tiles the page was owed again after every scroll for
+      // one icon in it.
+      bool owed = text && q != kExact;
+      if (owed && !tainted) {
+        const uint8_t worst = WorstPixelQuality(c.rect);
+        if (worst == kPxExact) {
+          q = kExact;
+          owed = false;
+        } else if (worst == kPxPolished) {
+          // Text where it is text, and video that is finished: coding it
+          // again would send the same picture.
+          q = std::max(q, kRefined);
+          owed = false;
+        }
+      }
+      quality_[idx] = q;
+      if (owed) owe_lossless(idx);
       continue;
     }
     // Tile cache, part 2: content the viewer has kept. Like moves, the
@@ -957,6 +994,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     if (i < n_changed && !key && options_.tile_cache) {
       if (auto slot = cache_.Find(c.hash)) {
         loads.push_back({*slot, c.rect});
+        SetPixelQuality(c.rect, slot_quality_[*slot] == kExact ? kPxExact : kPxVideo);
         quality_[idx] = slot_quality_[*slot];
         stale_[idx] = 0;
         if (text && quality_[idx] != kExact) owe_lossless(idx);
@@ -1193,10 +1231,17 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
           polish_[idx] = still_frames;
         }
         region_tiles.push_back({col, row, 0, 0, rect});
-        if (--polish_[idx] == 0) quality_[idx] = kRefined;
+        if (--polish_[idx] == 0) {
+          quality_[idx] = kRefined;
+          SetPixelQuality(rect, kPxPolished);
+        }
       }
     }
   }
+  // What the viewer takes from the picture is video from now on, except
+  // where a lossless rect of this frame is painted over it.
+  for (const auto& t : region_tiles) TakenFromVideo(t.rect);
+  for (size_t i = 0; i < lossless_tiles.size(); ++i) SetPixelQuality(lossless_tiles[i].rect, lossless_px[i]);
   if (!key) SurroundVideoRects(frame, region_tiles);
   const uint64_t t1 = capture::MonotonicMicros();
 
@@ -1234,6 +1279,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       std::fill(refine_.begin(), refine_.end(), 0);
       refining_ = 0;
       std::fill(quality_.begin(), quality_.end(), kRough);
+      std::fill(pixel_quality_.begin(), pixel_quality_.end(), kPxVideo);
       // An empty error means the encoder chose to drop the frame, which is
       // not a failure.
       const std::string& why = encoder_->last_error();
@@ -1361,6 +1407,28 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   stats_.progressive_tiles += progressive_sent;
   stats_.lossless_us_total += (t1 - t0) + (t3 - t2);
   return true;
+}
+
+void HostSession::SetPixelQuality(const Rect& r, uint8_t q) {
+  for (int32_t y = r.y; y < r.bottom(); ++y) {
+    std::memset(pixel_quality_.data() + static_cast<size_t>(y) * width_ + r.x, q, static_cast<size_t>(r.w));
+  }
+}
+
+void HostSession::TakenFromVideo(const Rect& r) {
+  for (int32_t y = r.y; y < r.bottom(); ++y) {
+    uint8_t* p = pixel_quality_.data() + static_cast<size_t>(y) * width_ + r.x;
+    for (int32_t x = 0; x < r.w; ++x) p[x] = p[x] == kPxExact ? kPxVideo : p[x];
+  }
+}
+
+uint8_t HostSession::WorstPixelQuality(const Rect& r) const {
+  uint8_t worst = kPxExact;
+  for (int32_t y = r.y; y < r.bottom() && worst != kPxVideo; ++y) {
+    const uint8_t* p = pixel_quality_.data() + static_cast<size_t>(y) * width_ + r.x;
+    worst = std::max(worst, *std::max_element(p, p + r.w));
+  }
+  return worst;
 }
 
 void HostSession::SurroundVideoRects(const capture::CapturedFrame& frame,

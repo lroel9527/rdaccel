@@ -301,6 +301,36 @@ class HostSession {
   static constexpr size_t kMaxRefreshPerFrame = 24;  // spreads the cost out
   std::vector<uint8_t> quality_;
   std::vector<uint8_t> slot_quality_ = std::vector<uint8_t>(proto::kTileCacheSlots, kRough);
+  // The same for each pixel, which is what a copy needs. A scroll is one
+  // copy of most of the screen, and going by tiles it was as good as the
+  // worst tile it read from: one icon or a strip of wallpaper at video
+  // quality made every tile the scroll touched count as rough. In text mode
+  // each of them was then owed: once the scroll stopped the whole page went
+  // out again, text the viewer already showed exactly (about a quarter of a
+  // slow scroll's traffic), and the photos were coded, refined and polished
+  // anew although nothing about them had changed. Here every pixel keeps
+  // what it is through the copies, and a moved tile is judged by the pixels
+  // it ends up with:
+  //   kPxExact     lossless, or a copy of that;
+  //   kPxPolished  video that had its still-screen polish (a tile that is
+  //                not text, as good as video gets), or a copy of that;
+  //   kPxVideo     any other video: it may be text that went as video while
+  //                it moved or because the budget was spent, or a photo that
+  //                was never refined.
+  // A tile of exact pixels is exact; one with polished ones besides is not
+  // owed either (it would be coded as video again and come out the same);
+  // any kPxVideo pixel leaves it owed, as before.
+  // Never better than what the viewer shows: a pixel marked worse than it
+  // is costs a re-send, one marked better would stay as it is for good.
+  static constexpr uint8_t kPxExact = 0;
+  static constexpr uint8_t kPxPolished = 1;
+  static constexpr uint8_t kPxVideo = 2;
+  std::vector<uint8_t> pixel_quality_;  // width_ * height_
+  std::vector<uint8_t> pixel_quality_scratch_;
+  void SetPixelQuality(const Rect& r, uint8_t q);
+  // Exact pixels of `r` become kPxVideo (the viewer takes `r` from a picture).
+  void TakenFromVideo(const Rect& r);
+  uint8_t WorstPixelQuality(const Rect& r) const;
 
   // The host's own copy of each slot's pixels, and per tile position the slot
   // that last stored what was there. When a dragged window uncovers part of

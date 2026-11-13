@@ -76,6 +76,25 @@ TEST(Motion, DetectsScrollAndApplyReproducesTheFrame) {
   }
 }
 
+TEST(Motion, APlaneOfOneByteAPixelMovesLikeThePicture) {
+  // 8 x 6, numbered; two moves that read each other's destination: both
+  // must see the plane as it was.
+  std::vector<uint8_t> plane(8 * 6);
+  for (size_t i = 0; i < plane.size(); ++i) plane[i] = static_cast<uint8_t>(i);
+  const auto was = plane;
+  const std::vector<tile::Move> moves = {{{0, 0, 4, 2}, 0, -2}, {{0, 2, 4, 2}, 0, 2}, {{6, 0, 2, 9}, 0, 0}};
+  std::vector<uint8_t> scratch;
+  tile::ApplyMovesToPlane(moves, plane.data(), 8, 6, scratch);
+  for (int y = 0; y < 6; ++y) {
+    for (int x = 0; x < 8; ++x) {
+      int from = y;
+      if (x < 4 && y < 2) from = y + 2;
+      else if (x < 4 && y < 4) from = y - 2;
+      EXPECT_EQ(plane[static_cast<size_t>(y) * 8 + x], was[static_cast<size_t>(from) * 8 + x]) << x << "," << y;
+    }
+  }
+}
+
 TEST(Motion, DetectsWindowDrag) {
   const auto bg = Noise(3);
   const auto win = Noise(4);
