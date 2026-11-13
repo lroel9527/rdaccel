@@ -332,6 +332,15 @@ class HostSession {
   void TakenFromVideo(const Rect& r);
   uint8_t WorstPixelQuality(const Rect& r) const;
 
+  // Palette content that went as video because it kept changing (a hot
+  // tile takes lossless_max_colors_hot colours at most: a terminal printing,
+  // a page that re-renders as it scrolls) ended, once it stopped, refined
+  // and polished by the encoder, and stayed that: never rough with nothing
+  // going on, it was not owed. Such a tile is looked at once it stands
+  // still, and owed losslessly if a palette takes it. Per tile: born_ + 1
+  // of the content that was looked at (0 = none), so each is tried once.
+  std::vector<uint64_t> palette_checked_;
+
   // The host's own copy of each slot's pixels, and per tile position the slot
   // that last stored what was there. When a dragged window uncovers part of
   // a tile, the uncovered pixels usually equal that stored content, so they

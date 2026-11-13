@@ -13,6 +13,11 @@
 //                  [--cursor=1]   also move the mouse pointer (cursor channel) and
 //                                 report how long positions take to arrive
 //
+// Each run also reports its pauses (the screen not changing for half a
+// second or more, after the warm-up): how much of the picture is pixel-exact
+// at the end of one, and how long after the screen stopped it took to get
+// there.
+//
 // The first picture (a full screen, mostly lossless) takes a while on a slow
 // link; it is reported separately, and the other numbers cover the frames
 // captured after --warmup seconds.
@@ -108,6 +113,17 @@ int main(int argc, char** argv) {
   std::vector<std::pair<double, double>> first_psnr;  // (ms since start, PSNR) during warm-up
   uint64_t start_us = rdaccel::NowMicros();          // reset when the first frame is captured
   Image ref;
+  // Pauses: how sharp the picture ends up once the screen stops changing,
+  // and how long that takes. Per captured frame: the frame its content first
+  // appeared in (the capture loop compares each frame with the one before),
+  // when it was captured, when it was shown and how much of it was exact
+  // then (-1 = not shown, or not measured: only frames whose content is not
+  // new are, against one rendering of that content, so this costs the
+  // viewer thread a compare and no rendering while the screen stands still).
+  std::vector<uint64_t> content_of, captured_us, pause_shown_us;
+  std::vector<double> pause_exact;
+  Image pause_ref;
+  uint64_t pause_ref_content = UINT64_MAX;
   std::vector<double> cursor_ms;
   const bool with_cursor = args.num("cursor", 0) != 0;
   uint64_t steady_from_us = UINT64_MAX;  // host clock; set when warm-up ends
@@ -136,6 +152,32 @@ int main(int argc, char** argv) {
       if (index >= warmup_frames) {
         latency_ms.push_back((now - info.capture_time_us) / 1000.0);
         shown_at.push_back(now);
+      }
+    }
+    // A frame that repeats the one before it: part of a pause.
+    {
+      uint64_t content = UINT64_MAX;
+      {
+        std::lock_guard<std::mutex> lock(mu);
+        if (index < content_of.size() && content_of[index] != index) content = content_of[index];
+      }
+      if (content != UINT64_MAX) {
+        if (pause_ref_content != content) {
+          Render(scene, sc->fn, content, pause_ref);
+          pause_ref_content = content;
+        }
+        uint64_t exact = 0;
+        for (int y = 0; y < img.height; ++y) {
+          const uint8_t* a = img.data + static_cast<size_t>(y) * img.stride;
+          const uint8_t* b = pause_ref.data() + static_cast<size_t>(y) * w * 4;
+          for (int x = 0; x < img.width; ++x) {
+            exact += static_cast<uint64_t>(a[x * 4] == b[x * 4] && a[x * 4 + 1] == b[x * 4 + 1] &&
+                                           a[x * 4 + 2] == b[x * 4 + 2]);
+          }
+        }
+        std::lock_guard<std::mutex> lock(mu);
+        pause_shown_us[index] = now;
+        pause_exact[index] = 100.0 * static_cast<double>(exact) / (static_cast<double>(img.width) * img.height);
       }
     }
     // Quality on a sample of frames, to keep the viewer thread real time;
@@ -201,7 +243,14 @@ int main(int argc, char** argv) {
     std::lock_guard<std::mutex> lock(mu);
     start_us = t0;
   }
-  Image frame;
+  Image frame, last_frame;
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    content_of.assign(frames, 0);
+    captured_us.assign(frames, 0);
+    pause_shown_us.assign(frames, 0);
+    pause_exact.assign(frames, -1);
+  }
   double target_sum = 0;
   uint64_t warm_bytes = 0, warm_dropped = 0;
   int target_n = 0;
@@ -213,10 +262,14 @@ int main(int argc, char** argv) {
     if (due > now) std::this_thread::sleep_for(std::chrono::microseconds(due - now));
     Render(scene, sc->fn, i, frame);
     const uint64_t ct = rdaccel::NowMicros();
+    const bool repeated = i > 0 && frame == last_frame;
+    if (!repeated) last_frame = frame;
     {
       std::lock_guard<std::mutex> lock(mu);
       index_of[ct] = i;
       if (i == warmup_frames) steady_from_us = ct;
+      content_of[i] = repeated ? content_of[i - 1] : i;
+      captured_us[i] = ct;
     }
     if (with_cursor) {
       int x, y;
@@ -346,6 +399,47 @@ int main(int argc, char** argv) {
       }
     }
     std::printf("\n");
+  }
+  {
+    // Pauses of half a second or more that began after the warm-up. (`mu`
+    // is held since the session ended.)
+    std::vector<double> final_exact, settle_ms;
+    size_t pauses = 0;
+    for (uint64_t a = 0; a < frames;) {
+      uint64_t e = a + 1;
+      while (e < frames && content_of[e] == content_of[a]) ++e;
+      if (a >= warmup_frames && (e - a) * 2 >= static_cast<uint64_t>(fps)) {
+        ++pauses;
+        double last = -1;
+        for (uint64_t j = a; j < e; ++j) {
+          if (pause_exact[j] >= 0) last = pause_exact[j];
+        }
+        if (last >= 0) {
+          final_exact.push_back(last);
+          for (uint64_t j = a; j < e; ++j) {
+            if (pause_exact[j] >= last - 0.05) {
+              settle_ms.push_back((pause_shown_us[j] - captured_us[a]) / 1000.0);
+              break;
+            }
+          }
+        }
+      }
+      a = e;
+    }
+    if (pauses == 0) {
+      std::printf("       pauses: none of 0.5 s or more (the screen kept changing)\n");
+    } else if (final_exact.empty()) {
+      std::printf("       pauses: %zu, no frame shown in any\n", pauses);
+    } else {
+      std::sort(settle_ms.begin(), settle_ms.end());
+      double sum = 0;
+      for (double v : final_exact) sum += v;
+      std::printf("       pauses: %zu of 0.5 s or more; pixels exact at the end %5.1f%% (worst %5.1f%%); "
+                  "as sharp as it gets after p50 %4.0f ms, max %4.0f ms\n",
+                  pauses, sum / static_cast<double>(final_exact.size()),
+                  *std::min_element(final_exact.begin(), final_exact.end()), settle_ms[settle_ms.size() / 2],
+                  settle_ms.back());
+    }
   }
   if (with_cursor) {
     std::vector<double> c = cursor_ms;

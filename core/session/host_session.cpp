@@ -140,6 +140,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     unflattened_.assign(n_tiles, 0);
     stale_.assign(n_tiles, 0);
     coarse_.assign(n_tiles, 0);
+    palette_checked_.assign(n_tiles, 0);
   }
   // A keyframe starts the progressive sequence over.
   const bool progressive_key = key && options_.progressive && options_.lossless;
@@ -258,6 +259,35 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     for (size_t i = 0; i < n_tiles && refresh.size() < kMaxRefreshPerFrame; ++i) {
       if (quality_[i] == kRough && refine_[i] == 0 && frame_no_ - born_[i] >= kRefreshDelay) {
         refresh.push_back(i);
+      }
+    }
+  }
+  // Palette content the encoder has finished with (see palette_checked_):
+  // owed losslessly, like the tiles below.
+  if (!key && (quiet_ || text) && options_.lossless) {
+    std::vector<uint8_t> listed(n_tiles, 0);
+    for (const auto& c : changes) listed[static_cast<size_t>(c.row) * differ_.cols() + c.col] = 1;
+    for (size_t i = 0; i < n_tiles; ++i) {
+      if (quality_[i] != kRefined || refine_[i] != 0 || pending_lossless_[i] || stale_[i] || coarse_[i] ||
+          listed[i] || frame_no_ - born_[i] < kRefreshDelay || palette_checked_[i] == born_[i] + 1) {
+        continue;
+      }
+      const auto col = static_cast<int32_t>(i % differ_.cols());
+      const auto row = static_cast<int32_t>(i / differ_.cols());
+      if (regions_.RegionOf(col, row) >= 0) continue;
+      palette_checked_[i] = born_[i] + 1;
+      Rect rect{col * kTileSize, row * kTileSize, kTileSize, kTileSize};
+      rect.w = std::min(rect.w, width_ - rect.x);
+      rect.h = std::min(rect.h, height_ - rect.y);
+      // As the tile would be coded on its turn (see code_rect_as).
+      codec::PaletteTile t;
+      const bool palette =
+          text ? codec::ExtractReducedPalette(frame.bgra, rect, options_.text_colors, options_.lossless_max_colors,
+                                              4096, t, nullptr, /*faithful=*/true)
+               : codec::ExtractPalette(frame.bgra, rect, options_.lossless_max_colors, t);
+      if (palette) {
+        pending_lossless_[i] = 1;
+        ++pending_lossless_count_;
       }
     }
   }

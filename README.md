@@ -2,7 +2,7 @@
 
 面向极低带宽的远程桌面加速库。画面按区域分类传输：没变的区域不发，平移的区域只发拷贝指令，以前出现过的内容从接收端缓存贴回，文字和界面走无损调色板层，只有视频类区域交给硬件 HEVC 编码（macOS VideoToolbox，Linux FFmpeg）。
 
-当前版本 1.9.4。[rdmachine](https://github.com/lroel9527/rdmachine)（对标 NoMachine 的 Mac 远程桌面）就建在 rdaccel 之上：画面、光标、输入和传输由 rdaccel 负责，登录、会话和界面由 rdmachine 负责。
+当前版本 1.9.5。[rdmachine](https://github.com/lroel9527/rdmachine)（对标 NoMachine 的 Mac 远程桌面）就建在 rdaccel 之上：画面、光标、输入和传输由 rdaccel 负责，登录、会话和界面由 rdmachine 负责。
 
 - 静止桌面几十 kbps，打字约 50 kbps，滚动和拖窗 1 Mbps 以内，文字保持无损（[评测](docs/benchmarks.md)）
 - 文字模式（`text_mode`）：体验和普通模式一样，流量更少。静止和打字省 3–7 倍（文字减色后用专门的编码），滚动和拖窗省三到六成（[架构](docs/architecture.md#文字模式)）

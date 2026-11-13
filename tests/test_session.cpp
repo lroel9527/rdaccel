@@ -1555,3 +1555,66 @@ TEST(Session, TextModeCodesAgainWhatScrolledBeforeItWasPolished) {
   PipeStopper stop{host_end, viewer_end};
   EXPECT_EQ(shown.Differences(want, W, H, frames), "");
 }
+
+namespace {
+
+// Pixels of tile (tx, ty) that differ between two tightly packed BGRA images.
+size_t TileDiff(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, int w, int tx, int ty) {
+  size_t n = 0;
+  for (int y = 0; y < 64; ++y) {
+    for (int x = 0; x < 64; ++x) {
+      const size_t i = (static_cast<size_t>(ty * 64 + y) * w + tx * 64 + x) * 4;
+      n += std::memcmp(&a[i], &b[i], 3) != 0;
+    }
+  }
+  return n;
+}
+
+}  // namespace
+
+TEST(Session, PaletteContentThatKeptChangingTurnsExactOnceStill) {
+  // Twenty colours changing in every frame go as video (a hot tile takes
+  // four colours at most). Once it stops it is palette content like any
+  // other: owed losslessly, instead of staying at what the encoder made of it.
+  auto [host_end, viewer_end] = transport::MakeLocalPipe();
+  constexpr int W = 256, H = 128, kFps = 30;
+  session::HostSession host(host_end.get(), std::make_unique<FakeEncoder>(), W, H,
+                            {.refine_frames = 2, .still_refine_frames = 3, .progressive = false, .fps = kFps,
+                             .bitrate_bps = 4'000'000});
+  session::ViewerSession viewer(nullptr, std::make_unique<FakeDecoder>());
+  std::mutex mu;
+  std::condition_variable cv;
+  std::vector<uint8_t> shown;
+  uint64_t last_id = 0;
+  viewer.SetFrameHandler([&](const tile::ImageView& img, const std::vector<Rect>&, uint64_t id, uint64_t) {
+    std::lock_guard<std::mutex> lock(mu);
+    shown.assign(img.data, img.data + static_cast<size_t>(img.width) * img.height * 4);
+    last_id = id;
+    cv.notify_all();
+  });
+  viewer.Attach(viewer_end.get());
+  std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 50);
+  for (size_t i = 3; i < px.size(); i += 4) px[i] = 255;
+  uint64_t t = 1'000'000;
+  host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+  for (int f = 0; f < 12; ++f) {
+    for (int y = 0; y < 64; ++y) {
+      for (int x = 0; x < 64; ++x) {
+        const uint8_t v = static_cast<uint8_t>(((x / 3 + y / 5 + f) % 20) * 12);
+        std::memset(&px[(static_cast<size_t>(64 + y) * W + 128 + x) * 4], v, 3);  // tile (2, 1)
+      }
+    }
+    t += 1'000'000 / kFps;
+    host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+  }
+  for (int f = 0; f < 3 * kFps && (f < 10 || host.work_pending()); ++f) {
+    t += 1'000'000 / kFps;
+    host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+  }
+  EXPECT_FALSE(host.work_pending());
+  const uint64_t frames = host.stats().frames_encoded;
+  PipeStopper stop{host_end, viewer_end};
+  std::unique_lock<std::mutex> lock(mu);
+  ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(5), [&] { return last_id >= frames; }));
+  EXPECT_EQ(TileDiff(px, shown, W, 2, 1), 0u);
+}
