@@ -7,8 +7,12 @@
 //     packets it decides are lost (three later packets acknowledged, or
 //     clearly older than one round trip, or no acknowledgement for a probe
 //     timeout). A packet declared lost that is acknowledged after all (it
-//     was only late: jitter, reordering) is counted as a spurious resend; the
-//     rules stay quick, as waiting longer costs latency. Each channel is its own ordered byte stream, so a lost video
+//     was only late: jitter, reordering) is counted as a spurious resend.
+//     Where the path reorders, the first two rules wait out a reorder window
+//     learnt from how late such packets came (at most a quarter of the
+//     minimum round trip; none on a path that keeps the order), so a long,
+//     reordering path does not spend most of itself on spurious resends.
+//     Each channel is its own ordered byte stream, so a lost video
 //     packet never holds up input, cursor or control bytes.
 //   * Congestion control: a simplified BBR. The sender measures the delivery
 //     rate from acknowledgements and the minimum round-trip time, paces
@@ -88,6 +92,7 @@ class ReliableTransport final : public transport::ITransport {
     uint64_t delivered = 0, delivered_time = 0, first_sent_time = 0;
     bool app_limited = false;
     bool cwnd_limited = false;  // the window was full when it was sent
+    bool fec_covered = false;   // a parity covering it went out
   };
 
   void Run();  // sender / timer thread
@@ -97,6 +102,10 @@ class ReliableTransport final : public transport::ITransport {
   bool SendOne(uint64_t now);
   void SendAck(uint64_t now);
   void MarkLost(uint64_t pn, const SentPacket& p, uint64_t now);
+  // Declares lost what the acknowledgements and the reorder window say is,
+  // and sets loss_time_ to when the next packet held back by them would be.
+  void DetectLosses(uint64_t now);
+  uint64_t ReorderWindow() const;
   using Deliveries = std::vector<std::pair<int, std::vector<uint8_t>>>;
   // Receiving (lock held): a data packet, received or rebuilt.
   void MarkReceived(uint64_t pn, uint64_t now, bool in_order_hint);
@@ -142,8 +151,18 @@ class ReliableTransport final : public transport::ITransport {
   struct LostPacket {
     uint64_t time = 0;  // when declared lost
     uint32_t size = 0;  // datagram bytes
+    uint64_t sent = 0;  // when sent
+    bool fec_covered = false;
   };
   std::map<uint64_t, LostPacket> lost_recent_;
+  // Reordering seen on the path: how much earlier than the most recently
+  // sent packet acknowledged so far a packet was sent that is acknowledged
+  // only now. The largest of this epoch and the last is the reorder window:
+  // a packet is not taken for lost before something sent that much later
+  // has been acknowledged. Zero on a path that keeps the order.
+  uint64_t rack_time_ = 0;  // send time of the latest-sent packet acknowledged
+  uint64_t reorder_cur_ = 0, reorder_prev_ = 0, reorder_epoch_ = 0;
+  uint64_t loss_time_ = 0;  // 0 = no packet held back below the largest acknowledged
 
   // Forward error correction, sending: the group being collected, its size
   // (0 = off), and what decides it.
