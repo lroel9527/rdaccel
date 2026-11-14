@@ -19,7 +19,7 @@ namespace {
 struct Sink {
   std::mutex mu;
   std::condition_variable cv;
-  std::vector<uint8_t> got[5];
+  std::vector<uint8_t> got[kChannelCount];
 
   transport::ITransport::ReceiveFn Fn() {
     return [this](transport::Channel ch, std::span<const uint8_t> b) {
@@ -782,4 +782,65 @@ TEST(ReliableTransport, ForwardErrorCorrectionCutsTheWaitForLostPackets) {
   EXPECT_GT(on.st.fec_parity_sent, 0u);
   EXPECT_GT(on.st.fec_recovered, 0u);
   EXPECT_LT(on.p95, off.p95);
+}
+
+TEST(ReliableTransport, BulkGoesAfterTheVideoAndIsNotAQueueForTheHost) {
+  net::LinkConditions c;
+  c.bandwidth_bps = 10'000'000;
+  c.delay_ms = 30;
+  Sink at_viewer, at_host;
+  auto [a, b] = net::MakeSimulatedLink(c, net::LinkConditions{.delay_ms = c.delay_ms});
+  net::ReliableTransport host(std::move(a));
+  net::ReliableTransport viewer(std::move(b), {.client = true});
+  viewer.SetReceiver(at_viewer.Fn());
+  host.SetReceiver(at_host.Fn());
+  const auto bulk = Pattern(3'000'000, 11);
+  const auto video = Pattern(300'000, 12);
+  // A big transfer first, then a picture: the picture overtakes it.
+  for (size_t i = 0; i < bulk.size(); i += 100'000) host.Send(Channel::kBulk, std::span(bulk).subspan(i, 100'000));
+  TransportStats st;
+  ASSERT_TRUE(host.GetStats(&st));
+  EXPECT_TRUE(st.bulk_known);
+  EXPECT_GT(st.bulk_queued_bytes, 2'000'000u);
+  EXPECT_LT(st.queued_bytes, 100'000u);  // the host must not hold frames back for it
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  const auto t0 = std::chrono::steady_clock::now();
+  for (size_t i = 0; i < video.size(); i += 20'000) host.Send(Channel::kVideo, std::span(video).subspan(i, 20'000));
+  ASSERT_TRUE(at_viewer.WaitFor(3, video.size()));
+  const double video_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  {
+    std::lock_guard<std::mutex> lock(at_viewer.mu);
+    EXPECT_LT(at_viewer.got[6].size(), bulk.size() / 2) << "the picture waited for the transfer";
+  }
+  // 300 kB at 10 Mbps is 0.24 s; behind 3 MB of bulk it would be 2.4 s.
+  EXPECT_LT(video_s, 0.9);
+  ASSERT_TRUE(at_viewer.WaitFor(6, bulk.size()));
+  EXPECT_EQ(at_viewer.got[6], bulk);
+  EXPECT_EQ(at_viewer.got[3], video);
+}
+
+TEST(ReliableTransport, BulkUsesAFarPath) {
+  // 500 ms round trips, 10 Mbps: the transport's own congestion control,
+  // not a delay guess, sets the pace of a bulk transfer. (The simulated
+  // link's jitter delays each packet on its own, which reorders them by up
+  // to the jitter: with 20 ms of it the same transfer reaches only about
+  // 4.6 Mbps, the reordering taken for loss. Real paths keep their order.)
+  net::LinkConditions c;
+  c.bandwidth_bps = 10'000'000;
+  c.delay_ms = 250;
+  Sink at_viewer, at_host;
+  auto [a, b] = net::MakeSimulatedLink(c, net::LinkConditions{.delay_ms = c.delay_ms, .jitter_ms = c.jitter_ms});
+  net::ReliableTransport host(std::move(a));
+  net::ReliableTransport viewer(std::move(b), {.client = true});
+  viewer.SetReceiver(at_viewer.Fn());
+  host.SetReceiver(at_host.Fn());
+  const auto bulk = Pattern(10'000'000, 13);
+  const auto t0 = std::chrono::steady_clock::now();
+  for (size_t i = 0; i < bulk.size(); i += 100'000) host.Send(Channel::kBulk, std::span(bulk).subspan(i, 100'000));
+  ASSERT_TRUE(at_viewer.WaitFor(6, bulk.size(), 60));
+  const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  const double mbps = bulk.size() * 8 / s / 1e6;
+  std::printf("  10 MB of bulk over 500 ms round trips: %.1f s, %.1f Mbps\n", s, mbps);
+  EXPECT_GT(mbps, 5.0);
+  EXPECT_EQ(at_viewer.got[6], bulk);
 }

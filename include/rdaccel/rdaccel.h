@@ -43,8 +43,8 @@ extern "C" {
 /* ---- version ------------------------------------------------------------ */
 
 #define RDA_VERSION_MAJOR 1
-#define RDA_VERSION_MINOR 9
-#define RDA_VERSION_PATCH 6
+#define RDA_VERSION_MINOR 10
+#define RDA_VERSION_PATCH 0
 /* "rc1" and so on for a pre-release, "" for a release. rda_version() does
  * not include it; rda_version_string() does ("1.0.0-rc1"). */
 #define RDA_VERSION_PRERELEASE ""
@@ -601,6 +601,17 @@ RDA_API rda_state rda_host_get_state(const rda_host* h);
  * RDA_MSG_MAX_SIZE. */
 RDA_API rda_status rda_host_send_message(rda_host* h, uint32_t type, const uint8_t* payload,
                                          size_t n);
+/* 1.10: the same on the bulk channel, for large transfers (files): sent
+ * after the picture, in what the path has to spare, so a transfer does not
+ * slow the picture down and the transport's own congestion control sets
+ * its speed. With a viewer older than 1.10 it goes as rda_host_send_message.
+ * Messages of the two channels are not ordered with each other. */
+RDA_API rda_status rda_host_send_bulk_message(rda_host* h, uint32_t type, const uint8_t* payload,
+                                              size_t n);
+/* 1.10: bytes of bulk messages accepted but not yet sent; -1 when not known
+ * (over TCP, or the viewer has no bulk channel). A sender keeps this short
+ * (a fraction of a second at the path's rate) and sends more as it drains. */
+RDA_API int64_t rda_host_bulk_queued_bytes(const rda_host* h);
 
 /* Set out->struct_size first. Cumulative counters. */
 RDA_API rda_status rda_host_get_stats(const rda_host* h, rda_host_stats* out);
@@ -679,6 +690,10 @@ RDA_API rda_state rda_viewer_get_state(const rda_viewer* v);
 /* Sends an application message to the host; as rda_host_send_message(). */
 RDA_API rda_status rda_viewer_send_message(rda_viewer* v, uint32_t type, const uint8_t* payload,
                                            size_t n);
+/* 1.10: as rda_host_send_bulk_message() and rda_host_bulk_queued_bytes(). */
+RDA_API rda_status rda_viewer_send_bulk_message(rda_viewer* v, uint32_t type, const uint8_t* payload,
+                                                size_t n);
+RDA_API int64_t rda_viewer_bulk_queued_bytes(const rda_viewer* v);
 /* Asks the host for a full refresh (the viewer also does it by itself after
  * decode errors). */
 RDA_API void rda_viewer_request_keyframe(rda_viewer* v);

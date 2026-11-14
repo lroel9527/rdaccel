@@ -53,6 +53,7 @@ class SecureTransport final : public ITransport {
   void SetReceiver(ReceiveFn fn) override;
   void Close() override { inner_->Close(); }
   bool GetStats(TransportStats* out) const override { return inner_->GetStats(out); }
+  bool CarriesBulk() const override { return inner_->CarriesBulk(); }
   // Only once the keys are agreed: until then the host holds frames.
   bool PeerKnown() const override { return ready_.load() && inner_->PeerKnown(); }
   bool PeerPresent() const override { return inner_->PeerPresent(); }

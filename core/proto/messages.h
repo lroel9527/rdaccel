@@ -35,7 +35,9 @@ inline constexpr uint64_t kCapTextInput = 2;  // InputEvent kind kText
 inline constexpr uint64_t kCapContextTiles = 4;
 // Viewer: ... also those of 17 to 64 colours. 1.8.
 inline constexpr uint64_t kCapContextTiles64 = 8;
-inline constexpr uint64_t kCapsAll = kCapMessages | kCapTextInput | kCapContextTiles | kCapContextTiles64;
+// Both: AppMessage on Channel::kBulk too (large transfers below the picture). 1.10.
+inline constexpr uint64_t kCapBulk = 16;
+inline constexpr uint64_t kCapsAll = kCapMessages | kCapTextInput | kCapContextTiles | kCapContextTiles64 | kCapBulk;
 
 enum class MsgType : uint8_t {
   kHello = 1,

@@ -62,6 +62,7 @@ class ReliableTransport final : public transport::ITransport {
   void SetReceiver(ReceiveFn fn) override;
   void Close() override;
   bool GetStats(TransportStats* out) const override;
+  bool CarriesBulk() const override { return true; }
   bool PeerKnown() const override;
   std::unique_ptr<transport::ITransport> NextPeer(std::string* error) override;
 
@@ -110,6 +111,11 @@ class ReliableTransport final : public transport::ITransport {
   void OnRateSample(const SentPacket& p, uint64_t now);
   uint64_t QueuedBytes() const;
   uint64_t Cwnd() const;
+  uint64_t ChannelQueued(int c) const;
+  // Bulk data waits while the window is three quarters full.
+  bool BulkHeld() const;
+  // What may go out now: everything queued, less bulk data while it is held.
+  uint64_t SendableBytes() const;
   // The round trip shows a standing queue at the bottleneck.
   bool PathQueued() const;
   double PacingRate() const;  // bytes per microsecond

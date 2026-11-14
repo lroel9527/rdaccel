@@ -53,6 +53,7 @@ void Link::Start() {
   if (role_ == Role::kViewer) {
     proto::ViewerHello hello;
     hello.auth_token = options_.auth_token;
+    if (!transport_->CarriesBulk()) hello.caps &= ~proto::kCapBulk;
     SendControl(hello);
   }
   timer_ = std::thread([this] { Timer(); });
@@ -131,18 +132,21 @@ void Link::OnReceive(transport::Channel ch, std::span<const uint8_t> bytes) {
       }
       return;
     case transport::Channel::kMessage:
+    case transport::Channel::kBulk: {
       if (role_ == Role::kHost && state_.load() != LinkState::kConnected) return;
-      message_parser_.Append(bytes);
-      while (auto m = message_parser_.Next()) {
+      proto::StreamParser& parser = ch == transport::Channel::kBulk ? bulk_parser_ : message_parser_;
+      parser.Append(bytes);
+      while (auto m = parser.Next()) {
         if (auto* am = std::get_if<proto::AppMessage>(&*m); am && h_.on_message) {
           h_.on_message(am->type, am->payload);
         }
       }
-      if (!message_parser_.error().empty()) {
-        log::Warn("message channel: " + message_parser_.error());
+      if (!parser.error().empty()) {
+        log::Warn(std::string(ch == transport::Channel::kBulk ? "bulk" : "message") + " channel: " + parser.error());
         Fail(LinkError::kProtocol, proto::GoodbyeReason::kIncompatible);
       }
       return;
+    }
     default:
       if (role_ == Role::kViewer && h_.on_raw) h_.on_raw(ch, bytes);
       return;
@@ -184,7 +188,9 @@ void Link::HandleControl(proto::Message&& m) {
     // Connected before the Welcome goes out, so whatever the viewer sends
     // once it has the Welcome is accepted.
     SetState(LinkState::kConnected, LinkError::kNone);
-    SendControl(proto::Welcome{});
+    proto::Welcome welcome;
+    if (!transport_->CarriesBulk()) welcome.caps &= ~proto::kCapBulk;
+    SendControl(welcome);
     return;
   }
   if (std::holds_alternative<proto::Ping>(m)) return;
@@ -199,6 +205,25 @@ void Link::HandleControl(proto::Message&& m) {
 }
 
 bool Link::SendMessage(uint32_t type, std::span<const uint8_t> payload, std::string* error) {
+  return SendOn(transport::Channel::kMessage, send_mu_, type, payload, error);
+}
+
+bool Link::SendBulkMessage(uint32_t type, std::span<const uint8_t> payload, std::string* error) {
+  if ((peer_caps() & proto::kCapBulk) && transport_->CarriesBulk()) {
+    return SendOn(transport::Channel::kBulk, bulk_send_mu_, type, payload, error);
+  }
+  return SendOn(transport::Channel::kMessage, send_mu_, type, payload, error);
+}
+
+int64_t Link::BulkQueuedBytes() const {
+  if (!(peer_caps() & proto::kCapBulk) || !transport_->CarriesBulk()) return -1;
+  rdacore::TransportStats st;
+  if (!transport_->GetStats(&st) || !st.bulk_known) return -1;
+  return static_cast<int64_t>(st.bulk_queued_bytes);
+}
+
+bool Link::SendOn(transport::Channel ch, std::mutex& mu, uint32_t type, std::span<const uint8_t> payload,
+                  std::string* error) {
   if (disconnected()) {
     if (error) *error = std::string("disconnected: ") + LinkErrorText(this->error());
     return false;
@@ -218,10 +243,10 @@ bool Link::SendMessage(uint32_t type, std::span<const uint8_t> payload, std::str
   const auto bytes = proto::Encode(proto::AppMessage{type, {payload.begin(), payload.end()}});
   bool ok = true;
   {
-    std::lock_guard<std::mutex> lock(send_mu_);
+    std::lock_guard<std::mutex> lock(mu);
     for (size_t off = 0; ok && off < bytes.size(); off += kMessageChunk) {
       const size_t n = std::min(kMessageChunk, bytes.size() - off);
-      ok = transport_->Send(transport::Channel::kMessage, std::span<const uint8_t>(bytes).subspan(off, n));
+      ok = transport_->Send(ch, std::span<const uint8_t>(bytes).subspan(off, n));
     }
   }
   if (!ok) {

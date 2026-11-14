@@ -171,7 +171,9 @@ bool ValidChannel(rda_channel ch) { return ch >= RDA_CHANNEL_CONTROL && ch < RDA
 static_assert(RDA_STATE_CONNECTING == static_cast<int>(rdacore::ConnectionState::kConnecting) &&
               RDA_STATE_CONNECTED == static_cast<int>(rdacore::ConnectionState::kConnected) &&
               RDA_STATE_DISCONNECTED == static_cast<int>(rdacore::ConnectionState::kDisconnected));
-static_assert(RDA_CHANNEL_COUNT == rdacore::kChannelCount);
+// The C channels are the first six: an application's transport never sees
+// the bulk channel (CarriesBulk() is false for it).
+static_assert(RDA_CHANNEL_COUNT + 1 == rdacore::kChannelCount);
 static_assert(RDA_MSG_CLIPBOARD_TEXT == rdacore::kClipboardTextMessage &&
               RDA_MSG_USER_FIRST == rdacore::kFirstUserMessage);
 static_assert(RDA_KEYCODE_NONE == rdacore::kNoKeyCode);
@@ -938,6 +940,23 @@ rda_status rda_host_send_message(rda_host* h, uint32_t type, const uint8_t* payl
   RDA_GUARD_END
 }
 
+rda_status rda_host_send_bulk_message(rda_host* h, uint32_t type, const uint8_t* payload, size_t n) {
+  RDA_GUARD_BEGIN
+  if (!h || (!payload && n)) return Fail(RDA_ERR_INVALID_ARG, "host and payload are required");
+  std::string err;
+  const bool ok = h->host->SendBulkMessage(type, std::span<const uint8_t>(payload, n), &err);
+  return SendMessageStatus(ok, err);
+  RDA_GUARD_END
+}
+
+int64_t rda_host_bulk_queued_bytes(const rda_host* h) {
+  try {
+    return h ? h->host->BulkQueuedBytes() : -1;
+  } catch (...) {
+    return -1;
+  }
+}
+
 rda_status rda_host_get_stats(const rda_host* h, rda_host_stats* out) {
   RDA_GUARD_BEGIN
   if (!h || !out) return Fail(RDA_ERR_INVALID_ARG, "host and out are required");
@@ -1135,6 +1154,23 @@ rda_status rda_viewer_send_message(rda_viewer* v, uint32_t type, const uint8_t* 
   const bool ok = v->viewer->SendMessage(type, std::span<const uint8_t>(payload, n), &err);
   return SendMessageStatus(ok, err);
   RDA_GUARD_END
+}
+
+rda_status rda_viewer_send_bulk_message(rda_viewer* v, uint32_t type, const uint8_t* payload, size_t n) {
+  RDA_GUARD_BEGIN
+  if (!v || (!payload && n)) return Fail(RDA_ERR_INVALID_ARG, "viewer and payload are required");
+  std::string err;
+  const bool ok = v->viewer->SendBulkMessage(type, std::span<const uint8_t>(payload, n), &err);
+  return SendMessageStatus(ok, err);
+  RDA_GUARD_END
+}
+
+int64_t rda_viewer_bulk_queued_bytes(const rda_viewer* v) {
+  try {
+    return v ? v->viewer->BulkQueuedBytes() : -1;
+  } catch (...) {
+    return -1;
+  }
 }
 
 void rda_viewer_request_keyframe(rda_viewer* v) {

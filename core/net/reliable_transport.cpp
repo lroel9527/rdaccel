@@ -36,8 +36,10 @@ constexpr double kProbeGains[8] = {1.25, 0.75, 1, 1, 1, 1, 1, 1};
 constexpr double kQueueDrainGain = 0.9;
 constexpr size_t kMaxAckRanges = 32;
 // Sending order: small interactive channels first, then surface commands,
-// application messages (possibly large: a pasted image), video last.
-constexpr int kPriority[kChannelCount] = {0, 1, 4, 2, 5, 3};
+// application messages (possibly large: a pasted image), video, and bulk
+// transfers last.
+constexpr int kPriority[kChannelCount] = {0, 1, 4, 2, 5, 3, 6};
+constexpr int kBulkChannel = static_cast<int>(transport::Channel::kBulk);
 
 uint64_t Now() { return capture::MonotonicMicros(); }
 
@@ -138,7 +140,11 @@ bool ReliableTransport::GetStats(TransportStats* out) const {
   std::lock_guard<std::mutex> lock(mu_);
   out->bandwidth_bps = static_cast<int64_t>(std::min(bw_ * 8e6, 1e15));
   out->rtt_us = static_cast<uint32_t>(srtt_);
-  out->queued_bytes = QueuedBytes();
+  out->bulk_queued_bytes = ChannelQueued(kBulkChannel);
+  out->bulk_known = true;
+  // The host reads a queue as congestion (fewer frames, a lower bitrate);
+  // a file waiting its turn below the picture is not one.
+  out->queued_bytes = QueuedBytes() - out->bulk_queued_bytes;
   out->bytes_in_flight = bytes_in_flight_;
   out->packets_sent = packets_sent_;
   out->packets_lost = packets_lost_;
@@ -155,11 +161,26 @@ bool ReliableTransport::PeerKnown() const {
 
 uint64_t ReliableTransport::QueuedBytes() const {
   uint64_t n = 0;
-  for (const auto& s : out_) {
-    n += s.base + s.buf.size() - s.next;
-    for (const auto& [a, b] : s.resend) n += b - a;
-  }
+  for (int c = 0; c < kChannels; ++c) n += ChannelQueued(c);
   return n;
+}
+
+uint64_t ReliableTransport::ChannelQueued(int c) const {
+  const SendStream& s = out_[c];
+  uint64_t n = s.base + s.buf.size() - s.next;
+  for (const auto& [a, b] : s.resend) n += b - a;
+  return n;
+}
+
+bool ReliableTransport::BulkHeld() const {
+  // Bulk transfers use three quarters of the window at most: the rest stays
+  // free for the picture and input, which would otherwise wait a round trip
+  // for the bulk data ahead of them to be acknowledged.
+  return opt_.congestion_control && bytes_in_flight_ + kMaxDatagram > Cwnd() * 3 / 4;
+}
+
+uint64_t ReliableTransport::SendableBytes() const {
+  return BulkHeld() ? QueuedBytes() - ChannelQueued(kBulkChannel) : QueuedBytes();
 }
 
 uint64_t ReliableTransport::Cwnd() const {
@@ -306,7 +327,7 @@ void ReliableTransport::Run() {
       wake = std::min(wake, since + (Pto() << std::min(pto_count_, 6)));
     }
     if (opt_.client && !heard_peer_) wake = std::min(wake, next_hello_);
-    const bool have_data = can_send && QueuedBytes() > 0;
+    const bool have_data = can_send && SendableBytes() > 0;
     if (have_data && opt_.congestion_control && bytes_in_flight_ + kMaxDatagram <= Cwnd()) {
       wake = std::min(wake, next_send_time_);
     }
@@ -318,7 +339,7 @@ void ReliableTransport::Run() {
 }
 
 bool ReliableTransport::SendOne(uint64_t now) {
-  if (QueuedBytes() == 0) {
+  if (SendableBytes() == 0) {
     if (backlog_since_ != UINT64_MAX) backlogged_us_ += now - backlog_since_;
     backlog_since_ = UINT64_MAX;
     return false;
@@ -326,7 +347,9 @@ bool ReliableTransport::SendOne(uint64_t now) {
   if (backlog_since_ == UINT64_MAX) backlog_since_ = now;
   int ch = -1;
   uint64_t off = 0, len = 0;
+  const bool bulk_held = BulkHeld();
   for (int c : kPriority) {
+    if (c == kBulkChannel && bulk_held) continue;
     SendStream& s = out_[c];
     // Lost ranges first, skipping whatever was acknowledged meanwhile.
     while (!s.resend.empty()) {

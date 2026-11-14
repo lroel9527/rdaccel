@@ -28,16 +28,24 @@ enum class Channel : uint8_t {
   kVideo = 3,
   kCursor = 4,
   kMessage = 5,  // application messages (clipboard, ...): reliable, ordered
+  // Application messages of large transfers (files): reliable, ordered, and
+  // sent last, after the video, in what the path has to spare (1.10).
+  kBulk = 6,
 };
 
-inline constexpr int kChannelCount = 6;
+inline constexpr int kChannelCount = 7;
 
 // What a transport knows about the path. The Host uses it to adapt its
 // bitrate and to skip frames instead of letting a queue build up.
 struct TransportStats {
   int64_t bandwidth_bps = 0;   // estimated deliverable send rate; 0 = unknown
   uint32_t rtt_us = 0;         // smoothed round-trip time; 0 = unknown
-  uint64_t queued_bytes = 0;   // accepted by Send() but not yet on the wire
+  uint64_t queued_bytes = 0;   // accepted by Send() but not yet on the wire (not counting kBulk)
+  // kBulk's share of what is accepted but not on the wire, when the
+  // transport keeps its own queue (UDP); bulk_known is false otherwise (TCP
+  // writes to the socket at once).
+  uint64_t bulk_queued_bytes = 0;
+  bool bulk_known = false;
   uint64_t bytes_in_flight = 0;
   uint64_t packets_sent = 0;
   uint64_t packets_lost = 0;   // detected lost (and resent)
@@ -77,6 +85,10 @@ class Transport {
   // listening transport's peer that does not complete the handshake.
   virtual bool PeerPresent() const { return PeerKnown(); }
 
+  // Whether it carries Channel::kBulk (the library's own transports do; an
+  // application's transport made before 1.10 knows only the first six
+  // channels, so the link sends bulk messages on kMessage through it).
+  virtual bool CarriesBulk() const { return false; }
   virtual bool GetStats(TransportStats* out) const {
     (void)out;
     return false;

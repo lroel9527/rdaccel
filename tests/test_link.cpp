@@ -388,3 +388,94 @@ TEST(Link, HostIgnoresAViewerItHasNotAccepted) {
   host.Shutdown();
   a.reset();
 }
+
+namespace {
+
+// Forwards to a pipe end and records which channels went out; can pose as
+// an application's transport, which knows only the first six channels.
+struct Recording : Transport {
+  Recording(std::unique_ptr<Transport> inner, bool bulk) : inner_(std::move(inner)), bulk_(bulk) {}
+  bool Send(Channel ch, std::span<const uint8_t> b) override {
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      sent[static_cast<int>(ch)] += b.size();
+    }
+    return inner_->Send(ch, b);
+  }
+  void SetReceiver(ReceiveFn fn) override { inner_->SetReceiver(std::move(fn)); }
+  void Close() override { inner_->Close(); }
+  bool CarriesBulk() const override { return bulk_; }
+  size_t Sent(Channel ch) {
+    std::lock_guard<std::mutex> lock(mu);
+    return sent[static_cast<int>(ch)];
+  }
+  std::unique_ptr<Transport> inner_;
+  bool bulk_;
+  std::mutex mu;
+  size_t sent[kChannelCount] = {};
+};
+
+struct BulkPair {
+  Recording* host_rec = nullptr;
+  Recording* viewer_rec = nullptr;
+  std::unique_ptr<Transport> host_t, viewer_t;
+  Events host_ev, viewer_ev;
+  std::unique_ptr<Link> host, viewer;
+  BulkPair(bool host_bulk, bool viewer_bulk) {
+    auto [a, b] = CreateLocalPipe();
+    auto ha = std::make_unique<Recording>(std::move(a), host_bulk);
+    auto vb = std::make_unique<Recording>(std::move(b), viewer_bulk);
+    host_rec = ha.get();
+    viewer_rec = vb.get();
+    host_t = std::move(ha);
+    viewer_t = std::move(vb);
+    host = std::make_unique<Link>(Link::Role::kHost, host_t.get(), LinkOptions{}, host_ev.Handlers());
+    viewer = std::make_unique<Link>(Link::Role::kViewer, viewer_t.get(), LinkOptions{}, viewer_ev.Handlers());
+    host_t->SetReceiver([this](Channel ch, std::span<const uint8_t> b) { host->OnReceive(ch, b); });
+    viewer_t->SetReceiver([this](Channel ch, std::span<const uint8_t> b) { viewer->OnReceive(ch, b); });
+    host->Start();
+    viewer->Start();
+  }
+  ~BulkPair() {
+    viewer->Shutdown();
+    host->Shutdown();
+    viewer_t.reset();
+    host_t.reset();
+  }
+};
+
+}  // namespace
+
+TEST(Link, BulkMessagesGoOnTheBulkChannel) {
+  BulkPair p(true, true);
+  ASSERT_TRUE(WaitUntil([&] { return p.viewer->state() == LinkState::kConnected; }));
+  EXPECT_TRUE(p.host->peer_caps() & proto::kCapBulk);
+  std::vector<uint8_t> big(700'000, 0x5a);
+  std::string err;
+  ASSERT_TRUE(p.viewer->SendBulkMessage(kFirstUserMessage + 1, big, &err)) << err;
+  ASSERT_TRUE(p.viewer->SendMessage(kFirstUserMessage + 2, {}, &err)) << err;
+  ASSERT_TRUE(WaitUntil([&] { return p.host_ev.message_count() == 2; }));
+  EXPECT_GE(p.viewer_rec->Sent(Channel::kBulk), big.size());
+  std::lock_guard<std::mutex> lock(p.host_ev.mu);
+  bool got_big = false;
+  for (const auto& [type, payload] : p.host_ev.messages) got_big |= type == kFirstUserMessage + 1 && payload == big;
+  EXPECT_TRUE(got_big);
+  // A pipe has no queue of its own to report.
+  EXPECT_EQ(p.viewer->BulkQueuedBytes(), -1);
+}
+
+TEST(Link, ThroughATransportWithoutTheBulkChannelBulkGoesAsMessages) {
+  // The host's transport is an application's (six channels): it does not
+  // offer the bulk channel, and the viewer does not use it.
+  BulkPair p(false, true);
+  ASSERT_TRUE(WaitUntil([&] { return p.viewer->state() == LinkState::kConnected; }));
+  EXPECT_FALSE(p.viewer->peer_caps() & proto::kCapBulk);
+  std::vector<uint8_t> big(300'000, 0x33);
+  std::string err;
+  ASSERT_TRUE(p.viewer->SendBulkMessage(kFirstUserMessage + 1, big, &err)) << err;
+  ASSERT_TRUE(p.host->SendBulkMessage(kFirstUserMessage + 3, big, &err)) << err;
+  ASSERT_TRUE(WaitUntil([&] { return p.host_ev.message_count() == 1 && p.viewer_ev.message_count() == 1; }));
+  EXPECT_EQ(p.viewer_rec->Sent(Channel::kBulk), 0u);
+  EXPECT_EQ(p.host_rec->Sent(Channel::kBulk), 0u);
+  EXPECT_GE(p.viewer_rec->Sent(Channel::kMessage), big.size());
+}

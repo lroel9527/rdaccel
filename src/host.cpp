@@ -58,6 +58,10 @@ class ViewerGate final : public Transport {
     std::shared_lock<std::shared_mutex> l(mu_);
     return inner_->GetStats(out);
   }
+  bool CarriesBulk() const override {
+    std::shared_lock<std::shared_mutex> l(mu_);
+    return inner_->CarriesBulk();
+  }
 
  private:
   mutable std::shared_mutex mu_;
@@ -627,6 +631,12 @@ void Host::SetMessageHandler(MessageHandler fn) {
 bool Host::SendMessage(uint32_t type, std::span<const uint8_t> payload, std::string* error) {
   return impl_->CurrentLink()->SendMessage(type, payload, error);
 }
+
+bool Host::SendBulkMessage(uint32_t type, std::span<const uint8_t> payload, std::string* error) {
+  return impl_->CurrentLink()->SendBulkMessage(type, payload, error);
+}
+
+int64_t Host::BulkQueuedBytes() const { return impl_->CurrentLink()->BulkQueuedBytes(); }
 
 void Host::SetInputHandler(InputHandler fn) {
   std::lock_guard<std::mutex> lock(impl_->mu);

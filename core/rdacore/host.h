@@ -208,6 +208,12 @@ class Host {
   // below kFirstUserMessage are the library's (kClipboardTextMessage).
   void SetMessageHandler(MessageHandler fn);
   bool SendMessage(uint32_t type, std::span<const uint8_t> payload, std::string* error = nullptr);
+  // The same on the bulk channel: after the video, in what the path has to
+  // spare (large transfers); on the message channel with a viewer older than
+  // 1.10. BulkQueuedBytes: what of it waits to be sent, -1 when not known
+  // (TCP, or no bulk channel); a sender keeps it short to stay responsive.
+  bool SendBulkMessage(uint32_t type, std::span<const uint8_t> payload, std::string* error = nullptr);
+  int64_t BulkQueuedBytes() const;
 
   // Mode 1: let the library capture the main display (ScreenCaptureKit on
   // macOS, X11 on Linux). Fails without the Screen Recording permission.

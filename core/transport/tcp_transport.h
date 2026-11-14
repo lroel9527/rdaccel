@@ -37,6 +37,7 @@ class TcpTransport final : public ITransport {
   void SetReceiver(ReceiveFn fn) override;
   void Close() override;
   bool PeerKnown() const override { return fd_.load() >= 0; }
+  bool CarriesBulk() const override { return true; }
   std::unique_ptr<ITransport> NextPeer(std::string* error) override;
 
  private:

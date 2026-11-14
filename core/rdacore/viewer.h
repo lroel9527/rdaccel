@@ -90,6 +90,9 @@ class Viewer {
 
   // Reliable, ordered application message to the host (see Host::SendMessage).
   bool SendMessage(uint32_t type, std::span<const uint8_t> payload, std::string* error = nullptr);
+  // On the bulk channel, and what of it waits (see Host::SendBulkMessage).
+  bool SendBulkMessage(uint32_t type, std::span<const uint8_t> payload, std::string* error = nullptr);
+  int64_t BulkQueuedBytes() const;
 
   // kConnecting until the host answers; kDisconnected is final. A viewer
   // without a transport (recording playback) stays kConnecting.

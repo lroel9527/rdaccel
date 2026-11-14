@@ -71,6 +71,14 @@ class Link {
   // Reliable, ordered application message. False (with `error`) when
   // disconnected, the type is reserved, or the payload is too large.
   bool SendMessage(uint32_t type, std::span<const uint8_t> payload, std::string* error);
+  // The same on the bulk channel (below the picture, in what the path has
+  // to spare), or on the message channel with a peer that has none (older
+  // than 1.10).
+  bool SendBulkMessage(uint32_t type, std::span<const uint8_t> payload, std::string* error);
+  // Bytes of bulk messages accepted but not yet sent; -1 when not known
+  // (the transport has no queue of its own, as TCP, or the peer has no bulk
+  // channel and they went on the message channel).
+  int64_t BulkQueuedBytes() const;
 
   LinkState state() const { return state_.load(); }
   // The peer's capability bits (proto::kCap*), known once connected.
@@ -113,8 +121,11 @@ class Link {
   // a stray sender cannot keep the place of the viewer.
   bool listening_ = false;
   uint64_t peer_since_us_ = 0;  // timer thread only
-  proto::StreamParser control_parser_, input_parser_, message_parser_;
-  std::mutex send_mu_;  // keeps a chunked AppMessage contiguous
+  proto::StreamParser control_parser_, input_parser_, message_parser_, bulk_parser_;
+  std::mutex send_mu_;       // keeps a chunked AppMessage contiguous
+  std::mutex bulk_send_mu_;  // the same on the bulk channel
+  bool SendOn(transport::Channel ch, std::mutex& mu, uint32_t type, std::span<const uint8_t> payload,
+              std::string* error);
 
   std::mutex timer_mu_;
   std::condition_variable timer_cv_;

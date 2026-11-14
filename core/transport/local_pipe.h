@@ -27,6 +27,7 @@ class LocalPipeEndpoint final : public ITransport {
   bool Send(Channel ch, std::span<const uint8_t> bytes) override;
   void SetReceiver(ReceiveFn fn) override;
   void Close() override;
+  bool CarriesBulk() const override { return true; }
 
  private:
   friend std::pair<std::unique_ptr<LocalPipeEndpoint>, std::unique_ptr<LocalPipeEndpoint>>
