@@ -709,6 +709,35 @@ TEST(ReliableTransport, RealLossIsNotTakenForLateness) {
   EXPECT_LE(st.packets_spurious, st.packets_lost / 10);
 }
 
+TEST(ReliableTransport, ReorderingIsNotLossOnALongPath) {
+  // A long path (a VPN across an ocean) whose packets each wait 0-20 ms
+  // extra, so tens of them arrive out of order. With the packet rule alone
+  // nearly every one was resent (half the path went to resends); the
+  // reorder window learnt from the first late ones stops that.
+  net::LinkConditions c;
+  c.bandwidth_bps = 10'000'000;
+  c.delay_ms = 100;
+  c.jitter_ms = 20;
+  const TransportStats st = SendThrough(c, 3'000'000);
+  std::printf("reordered: sent %llu lost %llu spurious %llu\n", (unsigned long long)st.packets_sent,
+              (unsigned long long)st.packets_lost, (unsigned long long)st.packets_spurious);
+  EXPECT_LT(st.packets_spurious, st.packets_sent / 20);  // was ~45%
+}
+
+TEST(ReliableTransport, RealLossIsFoundDespiteReordering) {
+  // The same reordering with 2% real loss: the window must not hide it.
+  net::LinkConditions c;
+  c.bandwidth_bps = 10'000'000;
+  c.delay_ms = 100;
+  c.jitter_ms = 20;
+  c.loss = 0.02;
+  const TransportStats st = SendThrough(c, 3'000'000, /*fec=*/0);
+  std::printf("reordered, lossy: sent %llu lost %llu spurious %llu\n", (unsigned long long)st.packets_sent,
+              (unsigned long long)st.packets_lost, (unsigned long long)st.packets_spurious);
+  EXPECT_GT(st.packets_lost - std::min(st.packets_lost, st.packets_spurious), st.packets_sent / 100);
+  EXPECT_LT(st.packets_spurious, st.packets_sent / 20);
+}
+
 namespace {
 
 struct FrameLatency {
@@ -843,4 +872,51 @@ TEST(ReliableTransport, BulkUsesAFarPath) {
   std::printf("  10 MB of bulk over 500 ms round trips: %.1f s, %.1f Mbps\n", s, mbps);
   EXPECT_GT(mbps, 5.0);
   EXPECT_EQ(at_viewer.got[6], bulk);
+}
+
+namespace {
+
+struct BulkRun {
+  double mbps = 0;
+  TransportStats st;
+};
+
+// A large transfer over the simulated link: goodput and what was resent.
+BulkRun BulkThrough(const net::LinkConditions& c, size_t bytes) {
+  Sink at_viewer, at_host;
+  net::LinkConditions back{.delay_ms = c.delay_ms, .jitter_ms = c.jitter_ms, .seed = c.seed + 1};
+  auto [a, b] = net::MakeSimulatedLink(c, back);
+  net::ReliableTransport host(std::move(a), {});
+  net::ReliableTransport viewer(std::move(b), {.client = true});
+  viewer.SetReceiver(at_viewer.Fn());
+  host.SetReceiver(at_host.Fn());
+  const auto data = Pattern(bytes, 5);
+  const auto t0 = std::chrono::steady_clock::now();
+  for (size_t i = 0; i < bytes; i += 64'000) {
+    host.Send(Channel::kVideo, std::span(data).subspan(i, std::min<size_t>(64'000, bytes - i)));
+  }
+  BulkRun r;
+  EXPECT_TRUE(at_viewer.WaitFor(3, bytes, 120));
+  const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  r.mbps = static_cast<double>(bytes) * 8 / s / 1e6;
+  EXPECT_TRUE(host.GetStats(&r.st));
+  return r;
+}
+
+}  // namespace
+
+// Measurement only (run with --gtest_also_run_disabled_tests): goodput of a
+// bulk transfer over a long path with and without reordering.
+TEST(ReliableTransport, DISABLED_BulkGoodputUnderReordering) {
+  for (int delay : {100, 250}) {
+    for (int jitter : {0, 5, 20, 50}) {
+      for (double loss : {0.0, 0.01}) {
+        net::LinkConditions c{.bandwidth_bps = 10'000'000, .delay_ms = delay, .jitter_ms = jitter, .loss = loss};
+        const BulkRun r = BulkThrough(c, 6'000'000);
+        std::printf("rtt %3d ms jitter %2d ms loss %.0f%%: %5.2f Mbps, sent %llu lost %llu spurious %llu\n",
+                    2 * delay, jitter, loss * 100, r.mbps, (unsigned long long)r.st.packets_sent,
+                    (unsigned long long)r.st.packets_lost, (unsigned long long)r.st.packets_spurious);
+      }
+    }
+  }
 }

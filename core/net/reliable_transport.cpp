@@ -280,6 +280,7 @@ void ReliableTransport::Run() {
     }
     if (ack_pending_ > 0 && now >= ack_deadline_) SendAck(now);
     UpdateFec(now);
+    if (loss_time_ != 0 && now >= loss_time_) DetectLosses(now);
 
     // Probe timeout: nothing acknowledged for too long. Resend the oldest
     // packet as a probe; its acknowledgement declares the rest lost (by the
@@ -322,6 +323,7 @@ void ReliableTransport::Run() {
     // Sleep until the next thing to do.
     uint64_t wake = now + 50'000;
     if (ack_pending_ > 0) wake = std::min(wake, ack_deadline_);
+    if (loss_time_ != 0) wake = std::min(wake, loss_time_);
     if (!in_flight_.empty()) {
       const uint64_t since = std::max(last_ack_time_, in_flight_.begin()->second.time);
       wake = std::min(wake, since + (Pto() << std::min(pto_count_, 6)));
@@ -468,6 +470,11 @@ void ReliableTransport::SendParity(uint64_t now) {
   d.insert(d.end(), payload.begin(), payload.end());
   socket_->Send(d);
   ++fec_parity_sent_;
+  // A covered packet the peer rebuilds is acknowledged late, as if
+  // reordered: it must not widen the reorder window.
+  for (uint64_t covered : fec_group_.pns) {
+    if (auto it = in_flight_.find(covered); it != in_flight_.end()) it->second.fec_covered = true;
+  }
   fec_group_ = {};
   // In flight like data, for the window, the pacing and the delivery rate;
   // never resent.
@@ -536,7 +543,7 @@ void ReliableTransport::MarkLost(uint64_t pn, const SentPacket& p, uint64_t now)
   bytes_in_flight_ -= p.size;
   if (p.ch == kFecChannel) return;  // a parity: nothing to resend, not data lost
   ++packets_lost_;
-  lost_recent_[pn] = {now, p.size};
+  lost_recent_[pn] = {now, p.size, p.time, p.fec_covered};
   // Late acknowledgements come within a few round trips; keep it small.
   while (lost_recent_.size() > 4096 ||
          (!lost_recent_.empty() && now - lost_recent_.begin()->second.time > 2'000'000 + 4 * srtt_)) {
@@ -704,6 +711,18 @@ void ReliableTransport::HandleAck(std::span<const uint8_t> payload, uint64_t now
   // turns out to have been only late.
   if (uint64_t rebuilt = 0; r.varint(rebuilt)) peer_fec_recovered_ = rebuilt;
 
+  // The reorder window follows the last two epochs of what was seen.
+  if (now - reorder_epoch_ > std::max<uint64_t>(1'000'000, 4 * srtt_)) {
+    reorder_prev_ = reorder_cur_;
+    reorder_cur_ = 0;
+    reorder_epoch_ = now;
+  }
+  const uint64_t rack_before = rack_time_;
+  auto note_reorder = [&](uint64_t sent, bool fec_covered) {
+    if (any_acked_ && !fec_covered && sent < rack_before) reorder_cur_ = std::max(reorder_cur_, rack_before - sent);
+    rack_time_ = std::max(rack_time_, sent);
+  };
+
   bool newest_acked = false;
   const SentPacket* newest = nullptr;
   SentPacket newest_copy;
@@ -712,6 +731,7 @@ void ReliableTransport::HandleAck(std::span<const uint8_t> payload, uint64_t now
     for (auto it = in_flight_.lower_bound(lo); it != in_flight_.end() && it->first <= hi;) {
       const SentPacket& p = it->second;
       if (it->first == largest) newest_acked = true;
+      note_reorder(p.time, p.fec_covered);
       bytes_in_flight_ -= p.size;
       delivered_ += p.size;
       delivered_time_ = now;
@@ -727,14 +747,12 @@ void ReliableTransport::HandleAck(std::span<const uint8_t> payload, uint64_t now
     }
   }
   // Acknowledged although declared lost: the resend was spurious (the
-  // original was late, not lost: jitter, reordering). Counted only. Loosening
-  // the loss rules on it (as RACK does) was tried: it cut spurious resends
-  // eightfold on a jittery path but found real losses later, and the worst
-  // latency over 200 ms round trips grew from ~450 to ~600 ms
-  // (rdaccel_netsim). A resend costs bandwidth; waiting costs latency.
+  // original was late, not lost: jitter, reordering). How late it was
+  // widens the reorder window (DetectLosses).
   for (const auto& [lo, hi] : ranges) {
     for (auto it = lost_recent_.lower_bound(lo); it != lost_recent_.end() && it->first <= hi;) {
       ++packets_spurious_;
+      note_reorder(it->second.sent, it->second.fec_covered);
       // It was delivered: count it, or the delivery rate (the bandwidth
       // estimate) comes out low by every late packet on a jittery path.
       delivered_ += it->second.size;
@@ -775,14 +793,40 @@ void ReliableTransport::HandleAck(std::span<const uint8_t> payload, uint64_t now
   pto_count_ = 0;
   probe_due_ = false;
 
+  DetectLosses(now);
+}
+
+uint64_t ReliableTransport::ReorderWindow() const {
+  // At most a quarter of the minimum round trip, as in RACK: on a short path
+  // a resend comes back sooner than waiting out the reordering would (and
+  // waiting costs latency); on a long one (a VPN across an ocean, 200-500 ms)
+  // tens of ms of reordering made nearly every packet a spurious resend,
+  // which took half to two thirds of the path (10 Mbps, 20-50 ms). An extra
+  // millisecond on top for the spread of what was seen.
+  const uint64_t seen = std::max(reorder_cur_, reorder_prev_);
+  if (seen == 0) return 0;
+  return std::min(seen + 1000, min_rtt_ / 4);
+}
+
+void ReliableTransport::DetectLosses(uint64_t now) {
   // Loss: three newer packets acknowledged, or sent well over an RTT before
-  // something that was acknowledged.
-  const uint64_t threshold = std::max<uint64_t>(9 * std::max(srtt_, latest_rtt_) / 8, 1000);
+  // something that was acknowledged; either one only once the reorder window
+  // has passed (none on a path that keeps the order). A real loss is then
+  // found at most the window later, never a round trip later.
+  loss_time_ = 0;
+  if (!any_acked_) return;
+  const uint64_t reorder = ReorderWindow();
+  const uint64_t threshold = std::max<uint64_t>(9 * std::max(srtt_, latest_rtt_) / 8, 1000) + reorder;
   for (auto it = in_flight_.begin(); it != in_flight_.end() && it->first < largest_acked_;) {
-    if (largest_acked_ - it->first >= 3 || it->second.time + threshold < now) {
-      MarkLost(it->first, it->second, now);
+    const SentPacket& p = it->second;
+    if ((largest_acked_ - it->first >= 3 && p.time + reorder <= rack_time_) || p.time + threshold < now) {
+      MarkLost(it->first, p, now);
       it = in_flight_.erase(it);
     } else {
+      // Held back: no later acknowledgement may come (the end of a burst),
+      // so the time rule also runs on a timer.
+      const uint64_t due = p.time + threshold + 1;
+      if (loss_time_ == 0 || due < loss_time_) loss_time_ = due;
       ++it;
     }
   }
