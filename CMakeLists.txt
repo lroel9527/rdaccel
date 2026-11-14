@@ -22,6 +22,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # so add_subdirectory(rdaccel) in another project builds just the library.
 option(RDACCEL_BUILD_TESTS "Build unit tests" ${PROJECT_IS_TOP_LEVEL})
 option(RDACCEL_BUILD_EXAMPLES "Build example programs" ${PROJECT_IS_TOP_LEVEL})
+option(RDACCEL_BUILD_TOOLS "Build development tools (tools/clip)" ${PROJECT_IS_TOP_LEVEL})
 option(RDACCEL_INSTALL "Generate install rules" ${PROJECT_IS_TOP_LEVEL})
 # Also install rdaccel_serve / rdaccel_view / rdaccel_record / rdaccel_play
 # (release packages do).
@@ -384,6 +385,16 @@ if(RDACCEL_BUILD_TESTS)
     set_tests_properties(minimal_c PROPERTIES
       ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan.supp")
   endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# tools: development tools on the internals (not installed)
+# ---------------------------------------------------------------------------
+if(RDACCEL_BUILD_TOOLS)
+  # Test clips of a screen, and how the host does on them (docs/clips.md).
+  add_executable(rdaccel_clip tools/clip/rdaccel_clip.cpp)
+  target_include_directories(rdaccel_clip PRIVATE tools/clip examples)
+  target_link_libraries(rdaccel_clip PRIVATE rdaccel_internal ZLIB::ZLIB)
 endif()
 
 if(RDACCEL_BUILD_FUZZERS)

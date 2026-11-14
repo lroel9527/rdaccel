@@ -111,6 +111,7 @@ platform/mac/      ScreenCaptureKit、VideoToolbox、光标、显示器列表、
 platform/linux/    X11 / XFixes / RandR、Wayland（portal + PipeWire）、FFmpeg（NVENC、x265、VAAPI）、XTest 注入
 third_party/       Monocypher
 examples/          只用公开 API 的示例和工具
+tools/clip/        测试片段：录真实屏幕、按场景自动录、测评、两个版本对比（见 clips.md）
 tests/ fuzz/       GoogleTest 单元测试、libFuzzer 目标
 ```
 
