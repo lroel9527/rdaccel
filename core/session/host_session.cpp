@@ -990,8 +990,31 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       if (!residual[i].empty()) q = std::min(q, quality_[idx]);  // rows that stayed put
       // Only the rows that did not move or stay put are left to code, and of
       // those, what a dragged window just uncovered can come from the cache.
-      for (const Rect& r : residual[i]) {
-        for (const Rect& part : paint_from_slot(c, r, 0.0, q)) {
+      // A tile that keeps changing while it moves (the edge of a dragged
+      // window) can be left in dozens of crumbs, strips of 4 pixels and
+      // single rows; each went out with a palette of its own, and the
+      // palettes came to more than the pixels (1.7 MB of them in a 30 s
+      // drag in text mode). In text mode more than kMaxResidualParts are
+      // coded as the one rect around them: the moved pixels inside it are
+      // the screen's too, painted over the copy with the same content.
+      constexpr size_t kMaxResidualParts = 4;
+      std::vector<Rect> to_code = residual[i];
+      double min_share = 0.0;
+      // (Text mode only: without it the merged rect goes to video more
+      // often, and normal mode's picture is not made softer for traffic.)
+      if (text && hot[i] && to_code.size() > kMaxResidualParts) {
+        int32_t x0 = to_code[0].x, y0 = to_code[0].y, x1 = to_code[0].right(), y1 = to_code[0].bottom();
+        for (const Rect& r : to_code) {
+          x0 = std::min(x0, r.x);
+          y0 = std::min(y0, r.y);
+          x1 = std::max(x1, r.right());
+          y1 = std::max(y1, r.bottom());
+        }
+        to_code = {Rect{x0, y0, x1 - x0, y1 - y0}};
+        min_share = 0.5;  // the cache only if it covers most of it (else crumbs again)
+      }
+      for (const Rect& r : to_code) {
+        for (const Rect& part : paint_from_slot(c, r, min_share, q)) {
           if (code_rect(c, part, hot[i])) q = kRough;
         }
       }

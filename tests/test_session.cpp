@@ -7,6 +7,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <cstdlib>
 #include <mutex>
 #include <thread>
 
@@ -1617,4 +1618,121 @@ TEST(Session, PaletteContentThatKeptChangingTurnsExactOnceStill) {
   std::unique_lock<std::mutex> lock(mu);
   ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(5), [&] { return last_id >= frames; }));
   EXPECT_EQ(TileDiff(px, shown, W, 2, 1), 0u);
+}
+
+TEST(Session, TextModeDragsAWindowWithoutSendingItInCrumbs) {
+  // A window of text dragged over a busy background, 7 pixels a frame
+  // diagonally, then still. The tiles along its edges keep changing and get
+  // part of their pixels from copies; text mode sent what was left of each
+  // in dozens of crumbs, each with a palette of its own, and a drag cost
+  // more than without text mode. Afterwards the window must be exact.
+  auto [host_end, viewer_end] = transport::MakeLocalPipe();
+  constexpr int W = 640, H = 448, kFps = 30, WW = 260, WH = 180;
+  session::HostSession host(host_end.get(), std::make_unique<FakeEncoder>(), W, H,
+                            {.refine_frames = 2, .still_refine_frames = 3, .progressive = false, .text_mode = true,
+                             .context_tiles = true, .context_tiles_64 = true, .fps = kFps, .bitrate_bps = 8'000'000,
+                             // Keyframe requests from the viewer would land at times the threads decide.
+                             .own_receiver = false});
+  session::ViewerSession viewer(nullptr, std::make_unique<FakeDecoder>());
+  std::mutex mu;
+  std::condition_variable cv;
+  std::vector<uint8_t> shown;
+  uint64_t last_id = 0;
+  viewer.SetFrameHandler([&](const tile::ImageView& img, const std::vector<Rect>&, uint64_t id, uint64_t) {
+    std::lock_guard<std::mutex> lock(mu);
+    shown.assign(img.data, img.data + static_cast<size_t>(img.width) * img.height * 4);
+    last_id = id;
+    cv.notify_all();
+  });
+  viewer.Attach(viewer_end.get());
+  // Background: a gradient with icons of a few colours dotted over it.
+  std::vector<uint8_t> bg(static_cast<size_t>(W) * H * 4, 255);
+  for (int y = 0; y < H; ++y) {
+    for (int x = 0; x < W; ++x) {
+      uint8_t* p = &bg[(static_cast<size_t>(y) * W + x) * 4];
+      const bool icon = (x % 50) < 18 && (y % 46) < 18;
+      p[0] = static_cast<uint8_t>(icon ? 40 + (x / 50 % 5) * 40 : 120 + x / 8);
+      p[1] = static_cast<uint8_t>(icon ? 200 - (y / 46 % 4) * 40 : 90 + y / 6);
+      p[2] = static_cast<uint8_t>(icon ? 220 : 150 + (x + y) / 16);
+    }
+  }
+  std::vector<uint8_t> px(bg.size());
+  auto render = [&](int wx, int wy) {
+    px = bg;
+    // A soft shadow, as macOS draws under a window: the background darkened
+    // by a fraction that falls off over 20 pixels, so what it covers is new
+    // in every frame and cannot be copied.
+    constexpr int kShadow = 20;
+    for (int y = std::max(0, wy - kShadow); y < std::min(H, wy + WH + kShadow); ++y) {
+      for (int x = std::max(0, wx - kShadow); x < std::min(W, wx + WW + kShadow); ++x) {
+        const int dx = x < wx ? wx - x : x >= wx + WW ? x - (wx + WW) + 1 : 0;
+        const int dy = y < wy ? wy - y : y >= wy + WH ? y - (wy + WH) + 1 : 0;
+        const int d = std::max(dx, dy);
+        if (d == 0) continue;
+        uint8_t* p = &px[(static_cast<size_t>(y) * W + x) * 4];
+        const int keep = 160 + 95 * d / kShadow;  // of 255
+        for (int ch = 0; ch < 3; ++ch) p[ch] = static_cast<uint8_t>(p[ch] * keep / 255);
+      }
+    }
+    for (int y = 0; y < WH; ++y) {
+      for (int x = 0; x < WW; ++x) {
+        uint8_t* p = &px[(static_cast<size_t>(wy + y) * W + wx + x) * 4];
+        const bool title = y < 22;
+        uint32_t hsh = static_cast<uint32_t>(x / 3) * 0x9E3779B1u ^ static_cast<uint32_t>(y / 14) * 0x85EBCA77u;
+        hsh ^= hsh >> 15;
+        hsh *= 0x2C1B3C6Du;
+        hsh ^= hsh >> 12;
+        const bool stroke = !title && y % 14 >= 4 && y % 14 <= 9 && hsh % 3 == 0;
+        const uint8_t v = title ? 225 : stroke ? 30 : 250;
+        p[0] = p[1] = p[2] = v;
+      }
+    }
+  };
+  uint64_t t = 1'000'000;
+  int wx = 20, wy = 20;
+  render(wx, wy);
+  host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+  for (int f = 0; f < 12; ++f) {  // still, so it starts out exact
+    t += 1'000'000 / kFps;
+    host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+  }
+  const auto before = host.stats();
+  constexpr int kDragFrames = 30;
+  for (int f = 0; f < kDragFrames; ++f) {
+    wx += 7;
+    wy += 5;
+    render(wx, wy);
+    t += 1'000'000 / kFps;
+    host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+  }
+  const auto during = host.stats();
+  for (int f = 0; f < 3 * kFps && (f < 10 || host.work_pending()); ++f) {
+    t += 1'000'000 / kFps;
+    host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+  }
+  EXPECT_FALSE(host.work_pending());
+  // About 25 tiles change per frame. Sent in crumbs it was 3048 rects and
+  // 225 kB for these 30 frames; now 522 and 104 kB.
+  const uint64_t rects = during.lossless_tiles - before.lossless_tiles;
+  EXPECT_LT(rects, static_cast<uint64_t>(kDragFrames) * 40) << "lossless rects while dragging";
+  EXPECT_LT(during.lossless_bytes - before.lossless_bytes, 160'000u);
+  const uint64_t frames = host.stats().frames_encoded;
+  PipeStopper stop{host_end, viewer_end};
+  std::unique_lock<std::mutex> lock(mu);
+  ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(5), [&] { return last_id >= frames; }));
+  // The tiles wholly inside the window are text and must be exact. (Those
+  // on its edge have the shadow and the gradient in them: the encoder's, and
+  // the fake decoder shows them black.)
+  size_t wrong = 0, checked = 0;
+  const int x0 = (wx + 63) / 64 * 64, x1 = (wx + WW) / 64 * 64;
+  const int y0 = (wy + 63) / 64 * 64, y1 = (wy + WH) / 64 * 64;
+  for (int y = y0; y < y1; ++y) {
+    for (int x = x0; x < x1; ++x) {
+      const size_t i = (static_cast<size_t>(y) * W + x) * 4;
+      wrong += std::memcmp(&px[i], &shown[i], 3) != 0;
+      ++checked;
+    }
+  }
+  EXPECT_GT(checked, 64u * 64u * 4);
+  EXPECT_EQ(wrong, 0u) << "pixels of the window not exact once it stopped";
 }
