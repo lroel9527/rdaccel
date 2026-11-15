@@ -848,14 +848,46 @@ TEST(ReliableTransport, BulkGoesAfterTheVideoAndIsNotAQueueForTheHost) {
   EXPECT_EQ(at_viewer.got[3], video);
 }
 
+namespace {
+
+// Input sent while a bulk transfer runs over a path of `delay_ms` one way:
+// how late it is (median and worst, ms) and the transfer's speed (Mbps).
+struct InputDuringBulk {
+  double median_ms = 0, worst_ms = 0, bulk_mbps = 0;
+};
+
+InputDuringBulk MeasureInputDuringBulk(int32_t delay_ms, size_t bulk_bytes, int warmup_ms);
+
+}  // namespace
+
 TEST(ReliableTransport, BulkLeavesNoQueueForInput) {
   // A transfer takes what the path has to spare without building a queue at
   // the bottleneck: input (and the picture's acknowledgements) sent the same
-  // way meanwhile must not wait behind it there. Reported over Tailscale:
-  // the whole remote desktop lagged while a file was copied.
+  // way meanwhile must not wait behind it there. Reported over a VPN: the
+  // whole remote desktop lagged while a file was copied.
+  const InputDuringBulk r = MeasureInputDuringBulk(20, 8'000'000, 1500);
+  std::printf("  input during bulk: median %.0f ms, worst %.0f ms one way (path 20 ms); bulk %.1f Mbps\n", r.median_ms,
+              r.worst_ms, r.bulk_mbps);
+  EXPECT_LT(r.median_ms, 20 + 15.0) << "input waited in a queue the transfer built";
+  EXPECT_GT(r.bulk_mbps, 6.5) << "the transfer must still use the path";
+}
+
+TEST(ReliableTransport, BulkLeavesNoQueueForInputOnAFarPath) {
+  // The path the lag was reported on: about 190 ms round trips. A queue of a
+  // quarter of the round trip is 50 ms here.
+  const InputDuringBulk r = MeasureInputDuringBulk(95, 16'000'000, 6000);
+  std::printf("  input during bulk: median %.0f ms, worst %.0f ms one way (path 95 ms); bulk %.1f Mbps\n", r.median_ms,
+              r.worst_ms, r.bulk_mbps);
+  EXPECT_LT(r.median_ms, 95 + 15.0) << "input waited in a queue the transfer built";
+  EXPECT_GT(r.bulk_mbps, 5.0) << "the transfer must still use the path";
+}
+
+namespace {
+
+InputDuringBulk MeasureInputDuringBulk(int32_t delay_ms, size_t bulk_bytes, int warmup_ms) {
   net::LinkConditions c;
   c.bandwidth_bps = 10'000'000;
-  c.delay_ms = 20;
+  c.delay_ms = delay_ms;
   c.queue_ms = 300;
   std::mutex mu;
   std::condition_variable cv;
@@ -872,33 +904,36 @@ TEST(ReliableTransport, BulkLeavesNoQueueForInput) {
   });
   Sink at_host;
   host.SetReceiver(at_host.Fn());
-  const auto bulk = Pattern(8'000'000, 21);
+  const auto bulk = Pattern(bulk_bytes, 21);
   const auto t0 = std::chrono::steady_clock::now();
   for (size_t i = 0; i < bulk.size(); i += 100'000) host.Send(Channel::kBulk, std::span(bulk).subspan(i, 100'000));
-  std::this_thread::sleep_for(std::chrono::milliseconds(1500));  // the transfer is in full swing
+  std::this_thread::sleep_for(std::chrono::milliseconds(warmup_ms));  // the transfer is in full swing
   std::vector<double> delays_ms;
   const uint8_t key[8] = {1, 2, 3, 4, 5, 6, 7, 8};
   for (int i = 0; i < 20; ++i) {
     const auto sent = std::chrono::steady_clock::now();
     host.Send(Channel::kInput, std::span<const uint8_t>(key, sizeof key));
     std::unique_lock<std::mutex> lock(mu);
-    ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(5), [&] { return arrived.size() > static_cast<size_t>(i); }));
+    EXPECT_TRUE(cv.wait_for(lock, std::chrono::seconds(5), [&] { return arrived.size() > static_cast<size_t>(i); }));
+    if (arrived.size() <= static_cast<size_t>(i)) return {};
     delays_ms.push_back(std::chrono::duration<double, std::milli>(arrived[static_cast<size_t>(i)] - sent).count());
     lock.unlock();
     std::this_thread::sleep_for(std::chrono::milliseconds(40));
   }
   {
     std::unique_lock<std::mutex> lock(mu);
-    ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(30), [&] { return bulk_got >= bulk.size(); }));
+    EXPECT_TRUE(cv.wait_for(lock, std::chrono::seconds(60), [&] { return bulk_got >= bulk.size(); }));
   }
   const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   std::sort(delays_ms.begin(), delays_ms.end());
-  const double median = delays_ms[delays_ms.size() / 2];
-  std::printf("  input during bulk: median %.0f ms, worst %.0f ms one way (path 20 ms); bulk %.1f Mbps\n", median,
-              delays_ms.back(), bulk.size() * 8 / s / 1e6);
-  EXPECT_LT(median, 20 + 15.0) << "input waited in a queue the transfer built";
-  EXPECT_GT(bulk.size() * 8 / s / 1e6, 6.5) << "the transfer must still use the path";
+  InputDuringBulk r;
+  r.median_ms = delays_ms[delays_ms.size() / 2];
+  r.worst_ms = delays_ms.back();
+  r.bulk_mbps = bulk.size() * 8 / s / 1e6;
+  return r;
 }
+
+}  // namespace
 
 TEST(ReliableTransport, BulkUsesAFarPath) {
   // 500 ms round trips, 10 Mbps: the transport's own congestion control,
