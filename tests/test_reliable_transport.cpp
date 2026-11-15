@@ -848,6 +848,58 @@ TEST(ReliableTransport, BulkGoesAfterTheVideoAndIsNotAQueueForTheHost) {
   EXPECT_EQ(at_viewer.got[3], video);
 }
 
+TEST(ReliableTransport, BulkLeavesNoQueueForInput) {
+  // A transfer takes what the path has to spare without building a queue at
+  // the bottleneck: input (and the picture's acknowledgements) sent the same
+  // way meanwhile must not wait behind it there. Reported over Tailscale:
+  // the whole remote desktop lagged while a file was copied.
+  net::LinkConditions c;
+  c.bandwidth_bps = 10'000'000;
+  c.delay_ms = 20;
+  c.queue_ms = 300;
+  std::mutex mu;
+  std::condition_variable cv;
+  std::vector<std::chrono::steady_clock::time_point> arrived;
+  size_t bulk_got = 0;
+  auto [a, b] = net::MakeSimulatedLink(c, net::LinkConditions{.delay_ms = c.delay_ms});
+  net::ReliableTransport host(std::move(a));
+  net::ReliableTransport viewer(std::move(b), {.client = true});
+  viewer.SetReceiver([&](Channel ch, std::span<const uint8_t> bytes) {
+    std::lock_guard<std::mutex> lock(mu);
+    if (ch == Channel::kInput) arrived.push_back(std::chrono::steady_clock::now());
+    if (ch == Channel::kBulk) bulk_got += bytes.size();
+    cv.notify_all();
+  });
+  Sink at_host;
+  host.SetReceiver(at_host.Fn());
+  const auto bulk = Pattern(8'000'000, 21);
+  const auto t0 = std::chrono::steady_clock::now();
+  for (size_t i = 0; i < bulk.size(); i += 100'000) host.Send(Channel::kBulk, std::span(bulk).subspan(i, 100'000));
+  std::this_thread::sleep_for(std::chrono::milliseconds(1500));  // the transfer is in full swing
+  std::vector<double> delays_ms;
+  const uint8_t key[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+  for (int i = 0; i < 20; ++i) {
+    const auto sent = std::chrono::steady_clock::now();
+    host.Send(Channel::kInput, std::span<const uint8_t>(key, sizeof key));
+    std::unique_lock<std::mutex> lock(mu);
+    ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(5), [&] { return arrived.size() > static_cast<size_t>(i); }));
+    delays_ms.push_back(std::chrono::duration<double, std::milli>(arrived[static_cast<size_t>(i)] - sent).count());
+    lock.unlock();
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+  }
+  {
+    std::unique_lock<std::mutex> lock(mu);
+    ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(30), [&] { return bulk_got >= bulk.size(); }));
+  }
+  const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  std::sort(delays_ms.begin(), delays_ms.end());
+  const double median = delays_ms[delays_ms.size() / 2];
+  std::printf("  input during bulk: median %.0f ms, worst %.0f ms one way (path 20 ms); bulk %.1f Mbps\n", median,
+              delays_ms.back(), bulk.size() * 8 / s / 1e6);
+  EXPECT_LT(median, 20 + 15.0) << "input waited in a queue the transfer built";
+  EXPECT_GT(bulk.size() * 8 / s / 1e6, 6.5) << "the transfer must still use the path";
+}
+
 TEST(ReliableTransport, BulkUsesAFarPath) {
   // 500 ms round trips, 10 Mbps: the transport's own congestion control,
   // not a delay guess, sets the pace of a bulk transfer. (The simulated

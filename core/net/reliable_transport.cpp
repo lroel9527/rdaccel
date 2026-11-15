@@ -173,10 +173,31 @@ uint64_t ReliableTransport::ChannelQueued(int c) const {
 }
 
 bool ReliableTransport::BulkHeld() const {
-  // Bulk transfers use three quarters of the window at most: the rest stays
-  // free for the picture and input, which would otherwise wait a round trip
-  // for the bulk data ahead of them to be acknowledged.
-  return opt_.congestion_control && bytes_in_flight_ + kMaxDatagram > Cwnd() * 3 / 4;
+  if (!opt_.congestion_control) return false;
+  // A scavenger, as LEDBAT: bulk transfers take what the path has to spare
+  // without keeping a queue at the bottleneck, where the picture's
+  // acknowledgements and the input sent the same way would wait behind them
+  // (the whole remote desktop lagged while a file was copied: input 15 ms
+  // late on a 20 ms path at 10 Mbps, more on a slower uplink). In flight they
+  // get the path's own bandwidth-delay product and a quarter more (to find
+  // out when the path has more to give), just the product while a queue
+  // stands (so it drains), and never more than three quarters of the window,
+  // whose rest stays free for the picture and input. Not during startup,
+  // where the estimate has to grow by doubling (startup ends once a queue
+  // forms).
+  uint64_t limit = Cwnd() * 3 / 4;
+  if (mode_ != Mode::kStartup && bw_ > 0 && min_rtt_ > 0) {
+    // Acknowledgements may be held back up to kMaxAckDelay: what is in
+    // flight that long is delivered already. Less than the product would
+    // starve the estimate (its samples would come in below it, and it
+    // would shrink round after round).
+    const double gain = PathQueued() ? 1.0 : 1.25;
+    const auto bdp = static_cast<uint64_t>(std::min(gain * bw_ * static_cast<double>(min_rtt_ + kMaxAckDelay), 1e15));
+    // Never nothing: what is in flight brings the round trips that tell
+    // when the queue is gone.
+    limit = std::min(limit, std::max(bdp, kMinCwnd));
+  }
+  return bytes_in_flight_ + kMaxDatagram > limit;
 }
 
 uint64_t ReliableTransport::SendableBytes() const {
