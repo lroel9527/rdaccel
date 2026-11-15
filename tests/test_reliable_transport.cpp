@@ -1,4 +1,7 @@
 #include <gtest/gtest.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
@@ -1018,3 +1021,47 @@ TEST(ReliableTransport, DISABLED_BulkGoodputUnderReordering) {
     }
   }
 }
+
+TEST(UdpSocket, MarksBulkAsBackgroundAndTheRestAsInteractive) {
+  // A plain socket on loopback that is told each datagram's TOS byte.
+  const int rx = ::socket(AF_INET, SOCK_DGRAM, 0);
+  ASSERT_GE(rx, 0);
+  int one = 1;
+  ASSERT_EQ(::setsockopt(rx, IPPROTO_IP, IP_RECVTOS, &one, sizeof(one)), 0);
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  ASSERT_EQ(::bind(rx, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+  socklen_t len = sizeof(addr);
+  ASSERT_EQ(::getsockname(rx, reinterpret_cast<sockaddr*>(&addr), &len), 0);
+  std::string error;
+  auto tx = net::ConnectUdpSocket("127.0.0.1", ntohs(addr.sin_port), &error);
+  ASSERT_TRUE(tx) << error;
+  auto tos_of_next = [&]() -> int {
+    uint8_t buf[2048];
+    alignas(cmsghdr) uint8_t control[256];
+    iovec iov{buf, sizeof buf};
+    msghdr msg{};
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control;
+    msg.msg_controllen = sizeof control;
+    if (::recvmsg(rx, &msg, 0) <= 0) return -1;
+    for (cmsghdr* c = CMSG_FIRSTHDR(&msg); c; c = CMSG_NXTHDR(&msg, c)) {
+      if (c->cmsg_level == IPPROTO_IP && (c->cmsg_type == IP_RECVTOS || c->cmsg_type == IP_TOS)) {
+        return *reinterpret_cast<const uint8_t*>(CMSG_DATA(c));
+      }
+    }
+    return -2;
+  };
+  const uint8_t d[4] = {1, 2, 3, 4};
+  tx->Send(std::span<const uint8_t>(d, sizeof d), net::TrafficClass::kBackground);
+  EXPECT_EQ(tos_of_next() & 0xFC, 0x20);  // DSCP CS1
+  tx->Send(std::span<const uint8_t>(d, sizeof d), net::TrafficClass::kInteractive);
+  EXPECT_EQ(tos_of_next() & 0xFC, 0x80);  // DSCP CS4
+  tx->Send(std::span<const uint8_t>(d, sizeof d));  // unmarked sends are interactive
+  EXPECT_EQ(tos_of_next() & 0xFC, 0x80);
+  tx->Close();
+  ::close(rx);
+}
+

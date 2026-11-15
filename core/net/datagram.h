@@ -15,12 +15,27 @@
 
 namespace rdacore::net {
 
+// What a datagram carries, for the network's queues (QoS): the picture,
+// input and acknowledgements are interactive; a bulk transfer's data is
+// background and may wait. On UDP sockets: macOS's network service type
+// (screen sharing, NET_SERVICE_TYPE_RV, or background, NET_SERVICE_TYPE_BK),
+// which the system's own queues and Wi-Fi (WMM access categories) follow,
+// and the DSCP of the IP header (CS4 or CS1, RFC 4594) for networks that
+// look at it. Many do not, nor do most VPN tunnels; what keeps the queue
+// short everywhere is the bulk channel's own pacing (reliable_transport.h).
+enum class TrafficClass : uint8_t { kInteractive, kBackground };
+
 class DatagramSocket {
  public:
   using ReceiveFn = std::function<void(std::span<const uint8_t>)>;
   virtual ~DatagramSocket() = default;
   // Never blocks; a datagram may be silently lost. False once closed.
   virtual bool Send(std::span<const uint8_t> datagram) = 0;
+  // The same, marked for the network (sockets that cannot mark just send).
+  virtual bool Send(std::span<const uint8_t> datagram, TrafficClass cls) {
+    (void)cls;
+    return Send(datagram);
+  }
   // Called on a socket-owned thread, one datagram at a time. Must be set
   // once, before the first datagram is expected; earlier ones are dropped.
   virtual void SetReceiver(ReceiveFn fn) = 0;

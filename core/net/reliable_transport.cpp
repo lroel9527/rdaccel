@@ -424,7 +424,9 @@ bool ReliableTransport::SendOne(uint64_t now) {
   w.varint(pn);
   std::vector<uint8_t> d = w.take();
   d.insert(d.end(), body.begin(), body.end());
-  socket_->Send(d);
+  // A bulk transfer's data may wait in the network's queues; everything
+  // else is the picture, input or control (datagram.h, TrafficClass).
+  socket_->Send(d, ch == kBulkChannel ? TrafficClass::kBackground : TrafficClass::kInteractive);
   ++packets_sent_;
 
   if (in_flight_.empty()) {

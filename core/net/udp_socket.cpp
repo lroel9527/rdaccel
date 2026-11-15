@@ -1,6 +1,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/ip.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -28,15 +29,23 @@ class UdpSocket final : public DatagramSocket {
     int buf = 4 << 20;  // room for bursts at high bitrates
     ::setsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &buf, sizeof(buf));
     ::setsockopt(fd_, SOL_SOCKET, SO_SNDBUF, &buf, sizeof(buf));
+    sockaddr_storage local{};
+    socklen_t len = sizeof(local);
+    if (::getsockname(fd_, reinterpret_cast<sockaddr*>(&local), &len) == 0) ipv6_ = local.ss_family == AF_INET6;
+    Mark(TrafficClass::kInteractive);
   }
   ~UdpSocket() override {
     Close();
     if (fd_ >= 0) ::close(fd_);
   }
 
-  bool Send(std::span<const uint8_t> d) override {
+  bool Send(std::span<const uint8_t> d) override { return Send(d, TrafficClass::kInteractive); }
+
+  bool Send(std::span<const uint8_t> d, TrafficClass cls) override {
     if (closed_) return false;
     if (!connected_) return true;  // no peer yet: lost, like any datagram
+    // Only the transport's thread sends: the marking needs no lock.
+    if (cls != class_) Mark(cls);
     // Errors (e.g. ICMP port unreachable, full buffer) count as loss.
     (void)::send(fd_, d.data(), d.size(), 0);
     return true;
@@ -103,7 +112,26 @@ class UdpSocket final : public DatagramSocket {
     }
   }
 
+  // Marks what is sent from now on (datagram.h, TrafficClass). Failures are
+  // ignored: unmarked datagrams still go.
+  void Mark(TrafficClass cls) {
+    class_ = cls;
+    const bool bg = cls == TrafficClass::kBackground;
+#ifdef SO_NET_SERVICE_TYPE
+    int service = bg ? NET_SERVICE_TYPE_BK : NET_SERVICE_TYPE_RV;
+    (void)::setsockopt(fd_, SOL_SOCKET, SO_NET_SERVICE_TYPE, &service, sizeof(service));
+#endif
+    int tos = bg ? 0x20 : 0x80;  // DSCP CS1 / CS4, shifted into the TOS byte
+    if (ipv6_) {
+      (void)::setsockopt(fd_, IPPROTO_IPV6, IPV6_TCLASS, &tos, sizeof(tos));
+    } else {
+      (void)::setsockopt(fd_, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
+    }
+  }
+
   int fd_;
+  bool ipv6_ = false;
+  TrafficClass class_ = TrafficClass::kInteractive;
   std::vector<uint8_t> first_;
   std::atomic<bool> connected_;
   const bool first_sender_;  // the peer is whoever sends first (NextPeer works)
