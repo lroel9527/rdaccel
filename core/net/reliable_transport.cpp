@@ -177,22 +177,28 @@ bool ReliableTransport::BulkHeld() const {
   // A scavenger, as LEDBAT: bulk transfers take what the path has to spare
   // without keeping a queue at the bottleneck, where the picture's
   // acknowledgements and the input sent the same way would wait behind them
-  // (the whole remote desktop lagged while a file was copied: input 15 ms
-  // late on a 20 ms path at 10 Mbps, more on a slower uplink). In flight they
-  // get the path's own bandwidth-delay product and a quarter more (to find
-  // out when the path has more to give), just the product while a queue
-  // stands (so it drains), and never more than three quarters of the window,
-  // whose rest stays free for the picture and input. Not during startup,
-  // where the estimate has to grow by doubling (startup ends once a queue
-  // forms).
+  // (the whole remote desktop lagged while a file was copied; over a 190 ms
+  // VPN the picture came in jerks and input lagged). In flight they get the
+  // path's own bandwidth-delay product and a little more (to find out when
+  // the path has more to give: a quarter of the round trip, at most 10 ms of
+  // it), less while a queue stands (so it drains), and never more than three
+  // quarters of the window, whose rest stays free for the picture and input.
+  // Not during startup, where the estimate has to grow by doubling (startup
+  // ends once a queue forms).
   uint64_t limit = Cwnd() * 3 / 4;
   if (mode_ != Mode::kStartup && bw_ > 0 && min_rtt_ > 0) {
+    // A queue as the transfer sees it: a few milliseconds, whatever the
+    // round trip (PathQueued, for the picture, allows a quarter of it: 50 ms
+    // on a far path, long enough to feel).
+    const uint64_t extra = std::min<uint64_t>(min_rtt_ / 4, 10'000);
+    const bool queued = RecentMinRtt() > min_rtt_ + std::max<uint64_t>(extra, 3'000) + kMaxAckDelay;
     // Acknowledgements may be held back up to kMaxAckDelay: what is in
-    // flight that long is delivered already. Less than the product would
-    // starve the estimate (its samples would come in below it, and it
-    // would shrink round after round).
-    const double gain = PathQueued() ? 1.0 : 1.25;
-    const auto bdp = static_cast<uint64_t>(std::min(gain * bw_ * static_cast<double>(min_rtt_ + kMaxAckDelay), 1e15));
+    // flight that long is delivered already. Much less than the product
+    // would starve the estimate (its samples would come in below it, and it
+    // would shrink round after round), so draining takes a tenth off.
+    const double rtt = static_cast<double>(min_rtt_ + kMaxAckDelay + (queued ? 0 : extra));
+    const double gain = queued ? 0.9 : 1.0;
+    const auto bdp = static_cast<uint64_t>(std::min(gain * bw_ * rtt, 1e15));
     // Never nothing: what is in flight brings the round trips that tell
     // when the queue is gone.
     limit = std::min(limit, std::max(bdp, kMinCwnd));

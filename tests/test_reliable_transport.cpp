@@ -856,7 +856,7 @@ struct InputDuringBulk {
   double median_ms = 0, worst_ms = 0, bulk_mbps = 0;
 };
 
-InputDuringBulk MeasureInputDuringBulk(int32_t delay_ms, size_t bulk_bytes, int warmup_ms);
+InputDuringBulk MeasureInputDuringBulk(int32_t delay_ms, size_t bulk_bytes, int warmup_ms, int32_t jitter_ms = 0);
 
 }  // namespace
 
@@ -884,10 +884,11 @@ TEST(ReliableTransport, BulkLeavesNoQueueForInputOnAFarPath) {
 
 namespace {
 
-InputDuringBulk MeasureInputDuringBulk(int32_t delay_ms, size_t bulk_bytes, int warmup_ms) {
+InputDuringBulk MeasureInputDuringBulk(int32_t delay_ms, size_t bulk_bytes, int warmup_ms, int32_t jitter_ms) {
   net::LinkConditions c;
   c.bandwidth_bps = 10'000'000;
   c.delay_ms = delay_ms;
+  c.jitter_ms = jitter_ms;
   c.queue_ms = 300;
   std::mutex mu;
   std::condition_variable cv;
@@ -934,6 +935,16 @@ InputDuringBulk MeasureInputDuringBulk(int32_t delay_ms, size_t bulk_bytes, int 
 }
 
 }  // namespace
+
+// Measurement only (--gtest_also_run_disabled_tests): the far path with a
+// few milliseconds of jitter, as a real VPN has.
+TEST(ReliableTransport, DISABLED_InputDuringBulkOnAJitteryFarPath) {
+  for (int32_t jitter : {0, 3, 8}) {
+    const InputDuringBulk r = MeasureInputDuringBulk(95, 16'000'000, 6000, jitter);
+    std::printf("  jitter %d ms: input median %.0f ms, worst %.0f ms one way (path 95 ms); bulk %.1f Mbps\n", jitter,
+                r.median_ms, r.worst_ms, r.bulk_mbps);
+  }
+}
 
 TEST(ReliableTransport, BulkUsesAFarPath) {
   // 500 ms round trips, 10 Mbps: the transport's own congestion control,
