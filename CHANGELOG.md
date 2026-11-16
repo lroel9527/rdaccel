@@ -3,6 +3,16 @@
 版本号遵循语义化版本。从 1.0 起，同一主版本内 C ABI 只加不改（新函数、结构体末尾加字段），
 `find_package(rdaccel 1.0)` 接受任何 1.x。1.0 之前次版本号（0.x）变化时 C ABI 可能有不兼容改动。
 
+## 1.10.4
+
+修正：C ABI 和线上格式不变。
+
+### macOS 12 和 13：ScreenCaptureKit 不出画面时改用 CGDisplayStream
+
+- **为什么**：一台 Intel MacBook Pro（macOS 12.7.6）当 rdmachine 服务端时客户端一直黑屏。用 rdmachine 的兼容性检查工具实测：ScreenCaptureKit 能开始截屏（replayd 记录“Success starting new stream”），但一帧都不给（`frameCount=0`），换 10 种参数、画面有变化、等 12 秒、重启 replayd 都一样；老接口 CGDisplayStream 和 CGDisplayCreateImage 在同一台机器上都截得到。
+- **做法**：新的总是先用。macOS 14 起只用 ScreenCaptureKit（CGDisplayStream 在 14 被标为过时），和以前完全一样。macOS 12 和 13 上，每次开始截屏仍先用 ScreenCaptureKit，1.5 秒内没有一帧，才停掉它改用 CGDisplayStream（`platform/mac/capture_cgstream.mm`），并记一条警告；下一次开始截屏又先试 ScreenCaptureKit，失败不被记住。CGDisplayStream 的脏矩形单位没有文档，和 ScreenCaptureKit 一样两种读法都算；它不能排除本进程的窗口，截的是整个显示器。
+- **测试**：`FallbackCapturer` 用假截屏器测了五种情况（新的出画面就不碰旧的；新的不出画面、新的启动失败才换；两个都不行时报出两个原因；每次开始都重新先试新的）；`CgStreamCapturer` 在真实屏幕上测出画面尺寸和内容、停了再开。
+
 ## 1.10.3
 
 修正：C ABI 和线上格式不变。

@@ -8,7 +8,7 @@ cmake_minimum_required(VERSION 3.24)
 if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET AND NOT DEFINED ENV{MACOSX_DEPLOYMENT_TARGET})
   set(CMAKE_OSX_DEPLOYMENT_TARGET "12.3" CACHE STRING "Minimum macOS version")
 endif()
-project(rdaccel VERSION 1.10.3 LANGUAGES C CXX)
+project(rdaccel VERSION 1.10.4 LANGUAGES C CXX)
 # Pre-release label ("rc1"), empty for a release. The full version, as the
 # library, the packages and the tag (v1.0.0-rc1) show it, is
 # PROJECT_VERSION[-RDACCEL_PRERELEASE].
@@ -128,6 +128,7 @@ if(APPLE)
   list(APPEND RDACCEL_SOURCES
     platform/mac/platform_mac.mm
     platform/mac/capture_sck.mm
+    platform/mac/capture_cgstream.mm
     platform/mac/displays_mac.mm
     platform/mac/cursor_mac.mm
     platform/mac/inject_mac.mm
@@ -342,6 +343,7 @@ if(RDACCEL_BUILD_TESTS)
     tests/test_messages.cpp
     tests/test_tile_diff.cpp
     tests/test_dirty_rects.cpp
+    tests/test_fallback_capturer.cpp
     tests/test_motion.cpp
     tests/test_tile_cache.cpp
     tests/test_video_region.cpp
@@ -368,6 +370,11 @@ if(RDACCEL_BUILD_TESTS)
   add_executable(rdaccel_platform_tests tests/test_platform_codec.cpp tests/test_api.cpp
     tests/test_capi.cpp)
   target_link_libraries(rdaccel_platform_tests PRIVATE rdaccel_internal GTest::gtest_main)
+  if(APPLE)
+    target_sources(rdaccel_platform_tests PRIVATE tests/test_platform_mac_capture.mm)
+    target_compile_options(rdaccel_platform_tests PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+    target_link_libraries(rdaccel_platform_tests PRIVATE "-framework CoreGraphics")
+  endif()
   if(NOT APPLE)
     target_sources(rdaccel_platform_tests PRIVATE tests/test_platform_x11.cpp)
     target_link_libraries(rdaccel_platform_tests PRIVATE PkgConfig::X11)
