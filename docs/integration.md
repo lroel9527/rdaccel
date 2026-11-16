@@ -174,7 +174,8 @@ rda_audio_player_destroy(player);                  /* 在 viewer 之前 */
 - 权限（macOS）：采集要“系统声音录制”（TCC `kTCCServiceAudioCapture`，系统设置 → 隐私与安全性 → 屏幕与系统音频录制里的“仅系统音频录制”），和屏幕录制是两项。应用的 Info.plist 要有 `NSAudioCaptureUsageDescription`。询问在第一次开始读声音时出现；没有权限时采集照常运行但只给零（状态是 `RUNNING`，`silent` 为 1），明确拒绝时是 `NO_PERMISSION`。TCC 在一个进程里按缓存回答，进程运行中改了的授权可能要到下一个进程才查得到；所以没确认有权限时 tap 每 5 秒重建一次，读到非零样本就算确认。
 - `mute_local`：被读时本机不出声。只在确认有权限之后生效（`rda_audio_status.muted_local` 说现在是否在静音）；没确认之前本机照常出声。本机的音量、静音键、默认设备都不动；进程退出（包括崩溃）后本机声音自己回来。
 - 统计：`rda_host_stats.bytes_sent` 和 `rda_viewer_stats.bytes_received` 都包含声音；单独的 `audio_*` 字段见头文件。和画面一样不含 UDP/IP 和加密的包头，声音包小，线上每包另有约 56 字节。
-- 测试：设环境变量 `RDACCEL_AUDIO_NULL_OUTPUT=1`，播放器就不打开任何设备；`RDA_AUDIO_SOURCE_TEST` 不碰任何设备。
+- TCC 在一个进程里按缓存回答：进程开着时在系统设置里给的授权，采集一听到声音就算数（不用重启）；进程开始时查到的“拒绝”也不当真，采集照样建（不静音、不再询问），听到声音就算授权了；但进程开着时撤销的授权查不出来，采集只是从此全是静音，要重启进程才看得到 `NO_PERMISSION`。
+- 测试：设环境变量 `RDACCEL_AUDIO_NULL_OUTPUT=1`，播放器就不打开任何设备，系统声音采集也不让本机静音（`RDACCEL_AUDIO_NO_LOCAL_MUTE` 只管后一件）；`RDA_AUDIO_SOURCE_TEST` 不碰任何设备。
 
 ## 4. 传输怎么选
 

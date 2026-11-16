@@ -65,6 +65,9 @@ struct TransportStats {
   // The bandwidth estimate has left its start-up phase (it measured the path
   // under load); before that it may be far off either way.
   bool bandwidth_settled = false;
+  // A standing queue at the bottleneck now (the recent round trips well
+  // above the minimum): the path is full.
+  bool path_queued = false;
 };
 
 class Transport {
@@ -111,6 +114,9 @@ class Transport {
   // on a transport-owned thread; datagrams that arrive while none is set are
   // dropped.
   virtual bool CarriesDatagrams() const { return false; }
+  // The largest datagram SendDatagram takes (a wrapper such as the
+  // encryption leaves less of kMaxDatagramPayload).
+  virtual size_t MaxDatagram() const { return kMaxDatagramPayload; }
   virtual bool SendDatagram(std::span<const uint8_t> bytes) {
     (void)bytes;
     return false;

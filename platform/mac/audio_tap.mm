@@ -22,7 +22,13 @@
 // both sides silent), and it is rebuilt every 5 s so that a permission given
 // meanwhile takes effect. A non-zero sample proves the permission; so does
 // TCC saying granted. Only then does a tap that is to mute this computer
-// (SourceConfig::mute_local, CATapMutedWhenTapped) replace it.
+// (SourceConfig::mute_local, CATapMutedWhenTapped) replace it, and never
+// while RDACCEL_AUDIO_NULL_OUTPUT or RDACCEL_AUDIO_NO_LOCAL_MUTE is set (tests).
+// TCC also answers each process from a cache: a denial it reports may be
+// out of date (the user granted since), so the unmuted tap is kept and
+// rebuilt then too (state kNoPermission until it hears something); a denial
+// made while the process runs cannot be seen at all (it still says "not
+// asked"): that capture just stays silent until the process restarts.
 //
 // The tap and the aggregate device belong to this process: when it dies,
 // coreaudiod removes them and this computer's sound is back. Nothing
@@ -36,6 +42,7 @@
 #import <AudioToolbox/AudioToolbox.h>
 #import <Foundation/Foundation.h>
 #include <dlfcn.h>
+#include <cstdlib>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <mach/semaphore.h>
@@ -70,6 +77,18 @@ int AudioCapturePermission() {
   return r >= 0 && r <= 2 ? r : -1;
 }
 
+bool LocalMuteAllowed() {
+  for (const char* name : {"RDACCEL_AUDIO_NULL_OUTPUT", "RDACCEL_AUDIO_NO_LOCAL_MUTE"}) {
+    const char* v = std::getenv(name);
+    if (v && v[0] != '\0' && std::strcmp(v, "0") != 0) return false;
+  }
+  return true;
+}
+
+bool TapMutesLocal(bool permission_confirmed, bool mute_local) {
+  return mute_local && permission_confirmed && LocalMuteAllowed();
+}
+
 uint64_t HostTimeToMicros(uint64_t host_time) {
   static const mach_timebase_info_data_t tb = [] {
     mach_timebase_info_data_t t;
@@ -95,7 +114,6 @@ constexpr uint64_t kRetryUs = 2'000'000;
 constexpr uint64_t kCoalesceUs = 300'000;
 constexpr uint64_t kUnconfirmedRebuildUs = 5'000'000;
 constexpr uint64_t kPermissionCheckUs = 2'000'000;
-constexpr uint64_t kDeniedCheckUs = 5'000'000;
 
 uint64_t Now() { return capture::MonotonicMicros(); }
 
@@ -158,9 +176,18 @@ class Ring {
 
 class TapSource final : public Source {
  public:
-  TapSource() { semaphore_create(mach_task_self(), &sem_, SYNC_POLICY_FIFO, 0); }
+  TapSource() : hub_(std::make_shared<ListenerHub>()) {
+    semaphore_create(mach_task_self(), &sem_, SYNC_POLICY_FIFO, 0);
+    hub_->owner = this;
+    listener_queue_ = dispatch_queue_create("org.rdaccel.tap.listeners", DISPATCH_QUEUE_SERIAL);
+  }
   ~TapSource() override {
     Stop();
+    {
+      // A listener call under way finishes first; any later one finds nobody.
+      std::lock_guard<std::mutex> l(hub_->mu);
+      hub_->owner = nullptr;
+    }
     semaphore_destroy(mach_task_self(), sem_);
   }
 
@@ -252,19 +279,28 @@ class TapSource final : public Source {
           const int perm = platform::AudioCapturePermission();
           if (perm == 0) {
             confirmed_ = true;
-          } else if (perm == 1) {
-            if (built) Teardown();
-            built = false;
+          } else {
+            // Denied as far as TCC says (1). TCC answers this process from a
+            // cache, so a grant made since may not show here: the tap goes on
+            // (it does not mute without the permission, and asks nothing once
+            // the user has answered), rebuilt every 5 s below, and the first
+            // sound it hears proves the grant.
+            denied_ = perm == 1;
+          }
+        }
+        if (confirmed_) denied_ = false;
+        if (built) {
+          // Mute only once the permission is known (and the tap does not yet).
+          if (platform::TapMutesLocal(confirmed_, config_.mute_local) != muting_wanted_built_) rebuild = true;
+          // Denied by TCC and still hearing nothing: say so (and keep the
+          // tap, which proves a later grant by what it hears).
+          if (denied_ && !confirmed_) {
             SetState(SourceState::kNoPermission,
                      "this computer's System Audio Recording permission is denied (System Settings, Privacy & "
                      "Security, Screen & System Audio Recording)");
-            next_try = now + kDeniedCheckUs;
-            continue;
+          } else if (confirmed_) {
+            SetState(SourceState::kRunning, "");
           }
-        }
-        if (built) {
-          // Mute only once the permission is known (and the tap does not yet).
-          if (confirmed_ && config_.mute_local && !muting_wanted_built_) rebuild = true;
           // Not known yet: rebuild now and then, so a permission given
           // meanwhile reaches the capture (it is checked when IO starts).
           if (!confirmed_ && now - built_at >= kUnconfirmedRebuildUs) rebuild = true;
@@ -278,7 +314,7 @@ class TapSource final : public Source {
           if (Build(&err)) {
             built = true;
             built_at = Now();
-            SetState(SourceState::kRunning, "");
+            if (!denied_ || confirmed_) SetState(SourceState::kRunning, "");
           } else {
             Teardown();
             SetState(SourceState::kFailed, err);
@@ -324,7 +360,11 @@ class TapSource final : public Source {
   }
 
   bool Build(std::string* error) {
-    muting_wanted_built_ = confirmed_ && config_.mute_local;
+    muting_wanted_built_ = platform::TapMutesLocal(confirmed_, config_.mute_local);
+    if (config_.mute_local && confirmed_ && !muting_wanted_built_ && !mute_refusal_logged_) {
+      mute_refusal_logged_ = true;
+      log::Info("sound: this computer is not muted (RDACCEL_AUDIO_NULL_OUTPUT or RDACCEL_AUDIO_NO_LOCAL_MUTE is set)");
+    }
     io_dead_ = false;
     excluded_ = Excluded();
     CATapDescription* d = [[CATapDescription alloc] initStereoGlobalTapButExcludeProcesses:excluded_];
@@ -425,70 +465,100 @@ class TapSource final : public Source {
 
   // ---- listeners ------------------------------------------------------------
 
-  static OSStatus OnSystemChange(AudioObjectID, UInt32 n, const AudioObjectPropertyAddress* addrs, void* self) {
-    auto* t = static_cast<TapSource*>(self);
+  // The HAL calls listener blocks on a queue of ours; each holds the hub, so
+  // a call already under way when the listeners are removed (and the source
+  // destroyed) finds owner == null instead of a freed source: the
+  // destructor clears it under the hub's lock, which waits for a call in
+  // progress.
+  struct ListenerHub {
+    std::mutex mu;
+    TapSource* owner = nullptr;
+  };
+
+  void OnSystemChange(UInt32 n, const AudioObjectPropertyAddress* addrs) {
     for (UInt32 i = 0; i < n; ++i) {
       if (addrs[i].mSelector == kAudioHardwarePropertyProcessObjectList) {
         // Only an application to exclude can change anything.
-        if (!t->config_.exclude_bundle_ids.empty()) t->Due(/*processes=*/true);
+        if (!config_.exclude_bundle_ids.empty()) Due(/*processes=*/true);
         continue;
       }
-      t->Due();
+      Due();
     }
-    return noErr;
   }
 
-  static OSStatus OnDeviceChange(AudioObjectID obj, UInt32 n, const AudioObjectPropertyAddress* addrs, void* self) {
-    auto* t = static_cast<TapSource*>(self);
+  void OnDeviceChange(AudioObjectID obj, UInt32 n, const AudioObjectPropertyAddress* addrs) {
     for (UInt32 i = 0; i < n; ++i) {
       if (addrs[i].mSelector == kAudioDevicePropertyDeviceIsAlive ||
           addrs[i].mSelector == kAudioDevicePropertyDeviceIsRunning) {
         UInt32 v = 1, size = sizeof(v);
         AudioObjectPropertyAddress a = addrs[i];
         if (AudioObjectGetPropertyData(obj, &a, 0, nullptr, &size, &v) == noErr && v == 0) {
-          t->io_dead_ = true;
-          t->Due();
+          io_dead_ = true;
+          Due();
         }
       } else {
-        t->Due();  // the tap's format
+        Due();  // the tap's format
       }
     }
-    return noErr;
   }
 
   static constexpr AudioObjectPropertySelector kSystemSelectors[] = {
       kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyServiceRestarted,
       kAudioHardwarePropertyProcessObjectList};
 
+  AudioObjectPropertyListenerBlock SystemBlock() {
+    std::shared_ptr<ListenerHub> hub = hub_;
+    return ^(UInt32 n, const AudioObjectPropertyAddress* addrs) {
+      std::lock_guard<std::mutex> l(hub->mu);
+      if (hub->owner) hub->owner->OnSystemChange(n, addrs);
+    };
+  }
+  AudioObjectPropertyListenerBlock DeviceBlock(AudioObjectID obj) {
+    std::shared_ptr<ListenerHub> hub = hub_;
+    return ^(UInt32 n, const AudioObjectPropertyAddress* addrs) {
+      std::lock_guard<std::mutex> l(hub->mu);
+      if (hub->owner) hub->owner->OnDeviceChange(obj, n, addrs);
+    };
+  }
+
   void AddSystemListeners() {
+    system_block_ = SystemBlock();
     for (auto sel : kSystemSelectors) {
       auto a = Addr(sel);
-      AudioObjectAddPropertyListener(kAudioObjectSystemObject, &a, &OnSystemChange, this);
+      AudioObjectAddPropertyListenerBlock(kAudioObjectSystemObject, &a, listener_queue_, system_block_);
     }
   }
   void RemoveSystemListeners() {
+    if (!system_block_) return;
     for (auto sel : kSystemSelectors) {
       auto a = Addr(sel);
-      AudioObjectRemovePropertyListener(kAudioObjectSystemObject, &a, &OnSystemChange, this);
+      AudioObjectRemovePropertyListenerBlock(kAudioObjectSystemObject, &a, listener_queue_, system_block_);
     }
+    system_block_ = nil;
   }
   void AddDeviceListeners() {
+    device_block_ = DeviceBlock(device_);
+    tap_block_ = DeviceBlock(tap_);
     for (auto sel : {kAudioDevicePropertyDeviceIsAlive, kAudioDevicePropertyDeviceIsRunning}) {
       auto a = Addr(sel);
-      AudioObjectAddPropertyListener(device_, &a, &OnDeviceChange, this);
+      AudioObjectAddPropertyListenerBlock(device_, &a, listener_queue_, device_block_);
     }
     auto f = Addr(kAudioTapPropertyFormat);
-    AudioObjectAddPropertyListener(tap_, &f, &OnDeviceChange, this);
+    AudioObjectAddPropertyListenerBlock(tap_, &f, listener_queue_, tap_block_);
   }
   void RemoveDeviceListeners() {
-    for (auto sel : {kAudioDevicePropertyDeviceIsAlive, kAudioDevicePropertyDeviceIsRunning}) {
-      auto a = Addr(sel);
-      AudioObjectRemovePropertyListener(device_, &a, &OnDeviceChange, this);
+    if (device_block_) {
+      for (auto sel : {kAudioDevicePropertyDeviceIsAlive, kAudioDevicePropertyDeviceIsRunning}) {
+        auto a = Addr(sel);
+        AudioObjectRemovePropertyListenerBlock(device_, &a, listener_queue_, device_block_);
+      }
     }
-    if (tap_ != kAudioObjectUnknown) {
+    if (tap_block_ && tap_ != kAudioObjectUnknown) {
       auto f = Addr(kAudioTapPropertyFormat);
-      AudioObjectRemovePropertyListener(tap_, &f, &OnDeviceChange, this);
+      AudioObjectRemovePropertyListenerBlock(tap_, &f, listener_queue_, tap_block_);
     }
+    device_block_ = nil;
+    tap_block_ = nil;
   }
 
   // ---- real-time thread -----------------------------------------------------
@@ -640,6 +710,11 @@ class TapSource final : public Source {
   std::atomic<bool> sound_stop_{false};
   AudioConverterRef converter_ = nullptr;
   std::atomic<bool> confirmed_{false};  // the permission is known to be there
+  bool denied_ = false;                   // TCC said denied (rebuild thread)
+  bool mute_refusal_logged_ = false;
+  std::shared_ptr<ListenerHub> hub_;
+  dispatch_queue_t listener_queue_ = nullptr;
+  AudioObjectPropertyListenerBlock system_block_ = nil, device_block_ = nil, tap_block_ = nil;
   std::atomic<bool> muting_{false};
   std::atomic<bool> io_dead_{false};
 };

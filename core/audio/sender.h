@@ -13,7 +13,10 @@
 //     back starts a new spurt: the encoder starts afresh, and the packet
 //     carries that frame plus the silent frame before it (RED: the decoder,
 //     which also starts afresh, gets the same lead-in, so the attack is
-//     whole) and the capture time (CLOCK); so do the next four.
+//     whole) and the capture time (CLOCK); so do the next four. Those five
+//     frames are coded without inter-frame prediction, so a receiver that
+//     lacks the lead-in (lost, or played already as the END frame) decodes
+//     them cleanly from a fresh state.
 //   * Left = right for every sample for 500 ms of a spurt: coded as mono (at
 //     the mono rate) until the first sample that differs, which is coded as
 //     stereo again. The receiver always decodes stereo; a mono packet comes out as
@@ -22,8 +25,9 @@
 //     (SetPath); off again after 30 s below 0.3%.
 //   * Paused (the viewer cannot hear it): nothing encoded or sent; sound
 //     after it starts a new spurt.
-//   * A gap in the input (a source that stopped calling back): silence for
-//     that long, the sample positions run on.
+//   * A gap in the input (a source that missed callbacks or stopped calling
+//     back): silence for that long, the sample positions follow the capture
+//     time (any gap over a quarter frame and over the previous chunk).
 //
 // Push() and everything it calls run on one thread (the sound thread); the
 // setters and stats() are thread-safe.
@@ -78,9 +82,12 @@ class Sender {
 
   void SetProfile(int profile);  // from the next frame
   void SetPaused(bool paused);
-  // About once a second: the real loss rate over the last 5 seconds, and
-  // the transport's bandwidth estimate (0 = none, or not trustworthy yet).
-  void SetPath(double loss_fraction, int64_t bandwidth_bps);
+  // About once a second: the real loss rate over the last 5 seconds, the
+  // transport's bandwidth estimate (0 = none, or not trustworthy yet), and
+  // whether the path is full now (a standing queue at the bottleneck). The
+  // bitrate comes down for a slow path only while it is full or loses
+  // packets, and goes back up otherwise.
+  void SetPath(double loss_fraction, int64_t bandwidth_bps, bool congested = false);
 
   SenderStats stats() const;
   SenderStatus status() const;
@@ -101,6 +108,7 @@ class Sender {
   size_t fill_ = 0;
   uint64_t frame_time_ = 0;
   uint64_t next_time_ = 0;  // when the next pushed sample is due; 0 = nothing pushed yet
+  uint64_t last_chunk_us_ = 0;  // how long the last Push was
   uint32_t ts_ = 0;  // the next frame's first sample
   std::vector<float> prev_;  // the last frame (lead-in for a spurt)
   bool have_prev_ = false;
@@ -112,6 +120,7 @@ class Sender {
   uint8_t spurt_ = 0;
   uint16_t seq_ = 0;
   int spurt_packets_ = 0;  // sent in this spurt
+  bool prediction_off_ = false;  // the spurt's first frames: coded on their own
   int since_clock_ = 0;    // packets since the last CLOCK
   std::vector<uint8_t> last_opus_;  // the previous frame's packet, for RED
   bool last_opus_valid_ = false;
@@ -129,6 +138,7 @@ class Sender {
   std::atomic<bool> paused_{false};
   std::atomic<double> loss_{0};
   std::atomic<int64_t> bandwidth_{0};
+  std::atomic<bool> congested_{false};
   std::atomic<uint64_t> packets_{0}, bytes_{0}, frames_{0}, frames_gated_{0}, red_bytes_{0};
   std::atomic<int> status_bitrate_{0}, status_frame_ms_{10}, status_channels_{2};
   std::atomic<bool> status_silent_{true};

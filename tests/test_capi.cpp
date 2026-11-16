@@ -921,6 +921,25 @@ struct SoundPair {
   }
 };
 
+// Whether this library has sound (RDACCEL_AUDIO); without, every sound
+// function says RDA_ERR_UNSUPPORTED (SoundIsUnsupportedWhenBuiltWithout).
+bool SoundBuilt() {
+  rda_transport *a = nullptr, *b = nullptr;
+  rda_pipe_create(&a, &b);
+  rda_transport_destroy(b);
+  rda_host* h = nullptr;
+  rda_host_create(a, nullptr, &h);
+  rda_audio_config c;
+  rda_audio_config_default(&c);
+  c.source = RDA_AUDIO_SOURCE_APP;
+  const bool built = rda_host_start_audio(h, &c) != RDA_ERR_UNSUPPORTED;
+  rda_host_destroy(h);
+  return built;
+}
+
+#define SKIP_WITHOUT_SOUND() \
+  if (!SoundBuilt()) GTEST_SKIP() << "built without sound (RDACCEL_AUDIO=OFF)"
+
 double Rms(const float* p, size_t frames, int ch) {
   double e = 0;
   for (size_t i = 0; i < frames; ++i) e += static_cast<double>(p[2 * i + ch]) * p[2 * i + ch];
@@ -930,6 +949,7 @@ double Rms(const float* p, size_t frames, int ch) {
 }  // namespace
 
 TEST(CApi, SoundGoesFromSubmitToRead) {
+  SKIP_WITHOUT_SOUND();
   SoundPair p;
   EXPECT_TRUE(WaitUntil([&] { return p.Status().state == RDA_AUDIO_STATE_RUNNING; }));
   // A reader, as an audio device would call it: 5 ms every 5 ms.
@@ -1015,6 +1035,7 @@ TEST(CApi, SoundGoesFromSubmitToRead) {
 }
 
 TEST(CApi, NoSoundForAViewerThatDidNotAsk) {
+  SKIP_WITHOUT_SOUND();
   SoundPair p(/*viewer_audio=*/0);
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
   EXPECT_EQ(p.Status().state, RDA_AUDIO_STATE_WAITING_PEER);
@@ -1031,6 +1052,7 @@ TEST(CApi, NoSoundForAViewerThatDidNotAsk) {
 }
 
 TEST(CApi, AnOlderViewerConfigNeverReadsAudio) {
+  SKIP_WITHOUT_SOUND();
   // A caller built against 1.12: its struct_size ends at the padding before
   // `audio`, and whatever lies after it is not read.
   SoundPair p(/*viewer_audio=*/1, static_cast<uint32_t>(offsetof(rda_viewer_config, audio)));
@@ -1039,6 +1061,7 @@ TEST(CApi, AnOlderViewerConfigNeverReadsAudio) {
 }
 
 TEST(CApi, TheTestSourceSendsWithoutAnyDevice) {
+  SKIP_WITHOUT_SOUND();
   SoundPair p(1, sizeof(rda_viewer_config), RDA_AUDIO_SOURCE_TEST);
   // The test loop starts with 0.3 s of a tone.
   ASSERT_TRUE(WaitUntil([&] {
@@ -1065,6 +1088,7 @@ TEST(CApi, TheTestSourceSendsWithoutAnyDevice) {
 }
 
 TEST(CApi, SoundArguments) {
+  SKIP_WITHOUT_SOUND();
   rda_transport *a = nullptr, *b = nullptr;
   ASSERT_EQ(rda_pipe_create(&a, &b), RDA_OK);
   rda_transport_destroy(b);
@@ -1095,5 +1119,38 @@ TEST(CApi, SoundArguments) {
   rda_host_stop_audio(nullptr);
   rda_host_set_audio_paused(nullptr, 1);
   rda_host_set_audio_profile(nullptr, 1);
+  rda_host_destroy(h);
+}
+
+TEST(CApi, SoundIsUnsupportedWhenBuiltWithout) {
+  if (SoundBuilt()) GTEST_SKIP() << "this build has sound";
+  rda_transport *a = nullptr, *b = nullptr;
+  ASSERT_EQ(rda_pipe_create(&a, &b), RDA_OK);
+  rda_host* h = nullptr;
+  ASSERT_EQ(rda_host_create(a, nullptr, &h), RDA_OK);
+  rda_audio_config c;
+  rda_audio_config_default(&c);
+  for (int32_t src : {RDA_AUDIO_SOURCE_APP, RDA_AUDIO_SOURCE_SYSTEM, RDA_AUDIO_SOURCE_TEST}) {
+    c.source = src;
+    EXPECT_EQ(rda_host_start_audio(h, &c), RDA_ERR_UNSUPPORTED);
+  }
+  float f[4] = {1, 1, 1, 1};
+  EXPECT_EQ(rda_host_submit_audio(h, f, 2, 0), RDA_ERR_UNSUPPORTED);
+  rda_audio_status st{};
+  st.struct_size = sizeof(st);
+  EXPECT_EQ(rda_host_get_audio_status(h, &st), RDA_ERR_UNSUPPORTED);
+  rda_viewer* v = nullptr;
+  rda_viewer_config vc;
+  rda_viewer_config_default(&vc);
+  vc.audio = 1;
+  ASSERT_EQ(rda_viewer_create(b, &vc, &v), RDA_OK);
+  EXPECT_EQ(rda_viewer_read_audio(v, f, 2, 0), 0u);
+  EXPECT_EQ(f[0], 0.0f);
+  rda_audio_player* p = nullptr;
+  rda_audio_player_config pc;
+  rda_audio_player_config_default(&pc);
+  pc.null_device = 1;
+  EXPECT_EQ(rda_audio_player_create(v, &pc, &p), RDA_ERR_UNSUPPORTED);
+  rda_viewer_destroy(v);
   rda_host_destroy(h);
 }

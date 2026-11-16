@@ -29,6 +29,7 @@ struct Sim {
   double ppm = 0;
   int delay_ms = 20, jitter_ms = 0;
   double loss = 0, duplicate = 0;
+  int drop_first_of_spurt = -1;  // this spurt's first packet is lost
   uint64_t stall_from = 0, stall_until = 0;  // nothing arrives in between (it all comes at the end)
   std::mt19937 rng{1};
   Receiver rx;
@@ -42,8 +43,13 @@ struct Sim {
   explicit Sim(int profile = kProfileFull)
       : tx([this](std::span<const uint8_t> b) { Send(b); return true; }, profile) {}
 
+  int last_spurt = -1;
   void Send(std::span<const uint8_t> b) {
     std::uniform_real_distribution<double> u(0, 1);
+    if (b.size() > 2 && b[2] != last_spurt) {
+      last_spurt = b[2];
+      if (b[2] == drop_first_of_spurt) return;
+    }
     if (u(rng) < loss) return;
     const int copies = u(rng) < duplicate ? 2 : 1;
     for (int c = 0; c < copies; ++c) {
@@ -298,4 +304,115 @@ TEST(AudioJitter, AtMost120msMoreAndNothingForAStillScreen) {
   const int t_base = t.rx.stats().target_ms;
   t.Tone(10);
   EXPECT_EQ(t.rx.stats().target_ms, t_base);
+}
+
+namespace {
+
+// Quiet noise (peak 0.003), `silence_ms` of exact zeros, quiet noise again.
+// Returns the largest 5 ms RMS of the output after the silence against the
+// input's RMS, and its peak against that of the first part (what the codec
+// itself makes of this signal), both in dB.
+struct Onset {
+  double rms_db, peak_db;
+};
+Onset QuietOnset(int profile, int silence_ms, bool lose_first, uint32_t seed) {
+  Sim s(profile);
+  s.jitter_ms = 0;
+  if (lose_first) s.drop_first_of_spurt = 2;
+  const int64_t gap_from = 48'000, gap_to = gap_from + silence_ms * 48;
+  auto fn = [&](int64_t at, size_t n, float* o) {
+    Noise(static_cast<uint32_t>(at) * 7 + seed, n, 0.003, o);
+    for (size_t i = 0; i < n; ++i) {
+      const int64_t k = at + static_cast<int64_t>(i);
+      if (k >= gap_from && k < gap_to) o[2 * i] = o[2 * i + 1] = 0;
+    }
+  };
+  s.Run(3.0, fn);
+  const double in_rms = 0.003 / std::sqrt(3.0);
+  // The output runs ~45 ms behind the input; the second part comes out
+  // after gap_to plus that. Look from gap_to on, in 5 ms windows.
+  double first_peak = 0, peak = 0, worst_rms = 0;
+  const size_t frames = s.out.size() / 2;
+  for (size_t i = 24'000; i < 48'000 && i < frames; ++i) first_peak = std::max(first_peak, static_cast<double>(std::abs(s.out[2 * i])));
+  for (size_t w = static_cast<size_t>(gap_to); w + 240 < frames && w < static_cast<size_t>(gap_to) + 48'000; w += 240) {
+    double e = 0;
+    for (size_t i = w; i < w + 240; ++i) {
+      e += s.out[2 * i] * s.out[2 * i] + s.out[2 * i + 1] * s.out[2 * i + 1];
+      peak = std::max(peak, static_cast<double>(std::max(std::abs(s.out[2 * i]), std::abs(s.out[2 * i + 1]))));
+    }
+    worst_rms = std::max(worst_rms, std::sqrt(e / 480));
+  }
+  return {20 * std::log10(worst_rms / in_rms), 20 * std::log10(peak / first_peak)};
+}
+
+}  // namespace
+
+TEST(AudioJitter, AQuietOnsetWithoutItsLeadInIsNoBurst) {
+  // The lead-in never reaches the decoder: sound back on the frame right
+  // after END (a silence of exactly the 200 ms tail: the lead-in is the END
+  // frame, played already), or the new spurt's first packet lost. The first
+  // frames must not come out louder than the sound is.
+  for (int profile : {kProfileFull, kProfileSaver}) {
+    for (auto [ms, lose] : {std::pair{200, false}, std::pair{1000, true}, std::pair{300, false}}) {
+      // What the first frames come out as depends on their content: a few.
+      double worst_rms = -100, worst_peak = -100;
+      for (uint32_t seed : {1u, 2u, 3u, 4u}) {
+        const Onset o = QuietOnset(profile, ms, lose, seed);
+        worst_rms = std::max(worst_rms, o.rms_db);
+        worst_peak = std::max(worst_peak, o.peak_db);
+      }
+      std::printf("profile %d, %d ms of silence%s: loudest 5 ms %+.1f dB against the input, peak %+.1f dB against the "
+                  "steady output\n",
+                  profile, ms, lose ? ", first packet lost" : "", worst_rms, worst_peak);
+      EXPECT_LT(worst_rms, 3.0) << profile << " " << ms;
+      EXPECT_LT(worst_peak, 3.0) << profile << " " << ms;
+    }
+  }
+}
+
+TEST(AudioJitter, APauseInTheMiddleOfASoundEndsItCleanly) {
+  // The sender pauses mid-spurt (the viewer cannot hear it): its last packet
+  // says END, so the receiver plays out and goes idle: no concealment, no
+  // underrun, no wider target.
+  Sim s;
+  s.jitter_ms = 2;
+  s.Tone(3);
+  const auto before = s.rx.stats();
+  s.tx.SetPaused(true);
+  s.Tone(2);
+  s.tx.SetPaused(false);
+  s.Tone(2);
+  const auto st = s.rx.stats();
+  EXPECT_EQ(st.underruns, before.underruns);
+  EXPECT_EQ(st.lost, before.lost);
+  EXPECT_EQ(st.target_ms, before.target_ms);
+}
+
+TEST(AudioJitter, ALargeReadIsWhole) {
+  // One read of 24,000 frames (500 ms, more than the resampler buffers at
+  // once) with a second of sound waiting: all of it is sound, no frame is
+  // skipped.
+  std::vector<std::vector<uint8_t>> packets;
+  Sender s([&](std::span<const uint8_t> b) {
+    packets.emplace_back(b.begin(), b.end());
+    return true;
+  }, kProfileSaver);
+  std::vector<float> in(960 * 2);
+  for (int k = 0; k < 50; ++k) {  // 1 s of a 1 kHz tone in 20 ms frames
+    Sine(k * 960, 960, 1000, 0.1, in.data(), 1500);
+    s.Push(in.data(), 960, 1'000'000 + static_cast<uint64_t>(k) * 20'000);
+  }
+  ASSERT_EQ(packets.size(), 50u);
+  Receiver rx;
+  const uint64_t now = 2'000'000;
+  for (const auto& p : packets) rx.OnPacket(p, now);
+  std::vector<float> out(24'000 * 2);
+  EXPECT_EQ(rx.Read(out.data(), 24'000, now, now), 24'000u);
+  size_t zeros = 0, longest = 0;
+  for (size_t i = 200; i < 24'000; ++i) {  // past the resampler's first few
+    zeros = out[2 * i] == 0.0f ? zeros + 1 : 0;
+    longest = std::max(longest, zeros);
+  }
+  EXPECT_LT(longest, 3u);
+  EXPECT_EQ(rx.stats().lost, 0u);
 }

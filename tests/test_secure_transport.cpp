@@ -291,13 +291,21 @@ TEST(SecureTransport, DatagramsRoundTrip) {
   ASSERT_TRUE(p.Ready());
   for (uint8_t i = 0; i < 20; ++i) ASSERT_TRUE(p.host->SendDatagram(Numbered(i)));
   ASSERT_TRUE(WaitUntil([&] { return p.at_viewer.count() == 20; }));
-  std::lock_guard<std::mutex> lock(p.at_viewer.mu);
-  for (uint8_t i = 0; i < 20; ++i) EXPECT_EQ(p.at_viewer.got[i], Numbered(i));
+  {
+    std::lock_guard<std::mutex> lock(p.at_viewer.mu);
+    for (uint8_t i = 0; i < 20; ++i) EXPECT_EQ(p.at_viewer.got[i], Numbered(i));
+  }
   // Sealed: 8 counter bytes and a 16-byte tag around the ciphertext.
   ASSERT_EQ(p.tap->sent.size(), 20u);
   EXPECT_EQ(p.tap->sent[0].size(), 50u + 24u);
   EXPECT_NE(std::vector<uint8_t>(p.tap->sent[0].begin() + 8, p.tap->sent[0].end() - 16), Numbered(0));
-  EXPECT_FALSE(p.host->SendDatagram(std::vector<uint8_t>(kMaxDatagramPayload + 1)));
+  // The largest that still fits the inner transport once sealed: 1076.
+  EXPECT_EQ(p.host->MaxDatagram(), kMaxDatagramPayload - 24);
+  EXPECT_FALSE(p.host->SendDatagram(std::vector<uint8_t>(kMaxDatagramPayload - 23)));
+  ASSERT_TRUE(p.host->SendDatagram(std::vector<uint8_t>(kMaxDatagramPayload - 24, 7)));
+  ASSERT_TRUE(WaitUntil([&] { return p.at_viewer.count() == 21; }));
+  std::lock_guard<std::mutex> lock(p.at_viewer.mu);
+  EXPECT_EQ(p.at_viewer.got.back().size(), kMaxDatagramPayload - 24);
 }
 
 TEST(SecureTransport, ATamperedDatagramIsDroppedAndTheConnectionStays) {

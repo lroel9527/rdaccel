@@ -65,6 +65,8 @@ class SecureTransport final : public ITransport {
   bool GetStats(TransportStats* out) const override { return inner_->GetStats(out); }
   bool CarriesBulk() const override { return inner_->CarriesBulk(); }
   bool CarriesDatagrams() const override { return inner_->CarriesDatagrams(); }
+  // The counter and the tag take 24 bytes of the inner transport's datagram.
+  size_t MaxDatagram() const override { return inner_->MaxDatagram() - 24; }
   bool SendDatagram(std::span<const uint8_t> bytes) override;
   void SetDatagramReceiver(DatagramFn fn) override;
   // Datagrams dropped because they failed authentication.

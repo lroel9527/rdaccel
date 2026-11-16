@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -138,4 +139,35 @@ TEST(PlatformAudioMac, ProcessTapDeliversTimedFrames) {
     if (!gone) std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   EXPECT_TRUE(gone) << TapCount() << " taps, " << taps_before << " before";
+}
+
+TEST(PlatformAudioMac, UnderTheTestEnvironmentNoTapMutes) {
+  // CTest sets RDACCEL_AUDIO_NULL_OUTPUT=1: a system source asked to keep
+  // this computer silent never builds a muting tap, even with the
+  // permission known. (The decision only: no tap is built here.)
+  ASSERT_TRUE(NullOutputSet());
+  EXPECT_FALSE(platform::LocalMuteAllowed());
+  EXPECT_FALSE(platform::TapMutesLocal(/*permission_confirmed=*/true, /*mute_local=*/true));
+  // What it would decide elsewhere (the variable away for a moment; this
+  // only reads it).
+  unsetenv("RDACCEL_AUDIO_NULL_OUTPUT");
+  const char* other = std::getenv("RDACCEL_AUDIO_NO_LOCAL_MUTE");
+  const std::string saved = other ? other : "";
+  unsetenv("RDACCEL_AUDIO_NO_LOCAL_MUTE");
+  const bool allowed = platform::LocalMuteAllowed();
+  const bool mutes = platform::TapMutesLocal(true, true);
+  const bool unconfirmed = platform::TapMutesLocal(false, true);
+  setenv("RDACCEL_AUDIO_NO_LOCAL_MUTE", "1", 1);
+  const bool with_no_mute = platform::TapMutesLocal(true, true);
+  if (other) {
+    setenv("RDACCEL_AUDIO_NO_LOCAL_MUTE", saved.c_str(), 1);
+  } else {
+    unsetenv("RDACCEL_AUDIO_NO_LOCAL_MUTE");
+  }
+  setenv("RDACCEL_AUDIO_NULL_OUTPUT", "1", 1);
+  EXPECT_TRUE(allowed);
+  EXPECT_TRUE(mutes);
+  EXPECT_FALSE(unconfirmed);  // no muting before the permission is known
+  EXPECT_FALSE(with_no_mute);
+  EXPECT_FALSE(platform::TapMutesLocal(true, true));  // back under the test environment
 }

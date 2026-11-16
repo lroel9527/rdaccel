@@ -1047,9 +1047,16 @@ void rda_audio_config_default(rda_audio_config* c) {
   c->mute_local = 0;
 }
 
+#if !RDACCEL_HAVE_AUDIO
+#define RDA_NO_AUDIO_RETURN return Fail(RDA_ERR_UNSUPPORTED, "this library was built without sound (RDACCEL_AUDIO=OFF)")
+#else
+#define RDA_NO_AUDIO_RETURN
+#endif
+
 rda_status rda_host_start_audio(rda_host* h, const rda_audio_config* config) {
   RDA_GUARD_BEGIN
   if (!h) return Fail(RDA_ERR_INVALID_ARG, "host is required");
+  RDA_NO_AUDIO_RETURN;
   rda_audio_config c;
   rda_audio_config_default(&c);
   if (config && !ReadStruct(config, c)) return Fail(RDA_ERR_INVALID_ARG, "config needs struct_size");
@@ -1084,6 +1091,7 @@ void rda_host_stop_audio(rda_host* h) {
 rda_status rda_host_submit_audio(rda_host* h, const float* interleaved, size_t frames, uint64_t capture_time_us) {
   RDA_GUARD_BEGIN
   if (!h || (!interleaved && frames)) return Fail(RDA_ERR_INVALID_ARG, "host and samples are required");
+  RDA_NO_AUDIO_RETURN;
   if (frames == 0) return RDA_OK;
   if (!h->host->SubmitAudio(interleaved, frames, capture_time_us)) {
     return Fail(RDA_ERR_BUSY, "no viewer takes sound now (or the source is not RDA_AUDIO_SOURCE_APP)");
@@ -1107,6 +1115,7 @@ void rda_host_set_audio_paused(rda_host* h, int paused) {
 rda_status rda_host_get_audio_status(const rda_host* h, rda_audio_status* out) {
   RDA_GUARD_BEGIN
   if (!h || !out) return Fail(RDA_ERR_INVALID_ARG, "host and out are required");
+  RDA_NO_AUDIO_RETURN;
   const rdacore::AudioStatus a = h->host->audio_status();
   rda_audio_status c{};
   c.struct_size = sizeof(c);

@@ -15,6 +15,14 @@ namespace rdacore::platform {
 // delivers sound proves the permission all the same.
 int AudioCapturePermission();
 
+// Whether a tap may mute this computer: never while RDACCEL_AUDIO_NULL_OUTPUT
+// or RDACCEL_AUDIO_NO_LOCAL_MUTE is set (CTest sets the first for every test):
+// a test can then never silence the machine it runs on.
+bool LocalMuteAllowed();
+// What the tap is built as: muting (CATapMutedWhenTapped) only when asked
+// for, with the permission known to be there, and allowed (above).
+bool TapMutesLocal(bool permission_confirmed, bool mute_local);
+
 // mach_absolute_time() ticks in microseconds: the clock of
 // capture::MonotonicMicros() (steady_clock is mach_absolute_time on macOS).
 uint64_t HostTimeToMicros(uint64_t host_time);

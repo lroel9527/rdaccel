@@ -16,9 +16,11 @@ constexpr int kSpurtExtras = 5;    // packets of a spurt with CLOCK (and RED aft
 constexpr int kClockEvery = 250;   // packets
 constexpr double kRedOn = 0.01, kRedOff = 0.003;
 constexpr uint64_t kRedOffAfterUs = 30'000'000;
-// A gap in the input longer than this is silence (sources call back every
-// ~10 ms; a scheduling hiccup is not a gap).
-constexpr uint64_t kGapUs = 60'000;
+// A gap in the input (time_us further on than the samples so far reach) is
+// silence for that long, so the sample positions follow the capture clock,
+// once it is over a quarter of a frame and longer than the chunk before it
+// (a source that missed a callback; an application whose timestamps jitter
+// by less than its chunks does not get holes punched into its sound).
 // Silence written out in full after a gap (enough for the gate to close);
 // the rest only moves the sample positions on.
 constexpr size_t kGapFillSamples = kSampleRate * 3 / 10;
@@ -81,7 +83,8 @@ Sender::~Sender() {
 
 void Sender::SetProfile(int profile) { profile_ = profile == kProfileSaver ? kProfileSaver : kProfileFull; }
 void Sender::SetPaused(bool paused) { paused_ = paused; }
-void Sender::SetPath(double loss_fraction, int64_t bandwidth_bps) {
+void Sender::SetPath(double loss_fraction, int64_t bandwidth_bps, bool congested) {
+  congested_ = congested;
   loss_ = std::clamp(loss_fraction, 0.0, 1.0);
   bandwidth_ = std::max<int64_t>(0, bandwidth_bps);
 }
@@ -131,7 +134,10 @@ int Sender::Encode(const float* pcm, uint8_t* out) {
 
 void Sender::Push(const float* pcm, size_t frames, uint64_t time_us) {
   // A gap: silence for that long.
-  if (next_time_ != 0 && time_us > next_time_ + kGapUs) {
+  const uint64_t gap_us = std::max<uint64_t>(static_cast<uint64_t>(frame_samples_) * 1'000'000 / kSampleRate / 4,
+                                             last_chunk_us_);
+  last_chunk_us_ = frames * 1'000'000 / kSampleRate;
+  if (next_time_ != 0 && time_us > next_time_ + gap_us) {
     const auto gap = static_cast<size_t>((time_us - next_time_) * kSampleRate / 1'000'000);
     static const std::vector<float> zeros(static_cast<size_t>(kSampleRate / 100) * kChannels, 0.0f);
     size_t left = gap;
@@ -153,6 +159,7 @@ void Sender::Push(const float* pcm, size_t frames, uint64_t time_us) {
       Push(zeros.data(), left, time_us - left * 1'000'000 / kSampleRate);
     }
   }
+  last_chunk_us_ = frames * 1'000'000 / kSampleRate;  // the gap's own zeros pushed theirs
   next_time_ = time_us + frames * 1'000'000 / kSampleRate;
   size_t done = 0;
   while (done < frames) {
@@ -181,9 +188,16 @@ void Sender::Push(const float* pcm, size_t frames, uint64_t time_us) {
 void Sender::AdaptToPath() {
   // A slow path: what the sound needs on the wire against a quarter of the
   // estimate (none: as the profile says; it is 0 until the transport trusts
-  // its estimate, and TCP has none).
-  if (const int64_t bw = bandwidth_; bw > 0) {
-    const int top = ProfileBitrate(profile_, 2);
+  // its estimate, and TCP has none). Only on evidence that the path is full
+  // now (a queue at the bottleneck, or loss): while the sound is the only
+  // traffic the estimate measures little more than the sound itself (its
+  // samples are application limited), and a cap taken from it would never
+  // come off. Without such evidence the sound steps back up every 5 s,
+  // whatever the estimate says.
+  const int64_t bw = bandwidth_;
+  const bool congested = congested_ || loss_ >= kRedOn;
+  const int top = ProfileBitrate(profile_, 2);
+  if (bw > 0 && congested) {
     const int overhead = kWireOverheadBytes * 8 * (1000 / std::max(1, frame_samples_ / 48));
     const auto budget = static_cast<int>(std::min<int64_t>(bw / 4 - overhead, top));
     const int now_bps = path_cap_bps_ > 0 ? path_cap_bps_ : top;
@@ -192,20 +206,18 @@ void Sender::AdaptToPath() {
       path_cap_bps_ = std::max(kMinPathBitrate, budget / 1000 * 1000);
       if (path_cap_bps_ >= top) path_cap_bps_ = 0;
       path_raise_time_ = frame_time_;
-    } else if (path_cap_bps_ > 0 && frame_time_ - path_raise_time_ >= kPathRaiseUs) {
-      // Up a step at a time while the estimate allows it.
-      int next = top;
-      for (int step : kPathSteps) {
-        if (step > path_cap_bps_) {
-          next = step;
-          break;
-        }
-      }
-      if (next <= budget) {
-        path_cap_bps_ = next >= top ? 0 : next;
-        path_raise_time_ = frame_time_;
+    }
+  } else if (path_cap_bps_ > 0 && frame_time_ - path_raise_time_ >= kPathRaiseUs) {
+    // Up a step at a time while nothing says the path is full.
+    int next = top;
+    for (int step : kPathSteps) {
+      if (step > path_cap_bps_) {
+        next = step;
+        break;
       }
     }
+    path_cap_bps_ = next >= top ? 0 : next;
+    path_raise_time_ = frame_time_;
   }
   // RED while the path loses packets.
   const double loss = loss_;
@@ -245,9 +257,12 @@ void Sender::Frame(const float* pcm, uint64_t time_us) {
     have_prev_ = true;
   };
 
-  if (paused_) {
+  // Paused in the middle of a spurt: this frame still goes, as its END, so
+  // the receiver plays out to it and stops instead of concealing a loss and
+  // counting an underrun (which would also widen its target for 30 s).
+  const bool pause_now = paused_ && sending_;
+  if (paused_ && !pause_now) {
     // Nobody hears it: nothing is encoded; what comes after starts afresh.
-    if (sending_) sending_ = false;
     was_paused_ = true;
     status_silent_ = true;
     last_opus_valid_ = false;
@@ -276,6 +291,14 @@ void Sender::Frame(const float* pcm, uint64_t time_us) {
     spurt_packets_ = 0;
     since_clock_ = 0;
     opus_encoder_ctl(enc_, OPUS_RESET_STATE);
+    // The first frames of a spurt are coded without prediction from the
+    // frame before (OPUS_SET_PREDICTION_DISABLED): a receiver that never got
+    // the lead-in (the frame before was the END frame it has played already,
+    // or the first packet was lost) decodes them from a fresh state, and a
+    // predicted frame there came out as a burst 30-38 dB above a quiet input,
+    // fading over 30-50 ms. It costs about 1% more bits on those frames.
+    opus_encoder_ctl(enc_, OPUS_SET_PREDICTION_DISABLED(1));
+    prediction_off_ = true;
     applied_channels_ = applied_bitrate_ = 0;
     applied_loss_ = -1;
     mono_ = mono;
@@ -300,7 +323,8 @@ void Sender::Frame(const float* pcm, uint64_t time_us) {
     return;
   }
   ++frames_;
-  const bool end = silent_ms_ >= kTailMs;
+  const bool end = silent_ms_ >= kTailMs || pause_now;
+  if (pause_now) was_paused_ = true;
   const bool red = last_opus_valid_ && (red_on_ || spurt_packets_ < kSpurtExtras);
   const bool clock = spurt_packets_ < kSpurtExtras || since_clock_ >= kClockEvery;
   Packet p;
@@ -318,6 +342,10 @@ void Sender::Frame(const float* pcm, uint64_t time_us) {
     if (red) red_bytes_ += 2 + last_opus_.size();
   }
   ++spurt_packets_;
+  if (prediction_off_ && spurt_packets_ >= kSpurtExtras) {
+    opus_encoder_ctl(enc_, OPUS_SET_PREDICTION_DISABLED(0));
+    prediction_off_ = false;
+  }
   since_clock_ = clock ? 0 : since_clock_ + 1;
   last_opus_.assign(opus_.begin(), opus_.begin() + r);
   last_opus_valid_ = true;

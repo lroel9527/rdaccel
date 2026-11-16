@@ -73,6 +73,10 @@ class ViewerGate final : public Transport {
     std::shared_lock<std::shared_mutex> l(mu_);
     return inner_->CarriesDatagrams();
   }
+  size_t MaxDatagram() const override {
+    std::shared_lock<std::shared_mutex> l(mu_);
+    return inner_->MaxDatagram();
+  }
   // Nothing before the viewer is accepted (as for the channels).
   bool SendDatagram(std::span<const uint8_t> bytes) override {
     std::shared_lock<std::shared_mutex> l(mu_);
@@ -518,6 +522,9 @@ struct Host::Impl {
   std::unique_ptr<audio::Source> audio_source;  // under audio_ctl_mu (and audio_mu to read)
   audio::SenderStats audio_done;                // of the senders of earlier viewers
   uint64_t audio_dropped_done = 0;
+  // The transport's dropped-datagram count when the current sender began:
+  // the transport counts for its whole life, the sound only from then on.
+  uint64_t audio_dropped_base = 0;
   // Loss over the last 5 s, for the sender (IdleLoop's thread).
   struct PathSample {
     uint64_t time, sent, lost;
@@ -547,9 +554,12 @@ struct Host::Impl {
     std::unique_ptr<audio::Source> src;
     if (cfg.source == AudioConfig::Source::kTest) src = audio::CreateTestSource();
     if (cfg.source == AudioConfig::Source::kSystem) src = audio::CreateSystemSource();
+    TransportStats base;
+    const bool have_base = gate->GetStats(&base);
     {
       std::lock_guard<std::mutex> l(audio_mu);
       sender = s;
+      audio_dropped_base = have_base ? base.datagrams_dropped : 0;
       audio_message.clear();
       if (cfg.source == AudioConfig::Source::kApp) {
         audio_state = AudioState::kRunning;
@@ -622,7 +632,7 @@ struct Host::Impl {
     audio_done.frames += ss.frames;
     audio_done.frames_gated += ss.frames_gated;
     audio_done.red_bytes += ss.red_bytes;
-    if (have_st) audio_dropped_done += st.datagrams_dropped;
+    if (have_st) audio_dropped_done += st.datagrams_dropped - std::min(st.datagrams_dropped, audio_dropped_base);
     audio_state = audio_on ? AudioState::kWaitingPeer : AudioState::kOff;
     audio_message.clear();
 #endif
@@ -649,7 +659,7 @@ struct Host::Impl {
     const auto& first = audio_path.front();
     const double sent = static_cast<double>(st.packets_sent - std::min(st.packets_sent, first.sent));
     const double loss = sent > 0 ? static_cast<double>(lost - std::min(lost, first.lost)) / sent : 0;
-    s->SetPath(loss, st.bandwidth_settled ? st.bandwidth_bps : 0);
+    s->SetPath(loss, st.bandwidth_settled ? st.bandwidth_bps : 0, st.path_queued);
 #else
     (void)now;
 #endif
@@ -1044,12 +1054,13 @@ HostStats Host::stats() const {
   {
     std::shared_ptr<audio::Sender> s;
     audio::SenderStats a;
-    uint64_t dropped = 0;
+    uint64_t dropped = 0, base = 0;
     {
       std::lock_guard<std::mutex> l(impl_->audio_mu);
       s = impl_->sender;
       a = impl_->audio_done;
       dropped = impl_->audio_dropped_done;
+      base = impl_->audio_dropped_base;
     }
     if (s) {
       const auto c = s->stats();
@@ -1059,7 +1070,7 @@ HostStats Host::stats() const {
       a.frames_gated += c.frames_gated;
       a.red_bytes += c.red_bytes;
       TransportStats ts;
-      if (impl_->gate->GetStats(&ts)) dropped += ts.datagrams_dropped;
+      if (impl_->gate->GetStats(&ts)) dropped += ts.datagrams_dropped - std::min(ts.datagrams_dropped, base);
     }
     st.audio_packets = a.packets;
     st.audio_bytes = a.bytes;

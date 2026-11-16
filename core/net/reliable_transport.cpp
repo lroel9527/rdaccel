@@ -224,6 +224,7 @@ bool ReliableTransport::GetStats(TransportStats* out) const {
   out->datagram_bytes_sent = datagram_bytes_sent_;
   out->datagrams_dropped = datagrams_dropped_;
   out->bandwidth_settled = mode_ != Mode::kStartup;
+  out->path_queued = PathQueued();
   return true;
 }
 

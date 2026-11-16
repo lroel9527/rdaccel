@@ -31,8 +31,10 @@ inline constexpr uint8_t kFlagClock = 1;
 inline constexpr uint8_t kFlagRed = 2;
 inline constexpr uint8_t kFlagEnd = 4;
 inline constexpr size_t kPacketHeader = 9;
-// A whole packet fits one datagram (rdacore::kMaxDatagramPayload).
-inline constexpr size_t kMaxPacket = 1100;
+// A whole packet fits one datagram, encrypted too (rdacore::kMaxDatagramPayload
+// less the encryption's 24 bytes). The sender's packets are at most 1019
+// (9 + 8 + 2 + 2 x kMaxOpusFrame).
+inline constexpr size_t kMaxPacket = 1076;
 // Largest Opus packet of one frame the sender makes.
 inline constexpr size_t kMaxOpusFrame = 500;
 

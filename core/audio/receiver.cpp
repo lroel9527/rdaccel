@@ -456,6 +456,17 @@ void Receiver::Drift(uint64_t now) {
 
 size_t Receiver::Read(float* out, size_t frames, uint64_t play_time_us, uint64_t now_us) {
   if (play_time_us == 0) play_time_us = now_us;
+  // A large request in pieces the resampler's buffer holds (whatever a
+  // caller asks for: its input is a few frames of Opus per piece).
+  constexpr size_t kPiece = 2048;
+  if (frames > kPiece) {
+    size_t sound = 0;
+    for (size_t done = 0; done < frames; done += kPiece) {
+      const size_t n = std::min(kPiece, frames - done);
+      sound += Read(out + done * kChannels, n, play_time_us + done * 1'000'000 / kSampleRate, now_us);
+    }
+    return sound;
+  }
   Drain(now_us);
   // How late the sound plays against the picture: the sample that reaches
   // the speaker at play_time_us is the one the resampler holds next; its

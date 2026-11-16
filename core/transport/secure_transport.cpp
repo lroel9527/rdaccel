@@ -222,7 +222,7 @@ bool SecureTransport::Drain(size_t ch) {
 namespace rdacore::transport {
 
 bool SecureTransport::SendDatagram(std::span<const uint8_t> bytes) {
-  if (bytes.size() > kMaxDatagramPayload) return false;
+  if (bytes.size() > MaxDatagram()) return false;
   if (!ready_.load()) return false;  // no keys yet: dropped
   std::lock_guard<std::mutex> lock(dgram_tx_mu_);
   const uint64_t counter = dgram_tx_count_++;

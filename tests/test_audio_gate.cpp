@@ -175,15 +175,18 @@ TEST(AudioGate, PausedSendsNothingAndResumesAsANewSpurt) {
   const size_t before = h.sent.size();
   h.sender.SetPaused(true);
   h.Tone(1.0);
-  EXPECT_EQ(h.sent.size(), before);
+  // One more frame, the spurt's END; then nothing.
+  Reparse(h.sent);
+  ASSERT_EQ(h.sent.size(), before + 1);
+  EXPECT_TRUE(h.sent.back().p.end());
   EXPECT_TRUE(h.sender.status().silent);
   h.sender.SetPaused(false);
   h.Tone(0.1);
   Reparse(h.sent);
-  ASSERT_GT(h.sent.size(), before);
-  EXPECT_EQ(h.sent[before].p.spurt, 2);
-  EXPECT_TRUE(h.sent[before].p.clock());
-  EXPECT_FALSE(h.sent[before].p.red.empty());
+  ASSERT_GT(h.sent.size(), before + 1);
+  EXPECT_EQ(h.sent[before + 1].p.spurt, 2);
+  EXPECT_TRUE(h.sent[before + 1].p.clock());
+  EXPECT_FALSE(h.sent[before + 1].p.red.empty());
 }
 
 TEST(AudioGate, DataSaverUses20msFrames) {
@@ -245,14 +248,14 @@ TEST(AudioGate, ASlowPathLowersTheBitrateAndItComesBackInSteps) {
   EXPECT_EQ(h.sender.status().bitrate_bps, 160'000);
   // 400 kbps: a quarter is 100 kbps, of which the headers of 100 packets a
   // second take 52: 48 kbps for the sound.
-  h.sender.SetPath(0, 400'000);
+  h.sender.SetPath(0, 400'000, /*congested=*/true);
   h.Tone(1.5, -20, 1500);
   EXPECT_EQ(h.sender.status().bitrate_bps, 48'000);
   // Slower still: never below 32 kbps.
-  h.sender.SetPath(0, 250'000);
+  h.sender.SetPath(0, 250'000, /*congested=*/true);
   h.Tone(1.5, -20, 1500);
   EXPECT_EQ(h.sender.status().bitrate_bps, 32'000);
-  // The estimate recovers: one step every 5 s, 32 -> 48 -> 64 -> 96 -> 160.
+  // The path is no longer full: one step every 5 s, 32 -> 48 -> 64 -> 96 -> 160.
   h.sender.SetPath(0, 10'000'000);
   std::vector<int> seen;
   for (int i = 0; i < 30; ++i) {
@@ -272,8 +275,50 @@ TEST(AudioGate, DataSaverOnASlowPath) {
   // 20 ms frames: half the packets, so less of the quarter goes to headers.
   Harness h(kProfileSaver);
   h.Tone(1.0, -20, 1500);
-  h.sender.SetPath(0, 400'000);  // 100 - 26 = 74 kbps
+  h.sender.SetPath(0, 400'000, /*congested=*/true);  // 100 - 26 = 74 kbps
   h.Tone(1.5, -20, 1500);
   EXPECT_EQ(h.sender.status().bitrate_bps, 74'000);
   EXPECT_EQ(h.sender.status().frame_ms, 20);
+}
+
+TEST(AudioGate, AShortGapStillMovesThePositionsOn) {
+  // A source that missed two 10 ms callbacks: 20 ms of silence, and the
+  // sample positions follow the capture time (not the samples alone).
+  Harness h;
+  h.Tone(0.2);
+  h.pos += 960;  // 20 ms the source did not deliver
+  h.Tone(0.1);
+  Reparse(h.sent);
+  EXPECT_EQ(h.sent.back().p.ts, static_cast<uint32_t>(h.pos - 480));
+  // Timestamps that jitter by less than a chunk punch no holes.
+  Harness j;
+  std::vector<float> buf(480 * 2);
+  for (int64_t k = 0; k < 50; ++k) {
+    Sine(k * 480, 480, 1000, 0.1, buf.data());
+    const int64_t jitter = (k % 3 == 1) ? 4'000 : (k % 3 == 2 ? -3'000 : 0);
+    j.sender.Push(buf.data(), 480, static_cast<uint64_t>(1'000'000 + k * 10'000 + jitter));
+  }
+  Reparse(j.sent);
+  EXPECT_EQ(j.sent.back().p.ts, 49u * 480);
+}
+
+TEST(AudioGate, TheSoundAloneDoesNotKeepItselfDown) {
+  // A still screen with music: the sound is all the traffic, so the estimate
+  // measures about the sound (~200 kbps on the wire). A round trip that
+  // jumps for a while (a queue elsewhere) brings the rate down; once it is
+  // over the rate comes back to the profile's although the estimate stays
+  // that low.
+  Harness h;
+  h.Tone(1.0, -20, 1500);
+  h.sender.SetPath(0, 200'000, /*congested=*/true);
+  h.Tone(2.0, -20, 1500);
+  EXPECT_EQ(h.sender.status().bitrate_bps, 32'000);
+  h.sender.SetPath(0, 200'000, /*congested=*/false);
+  h.Tone(25.0, -20, 1500);
+  EXPECT_EQ(h.sender.status().bitrate_bps, 160'000);
+  // A low estimate on a path that is not full lowers nothing.
+  Harness quiet;
+  quiet.sender.SetPath(0, 200'000, /*congested=*/false);
+  quiet.Tone(3.0, -20, 1500);
+  EXPECT_EQ(quiet.sender.status().bitrate_bps, 160'000);
 }
