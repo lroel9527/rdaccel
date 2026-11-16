@@ -13,6 +13,7 @@
 #include <variant>
 #include <vector>
 
+#include "codec/hevc_bitstream.h"
 #include "rdacore/geometry.h"
 #include "rdacore/input.h"
 
@@ -37,6 +38,10 @@ inline constexpr uint64_t kCapContextTiles = 4;
 inline constexpr uint64_t kCapContextTiles64 = 8;
 // Both: AppMessage on Channel::kBulk too (large transfers below the picture). 1.10.
 inline constexpr uint64_t kCapBulk = 16;
+// Viewer: decodes H.264 (Hello::codec kH264), so a host whose HEVC encoder
+// is missing or too slow may send it. Not in kCapsAll: only a viewer whose
+// platform decoder handles H.264 adds it (LinkOptions::extra_caps). 1.11.
+inline constexpr uint64_t kCapH264 = 32;
 inline constexpr uint64_t kCapsAll = kCapMessages | kCapTextInput | kCapContextTiles | kCapContextTiles64 | kCapBulk;
 
 enum class MsgType : uint8_t {
@@ -61,8 +66,10 @@ enum class MsgType : uint8_t {
 // Largest screen side the protocol carries (the public API's frame limit).
 inline constexpr uint32_t kMaxScreenSide = 16384;
 
-// HEVC only: the project deliberately has no H.264 fallback.
-enum class VideoCodec : uint8_t { kHevc = 2 };
+// HEVC by default. H.264 (1.11) only to a viewer with kCapH264, and only
+// when the host's HEVC encoder is missing or too slow at the screen's size
+// (or the host is told to); older hosts send HEVC only.
+using VideoCodec = codec::VideoCodec;
 
 // Host -> viewer, first message on the control channel.
 struct Hello {
@@ -127,8 +134,8 @@ struct FrameBegin {
 struct VideoData {
   uint64_t frame_id = 0;
   bool keyframe = false;
-  // HEVC parameter sets (VPS, SPS, PPS), raw NAL units without start codes.
-  // Sent with every keyframe.
+  // Parameter sets (HEVC: VPS, SPS, PPS; H.264: SPS, PPS), raw NAL units
+  // without start codes. Sent with every keyframe.
   std::vector<std::vector<uint8_t>> parameter_sets;
   // Tiles of the screen this frame is allowed to update. Empty = whole screen.
   std::vector<Rect> regions;
@@ -137,7 +144,7 @@ struct VideoData {
   // Annex B output to this layout so both ends see the same format.
   std::vector<uint8_t> nal_data;
   // 0 = the full-screen stream. Other values are video region streams: a
-  // separate HEVC stream (own decoder, own keyframes) whose pictures cover
+  // separate stream of the Hello's codec (own decoder, own keyframes) whose pictures cover
   // only part of the screen; the picture's top-left goes to (x, y) and
   // `regions` is then relative to the screen as well. A keyframe on a stream
   // id the viewer has not seen, or with new parameter sets, starts it over.

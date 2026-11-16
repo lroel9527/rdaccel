@@ -245,6 +245,18 @@ TEST(Link, BothSidesLearnThePeersCapabilities) {
   EXPECT_EQ(p.host->peer_caps(), proto::kCapsAll);
 }
 
+TEST(Link, ViewerAddsMachineDependentCapabilities) {
+  // A viewer whose platform decodes H.264 says so (1.11); the host learns it.
+  LinkOptions vo;
+  vo.extra_caps = proto::kCapH264;
+  Pair p({}, vo);
+  ASSERT_TRUE(WaitUntil([&] { return p.host->state() == LinkState::kConnected; }));
+  EXPECT_EQ(p.host->peer_caps(), proto::kCapsAll | proto::kCapH264);
+  // The host's Welcome does not claim it.
+  ASSERT_TRUE(WaitUntil([&] { return p.viewer->state() == LinkState::kConnected; }));
+  EXPECT_EQ(p.viewer->peer_caps() & proto::kCapH264, 0u);
+}
+
 TEST(Link, OlderHostHasFewerCapabilities) {
   auto [a, b] = CreateLocalPipe();
   RawPeer host(std::move(a));

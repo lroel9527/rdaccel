@@ -25,14 +25,18 @@ std::unique_ptr<capture::ICapturer> CreateScreenCapturer(std::string* /*error*/)
       "CGDisplayStream", std::chrono::milliseconds(1500));
 }
 
-std::unique_ptr<codec::IHevcEncoder> CreateHevcEncoder(const codec::EncoderConfig& cfg,
-                                                       const std::string& /*prefer*/,
-                                                       std::string* error) {
-  return CreateVtHevcEncoder(cfg, error);
+std::unique_ptr<codec::IHevcEncoder> CreateVideoEncoder(const codec::EncoderConfig& cfg,
+                                                        const std::string& /*prefer*/,
+                                                        std::string* error) {
+  return CreateVtEncoder(cfg, error);
 }
 
-std::unique_ptr<codec::IHevcDecoder> CreateHevcDecoder(std::string* error) {
-  return CreateVtHevcDecoder(error);
+std::unique_ptr<codec::IHevcDecoder> CreateVideoDecoder(codec::VideoCodec codec, std::string* error) {
+  return CreateVtDecoder(codec, error);
 }
+
+// VideoToolbox decodes both on every supported macOS (in software where the
+// GPU cannot).
+bool CanDecode(codec::VideoCodec) { return true; }
 
 }  // namespace rdacore::platform

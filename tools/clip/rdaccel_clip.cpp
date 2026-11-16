@@ -182,7 +182,7 @@ int Eval(const Args& args) {
   // Video areas have their own streams and decoders, as in the real viewer
   // (src/viewer.cpp): without them every area that opened made the viewer
   // ask for a keyframe, which closed it again.
-  viewer.SetDecoderFactory([] { return platform::CreateHevcDecoder(nullptr); });
+  viewer.SetDecoderFactory([](codec::VideoCodec c) { return platform::CreateVideoDecoder(c, nullptr); });
   std::mutex mu;
   std::condition_variable cv;
   std::vector<uint8_t> shown;

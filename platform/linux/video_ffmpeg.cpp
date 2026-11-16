@@ -435,6 +435,8 @@ std::unique_ptr<codec::IHevcEncoder> CreateFfmpegHevcEncoder(const codec::Encode
     order.erase(std::remove(order.begin(), order.end(), prefer), order.end());
     order.insert(order.begin(), prefer);
   }
+  // Hardware only (measuring whether HEVC is fast enough): no x265.
+  if (cfg.hardware_only) order.erase(std::remove(order.begin(), order.end(), "libx265"), order.end());
   std::string errors;
   for (const auto& backend : order) {
     std::string err;

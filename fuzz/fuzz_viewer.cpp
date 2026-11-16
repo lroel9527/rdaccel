@@ -33,7 +33,7 @@ class FakeDecoder final : public codec::IHevcDecoder {
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   session::ViewerSession v(nullptr, std::make_unique<FakeDecoder>());
-  v.SetDecoderFactory([] { return std::make_unique<FakeDecoder>(); });
+  v.SetDecoderFactory([](codec::VideoCodec) { return std::make_unique<FakeDecoder>(); });
   v.SetFrameHandler([](const tile::ImageView& img, const std::vector<Rect>&, uint64_t, uint64_t) {
     volatile uint8_t sink = img.data[0];
     (void)sink;

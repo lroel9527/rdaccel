@@ -606,6 +606,15 @@ struct HostConfig {
   bool capture_own_windows = false;
   // Text mode (rda_host_config.text_mode): sharp text on very slow links.
   bool text_mode = false;
+  // Which video codec to send (rda_host_config.video_codec): HEVC unless
+  // this machine's HEVC encoder is missing or too slow and the viewer
+  // decodes H.264 (kAuto), or always one of them.
+  enum class VideoCodec : int32_t {
+    kAuto = RDA_VIDEO_CODEC_AUTO,
+    kHevc = RDA_VIDEO_CODEC_HEVC,
+    kH264 = RDA_VIDEO_CODEC_H264,
+  };
+  VideoCodec video_codec = VideoCodec::kAuto;
   // Whether a viewer may connect, from its auth token (transport thread).
   // Empty = everyone may.
   std::function<bool(std::span<const uint8_t> token)> auth;
@@ -697,6 +706,7 @@ class Host {
     c.keep_serving = config.keep_serving ? 1 : 0;
     c.capture_own_windows = config.capture_own_windows ? 1 : 0;
     c.text_mode = config.text_mode ? 1 : 0;
+    c.video_codec = static_cast<int32_t>(config.video_codec);
     if (!config.encryption_key.empty() && config.encryption_key.size() != 32) {
       create_error_ = "encryption_key must be 32 bytes";
       return;

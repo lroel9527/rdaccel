@@ -37,6 +37,9 @@ struct LinkOptions {
   int32_t ping_interval_ms = 1'000;
   // Viewer: sent in ViewerHello for the host's auth hook.
   std::vector<uint8_t> auth_token;
+  // Viewer: capability bits beyond proto::kCapsAll that depend on this
+  // machine (proto::kCapH264 where the platform decodes H.264).
+  uint64_t extra_caps = 0;
 };
 
 class Link {

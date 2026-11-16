@@ -705,6 +705,9 @@ rdacore::HostConfig ToHostConfig(const rda_host_config& c) {
   o.keep_serving = c.keep_serving != 0;
   o.capture_own_windows = c.capture_own_windows != 0;
   o.text_mode = c.text_mode != 0;
+  // The default (auto) for callers whose struct ends before it (ReadStruct;
+  // rda_host_config.reserved0 keeps 1.10's tail padding out of it).
+  o.video_codec = static_cast<rdacore::HostConfig::VideoCodecPreference>(c.video_codec);
   return o;
 }
 
@@ -743,6 +746,9 @@ std::string CheckHostConfig(const rda_host_config& c) {
   }
   if (c.peer_timeout_ms < 0) return "peer_timeout_ms must not be negative";
   if (c.display_index < 0) return "display_index must not be negative";
+  if (c.video_codec < RDA_VIDEO_CODEC_AUTO || c.video_codec > RDA_VIDEO_CODEC_H264) {
+    return "video_codec must be RDA_VIDEO_CODEC_AUTO, _HEVC or _H264";
+  }
   return {};
 }
 
@@ -783,6 +789,7 @@ void rda_host_config_default(rda_host_config* c) {
   c->keep_serving = d.keep_serving;
   c->capture_own_windows = d.capture_own_windows;
   c->text_mode = d.text_mode;
+  c->video_codec = static_cast<int32_t>(d.video_codec);
 }
 
 rda_status rda_host_create(rda_transport* transport, const rda_host_config* config, rda_host** out) {

@@ -32,6 +32,7 @@ class FakeEncoder final : public codec::IHevcEncoder {
   size_t* pictures = nullptr;  // counts the pictures produced, if set
   int64_t* bitrate = nullptr;  // the last bitrate set, if set
   std::vector<uint8_t>* input = nullptr;  // the last picture's input (BGRA, tightly packed), if set
+  codec::VideoCodec ps_codec = codec::VideoCodec::kHevc;  // what its parameter sets look like
 
   std::string name() const override { return "fake"; }
   void SetMinQp(int qp) override { min_qp_now_ = qp; }
@@ -62,7 +63,10 @@ class FakeEncoder final : public codec::IHevcEncoder {
     }
     codec::HevcAccessUnit au;
     au.keyframe = force_keyframe;
-    if (force_keyframe) au.parameter_sets = {{codec::kNalVps << 1, 1}};
+    if (force_keyframe) {
+      au.parameter_sets = {ps_codec == codec::VideoCodec::kH264 ? std::vector<uint8_t>{0x67, 1}
+                                                                : std::vector<uint8_t>{codec::kNalVps << 1, 1}};
+    }
     std::vector<uint8_t> nal = {static_cast<uint8_t>((force_keyframe ? 19 : 1) << 1), 1};
     nal.push_back(static_cast<uint8_t>(img.width & 0xff));
     nal.push_back(static_cast<uint8_t>(img.height & 0xff));
@@ -489,7 +493,7 @@ TEST(Session, BusyAreaGetsItsOwnStreamAndASharpPictureWhenItStops) {
   opts.region_params.linger = 3;
   session::HostSession host(host_end.get(), std::make_unique<FakeEncoder>(), W, H, opts);
   session::ViewerSession viewer(viewer_end.get(), std::make_unique<FakeDecoder>());
-  viewer.SetDecoderFactory([] { return std::make_unique<FakeDecoder>(); });
+  viewer.SetDecoderFactory([](codec::VideoCodec) { return std::make_unique<FakeDecoder>(); });
 
   std::mutex mu;
   std::condition_variable cv;
@@ -1739,4 +1743,97 @@ TEST(Session, TextModeDragsAWindowWithoutSendingItInCrumbs) {
   }
   EXPECT_GT(checked, 64u * 64u * 4);
   EXPECT_EQ(wrong, 0u) << "pixels of the window not exact once it stopped";
+}
+
+// 1.11: the Hello names the session's codec, and the viewer makes decoders
+// for it (and for whatever codec a keyframe's parameter sets are of).
+TEST(Session, HelloNamesTheCodecAndTheViewerFollowsIt) {
+  auto [host_end, viewer_end] = transport::MakeLocalPipe();
+  constexpr int W = 200, H = 120;
+  auto enc = std::make_unique<FakeEncoder>();
+  enc->ps_codec = codec::VideoCodec::kH264;
+  session::HostOptions opts;
+  opts.lossless = false;
+  opts.refine_frames = 0;
+  opts.codec = codec::VideoCodec::kH264;
+  session::HostSession host(host_end.get(), std::move(enc), W, H, opts);
+  session::ViewerSession viewer(nullptr, std::make_unique<FakeDecoder>());
+  std::mutex mu;
+  std::condition_variable cv;
+  std::vector<codec::VideoCodec> made;
+  proto::Hello hello;
+  int frames = 0;
+  viewer.SetDecoderFactory([&](codec::VideoCodec c) {
+    std::lock_guard<std::mutex> lock(mu);
+    made.push_back(c);
+    return std::make_unique<FakeDecoder>();
+  });
+  viewer.SetHelloHandler([&](const proto::Hello& h) {
+    std::lock_guard<std::mutex> lock(mu);
+    hello = h;
+  });
+  viewer.SetFrameHandler([&](const tile::ImageView&, const std::vector<Rect>&, uint64_t, uint64_t) {
+    std::lock_guard<std::mutex> lock(mu);
+    ++frames;
+    cv.notify_all();
+  });
+  viewer.Attach(viewer_end.get());
+  std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 50);
+  capture::CapturedFrame f{{px.data(), W, H, W * 4}, {}, 0};
+  ASSERT_TRUE(host.OnFrame(f));
+  PipeStopper stop{host_end, viewer_end};
+  std::unique_lock<std::mutex> lock(mu);
+  ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(5), [&] { return frames == 1; }));
+  EXPECT_EQ(hello.codec, codec::VideoCodec::kH264);
+  // One H.264 decoder, made on the Hello; the keyframe (H.264 too) needs no other.
+  EXPECT_EQ(made, std::vector<codec::VideoCodec>{codec::VideoCodec::kH264});
+  EXPECT_EQ(viewer.stats().decode_errors, 0u);
+}
+
+TEST(Session, ViewerTakesTheCodecOfAKeyframeOverALateHello) {
+  session::ViewerSession viewer(nullptr, std::make_unique<FakeDecoder>());
+  std::vector<codec::VideoCodec> made;
+  int frames = 0;
+  viewer.SetDecoderFactory([&](codec::VideoCodec c) {
+    made.push_back(c);
+    return std::make_unique<FakeDecoder>();
+  });
+  viewer.SetFrameHandler([&](const tile::ImageView&, const std::vector<Rect>&, uint64_t, uint64_t) { ++frames; });
+  constexpr uint8_t W = 64, H = 64;
+  auto frame = [&](uint64_t id, std::vector<uint8_t> ps, uint8_t stream = 0) {
+    proto::VideoData v;
+    v.frame_id = id;
+    v.keyframe = !ps.empty();
+    if (!ps.empty()) v.parameter_sets = {ps};
+    codec::AppendLengthPrefixed(std::vector<uint8_t>{0x26, 1, stream ? uint8_t{16} : W, stream ? uint8_t{16} : H},
+                                v.nal_data);
+    v.stream = stream;
+    std::vector<uint8_t> bytes;
+    proto::EncodeTo(proto::FrameBegin{id, 0}, bytes);
+    proto::EncodeTo(v, bytes);
+    proto::EncodeTo(proto::FrameEnd{id}, bytes);
+    viewer.FeedVideoBytes(bytes);
+  };
+  const std::vector<uint8_t> hevc_vps = {codec::kNalVps << 1, 1};
+  const std::vector<uint8_t> h264_sps = {0x67, 0x64};
+  viewer.FeedVideoBytes(proto::Encode(proto::Hello{proto::kProtocolVersion, W, H, codec::VideoCodec::kHevc}));
+  frame(1, hevc_vps);
+  EXPECT_TRUE(made.empty());  // HEVC from the start: the first decoder stays
+  // An H.264 keyframe without (before) its Hello: the viewer follows it.
+  frame(2, h264_sps);
+  EXPECT_EQ(made, std::vector<codec::VideoCodec>{codec::VideoCodec::kH264});
+  // A video area keyframe gets a decoder of its own codec.
+  frame(3, h264_sps, /*stream=*/1);
+  EXPECT_EQ(made.back(), codec::VideoCodec::kH264);
+  // The Hello for the same codec changes nothing.
+  const size_t n = made.size();
+  viewer.FeedVideoBytes(proto::Encode(proto::Hello{proto::kProtocolVersion, W, H, codec::VideoCodec::kH264}));
+  EXPECT_EQ(made.size(), n);
+  // And back to HEVC with a Hello.
+  viewer.FeedVideoBytes(proto::Encode(proto::Hello{proto::kProtocolVersion, W, H, codec::VideoCodec::kHevc}));
+  EXPECT_EQ(made.back(), codec::VideoCodec::kHevc);
+  frame(4, hevc_vps);
+  EXPECT_EQ(made.size(), n + 1);
+  EXPECT_EQ(frames, 4);
+  EXPECT_EQ(viewer.stats().decode_errors, 0u);
 }

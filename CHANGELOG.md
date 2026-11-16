@@ -3,6 +3,19 @@
 版本号遵循语义化版本。从 1.0 起，同一主版本内 C ABI 只加不改（新函数、结构体末尾加字段），
 `find_package(rdaccel 1.0)` 接受任何 1.x。1.0 之前次版本号（0.x）变化时 C ABI 可能有不兼容改动。
 
+## 1.11.0
+
+新功能：C ABI 只加不改（`rda_host_config` 末尾加了 `reserved0` 和 `video_codec`），线上格式多了一个能力位，和旧版本互通。
+
+### HEVC 太慢时用 H.264
+
+- **为什么**：一台 Intel MacBook Pro 13" 2016（Iris 550，macOS 12.7.6）当服务端，实测硬件 HEVC 编 2880×1800 只有约 15 fps（1080p 约 24 fps），也没有低延迟 HEVC（带 `EnableLowLatencyRateControl` 建会话返回 -12902）；同一台机器硬件 H.264 编 2880×1800 约 52 fps。HEVC 硬件最大 4096×2304，再大只剩软件 HEVC（约 1 fps）。以前 rdaccel 只用 HEVC，这样的机器当服务端画面一卡一卡。
+- **做法**：新的能用就用新的，新的用不了才用旧的。默认仍是 HEVC；只有接收端能解 H.264（新能力位 `kCapH264`，macOS 的接收端有，Linux 的没有），而且本机在这个分辨率下没有硬件 HEVC 编码器（先试低延迟硬件，再试普通硬件），或者硬件 HEVC 测出来不到 30 fps、硬件 H.264 又比它快时，才发 H.264。测法是用硬件编码器编一张关键帧热身，再编最多 8 帧变化的画面计时；按 30 fps 已经不可能达到时提前停，所以慢机器上也只花零点几秒（这台 Apple Silicon Mac 上 2880×1800 测得约 94 fps，计时部分约 110 毫秒，建 VideoToolbox 会话另要 30～170 毫秒，第一次最慢）。每个分辨率只测一次，换分辨率时重新判断；视频区域跟整屏用同一种编码，不再测。H.264 也没有可用的硬件编码器、或不比 HEVC 快时，和以前一样用 HEVC（包括软件 HEVC）。判断结果写进日志（Info；改用 H.264 时是 Warn），`rda_host_encoder_name()` 给出例如“VideoToolbox H.264 (low-latency)”。
+- **配置**：`rda_host_config.video_codec`：`RDA_VIDEO_CODEC_AUTO`（默认，上面的自动判断）、`RDA_VIDEO_CODEC_HEVC`（总是 HEVC，什么都不测，和 1.10 完全一样）、`RDA_VIDEO_CODEC_H264`（接收端能解就发 H.264；不能解、或建不了 H.264 编码器时用 HEVC 并记一条警告）。C++ 包装层是 `HostConfig::video_codec`。1.10 的 `rda_host_config` 末尾有 4 字节补齐，旧程序的 `struct_size` 包含它们，所以新字段前放了一个不读的 `reserved0`：旧程序的结构体在它之后就结束，`video_codec` 保持自动。
+- **互通**：协议版本不变。旧接收端不带 `kCapH264`，永远收到 HEVC；旧服务端不会发 H.264。新接收端按 Hello 里的编码建解码器，编码变了（比如换分辨率重发 Hello）就换解码器；关键帧的参数集是哪种编码也认得出来（HEVC 有 VPS，H.264 只有 SPS/PPS），Hello 晚到或丢了也跟得上。接收端握手前服务端还不知道它能不能解 H.264，先按 HEVC 开始，握手后需要时换成 H.264（新会话从关键帧开始，Hello 随画面走）。
+- **编解码**：VideoToolbox 的编码器和解码器都支持 H.264（High 档次、不重排帧、实时；参数集用 `CMVideoFormatDescriptionGetH264ParameterSetAtIndex` / `CMVideoFormatDescriptionCreateFromH264ParameterSets`），其余设置和 HEVC 相同（QP 下限仍要 macOS 13）。码流格式不变：4 字节长度前缀的 NAL，参数集单独放；按 NAL 类型判断参数集、关键帧和分隔符的地方都按编码区分（H.264 的类型是 `nal[0] & 0x1f`）。Linux 不做 H.264：Linux 接收端不声明 `kCapH264`，Linux 服务端总是 HEVC（只要硬件时不试 x265）。
+- **测试**：编码选择用假的测量结果测了各种情况（接收端不能解 → HEVC 且不测；自动 + 硬件 HEVC 够快 → HEVC，不试 H.264；自动 + 硬件 HEVC 慢或没有 + H.264 更快 → H.264；两者都没有或 H.264 不更快 → HEVC；指定 HEVC → 什么都不测；指定 H.264 但接收端不能解 → HEVC 并警告），计时会提前放弃慢的编码器；H.264 的 NAL 拆分、参数集和关键帧判断，编码识别；Hello 里 H.264 和 `kCapH264` 的往返，未知编码仍被拒绝；接收端按 Hello 和关键帧换解码器；连接层把 `kCapH264` 带给服务端；VideoToolbox H.264 编码再解码，尺寸和画面（PSNR）对得上；同一进程里服务端指定 H.264、接收端能解时收到 H.264 并全部解出，接收端不声明时收到 HEVC，自动时这台 Mac 上留在 HEVC；C ABI 里 `video_codec` 的默认值、范围检查和旧结构体。
+
 ## 1.10.4
 
 修正：C ABI 和线上格式不变。

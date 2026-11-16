@@ -195,7 +195,7 @@ host.SetInputHandler([&](const rdaccel::InputEvent& ev) { injector->Inject(ev); 
 
 ## 6. 统计、出错和日志
 
-- 能失败的 C 函数都返回 `rda_status`：`RDA_OK` 是 0，错误是负数。常见的有 `RDA_ERR_INVALID_ARG`（参数或配置不对）、`RDA_ERR_UNSUPPORTED`（这台机器没有 HEVC 编解码器）、`RDA_ERR_PERMISSION`（macOS 没给屏幕录制权限）、`RDA_ERR_CODEC`、`RDA_ERR_TRANSPORT`、`RDA_ERR_CLOSED`、`RDA_ERR_IO`。`rda_status_str()` 给出名字，`rda_last_error()` 给出本线程上一次失败的详细原因。C++ 包装层把详细原因写进 `std::string* error`。
+- 能失败的 C 函数都返回 `rda_status`：`RDA_OK` 是 0，错误是负数。常见的有 `RDA_ERR_INVALID_ARG`（参数或配置不对）、`RDA_ERR_UNSUPPORTED`（这台机器没有视频编解码器）、`RDA_ERR_PERMISSION`（macOS 没给屏幕录制权限）、`RDA_ERR_CODEC`、`RDA_ERR_TRANSPORT`、`RDA_ERR_CLOSED`、`RDA_ERR_IO`。`rda_status_str()` 给出名字，`rda_last_error()` 给出本线程上一次失败的详细原因。C++ 包装层把详细原因写进 `std::string* error`。
 - 库自己从不往终端打印（FFmpeg 的输出也接到了库的日志里）。要看日志就用 `rda_set_log(fn, user, RDA_LOG_INFO)` 或 `rdaccel::SetLogHandler(...)` 装一个接收函数。
 - `Host::stats()` 和 `Viewer::stats()` 随时可以调用，返回的都是累计值，每秒取一次求差就是速率（`examples/serve.cpp` 就是这么做的）。
 - 错误回调（C：`on_error`）只报两类事：`RDA_ERR_UNSUPPORTED` 表示光标通道不可用，画面照常传；其他状态都表示 Host 已经停止、不会再出画面，应用应该销毁它（不在回调里）。
@@ -209,7 +209,7 @@ host.SetInputHandler([&](const rdaccel::InputEvent& ev) { injector->Inject(ev); 
 
 | | macOS | Linux |
 | --- | --- | --- |
-| 编码 / 解码 | VideoToolbox（HEVC 硬件） | FFmpeg：NVENC，否则 libx265；解码 FFmpeg |
+| 编码 / 解码 | VideoToolbox（HEVC 硬件；HEVC 太慢时 H.264，见 `rda_host_config.video_codec`） | FFmpeg：NVENC，否则 libx265；解码 FFmpeg（只有 HEVC） |
 | 屏幕采集 | ScreenCaptureKit，需要"屏幕录制"权限，不采集声音 | X11 MIT-SHM；Wayland 用 xdg-desktop-portal + PipeWire（系统弹窗选屏，见 building.md） |
 | 光标 | CoreGraphics + NSCursor | XFixes；Wayland 用 PipeWire 光标元数据，没有时画进画面 |
 | 系统版本 | macOS 12.3+，Apple Silicon 或 Intel（发布包是 universal） | 见 building.md |

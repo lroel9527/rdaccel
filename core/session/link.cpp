@@ -53,6 +53,7 @@ void Link::Start() {
   if (role_ == Role::kViewer) {
     proto::ViewerHello hello;
     hello.auth_token = options_.auth_token;
+    hello.caps |= options_.extra_caps;
     if (!transport_->CarriesBulk()) hello.caps &= ~proto::kCapBulk;
     SendControl(hello);
   }

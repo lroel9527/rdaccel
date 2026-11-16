@@ -176,7 +176,11 @@ std::optional<Message> ReadHello(ByteReader& r) {
   if (!(r.varint32(m.version) && r.varint32(m.width) && r.varint32(m.height) && r.u8(codec))) {
     return std::nullopt;
   }
-  if (codec != static_cast<uint8_t>(VideoCodec::kHevc)) return std::nullopt;
+  // H.264 (1.11) only goes to viewers that said kCapH264; older viewers
+  // fail here, but are never sent it.
+  if (codec != static_cast<uint8_t>(VideoCodec::kHevc) && codec != static_cast<uint8_t>(VideoCodec::kH264)) {
+    return std::nullopt;
+  }
   // A screen size a viewer can allocate (also bounds what a hostile host
   // can make it do).
   if (m.width == 0 || m.height == 0 || m.width > kMaxScreenSide || m.height > kMaxScreenSide) {

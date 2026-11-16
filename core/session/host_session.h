@@ -3,8 +3,8 @@
 // Host side of a connection: every captured frame goes through tile change
 // detection; frames with no changed tile are skipped entirely. Changed tiles
 // with few colours (text, UI) go to the lossless layer; the rest are encoded
-// as one HEVC picture and sent with the list of regions the viewer should
-// take from it.
+// as one video picture (HEVC, or H.264 where chosen) and sent with the list
+// of regions the viewer should take from it.
 //
 // Before that, when many tiles change, they are checked for scrolling or
 // window moves (tile/motion.h); moved tiles become copy commands. Tiles whose
@@ -16,9 +16,9 @@
 // encoder nothing (often no video frame at all), and the encoder never spends
 // bits on text it would blur anyway.
 //
-// Areas that behave like video (tile/video_region.h) get their own HEVC
-// stream, cropped to the area, with its own bitrate and quality floor. Their
-// tiles skip the classification above entirely; the full-screen encoder
+// Areas that behave like video (tile/video_region.h) get their own video
+// stream (of the session's codec), cropped to the area, with its own bitrate
+// and quality floor. Their tiles skip the classification above entirely; the full-screen encoder
 // keeps seeing the area as it was when the area opened (so it spends nothing
 // there), and when the area goes quiet its tiles are sent once more through
 // the normal path, so a paused video ends up sharp.
@@ -125,6 +125,9 @@ struct HostOptions {
   bool hello_on_video = false;
   // Frame ids continue across sessions of one host.
   uint64_t first_frame_id = 1;
+  // What the encoder produces, named in the Hello; video area encoders are
+  // created for the same codec (the viewer decodes them by the Hello).
+  codec::VideoCodec codec = codec::VideoCodec::kHevc;
 };
 
 class HostSession {

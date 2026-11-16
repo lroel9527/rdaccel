@@ -39,6 +39,16 @@ void SetRate(VTSessionRef s, int64_t bps) { SetIntProp(s, kVTCompressionProperty
 // Encoder
 // ---------------------------------------------------------------------------
 
+bool IsH264(codec::VideoCodec c) { return c == codec::VideoCodec::kH264; }
+
+// The parameter set at `index` of an encoder's format description, or the
+// count (and NAL length size) with a null `ps`.
+OSStatus GetParameterSet(codec::VideoCodec c, CMFormatDescriptionRef fmt, size_t index,
+                         const uint8_t** ps, size_t* size, size_t* count, int* nal_len_size) {
+  return IsH264(c) ? CMVideoFormatDescriptionGetH264ParameterSetAtIndex(fmt, index, ps, size, count, nal_len_size)
+                   : CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(fmt, index, ps, size, count, nal_len_size);
+}
+
 class VtHevcEncoder final : public codec::IHevcEncoder {
  public:
   ~VtHevcEncoder() override {
@@ -68,13 +78,14 @@ class VtHevcEncoder final : public codec::IHevcEncoder {
     if (mode == Mode::kLowLatencyHardware) {
       spec[(id)kVTVideoEncoderSpecification_EnableLowLatencyRateControl] = @YES;
     }
+    const bool h264 = IsH264(cfg.codec);
     const OSStatus st = VTCompressionSessionCreate(
-        kCFAllocatorDefault, cfg.width, cfg.height, kCMVideoCodecType_HEVC,
+        kCFAllocatorDefault, cfg.width, cfg.height, h264 ? kCMVideoCodecType_H264 : kCMVideoCodecType_HEVC,
         (__bridge CFDictionaryRef)spec, (__bridge CFDictionaryRef)source_attrs, kCFAllocatorDefault,
         &VtHevcEncoder::OnOutput, this, &session_);
     if (st != noErr) {
       session_ = nullptr;
-      if (error) *error = OsStatusText("VTCompressionSessionCreate(HEVC)", st);
+      if (error) *error = OsStatusText(h264 ? "VTCompressionSessionCreate(H.264)" : "VTCompressionSessionCreate(HEVC)", st);
       return false;
     }
     low_latency_ = mode == Mode::kLowLatencyHardware;
@@ -90,7 +101,8 @@ class VtHevcEncoder final : public codec::IHevcEncoder {
 
     SetProp(session_, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue);
     SetProp(session_, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
-    SetProp(session_, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_HEVC_Main_AutoLevel);
+    SetProp(session_, kVTCompressionPropertyKey_ProfileLevel,
+            h264 ? kVTProfileLevel_H264_High_AutoLevel : kVTProfileLevel_HEVC_Main_AutoLevel);
     // No periodic keyframes: the host asks for one when it needs it.
     SetIntProp(session_, kVTCompressionPropertyKey_MaxKeyFrameInterval, 1 << 30);
     SetIntProp(session_, kVTCompressionPropertyKey_ExpectedFrameRate, cfg.fps);
@@ -111,9 +123,12 @@ class VtHevcEncoder final : public codec::IHevcEncoder {
   }
 
   std::string name() const override {
-    if (!hardware_) return "VideoToolbox HEVC (software)";
-    return low_latency_ ? "VideoToolbox HEVC (low-latency)" : "VideoToolbox HEVC";
+    const std::string base = std::string("VideoToolbox ") + codec::VideoCodecName(cfg_.codec);
+    if (!hardware_) return base + " (software)";
+    return low_latency_ ? base + " (low-latency)" : base;
   }
+  codec::VideoCodec codec() const override { return cfg_.codec; }
+  bool hardware() const { return hardware_; }
 
   // Encodes one gray keyframe. Some machines (e.g. virtual Macs) create a
   // session but then fail every frame with kVTVideoEncoderNotAvailableNowErr,
@@ -208,9 +223,8 @@ class VtHevcEncoder final : public codec::IHevcEncoder {
     CMFormatDescriptionRef fmt = CMSampleBufferGetFormatDescription(sample);
     int nal_len_size = 4;
     size_t ps_count = 0;
-    if (CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(fmt, 0, nullptr, nullptr, &ps_count,
-                                                           &nal_len_size) != noErr) {
-      callback_error_ = "could not read the HEVC format description";
+    if (GetParameterSet(cfg_.codec, fmt, 0, nullptr, nullptr, &ps_count, &nal_len_size) != noErr) {
+      callback_error_ = "could not read the encoder's format description";
       return;
     }
 
@@ -225,7 +239,7 @@ class VtHevcEncoder final : public codec::IHevcEncoder {
     // Re-frame with 4-byte lengths (the wire format) and look at the NAL
     // types directly. The NotSync attachment is not reliable across encoders
     // (the software HEVC encoder does not mark its first frame), but an IRAP
-    // NAL unit always means a keyframe. Parameter sets that an encoder puts
+    // (H.264: IDR) NAL unit always means a keyframe. Parameter sets that an encoder puts
     // in-band are moved out, as the wire format carries them separately.
     size_t i = 0;
     while (i + static_cast<size_t>(nal_len_size) <= raw.size()) {
@@ -235,13 +249,13 @@ class VtHevcEncoder final : public codec::IHevcEncoder {
       if (len == 0 || len > raw.size() - i) break;
       const std::span<const uint8_t> nal(raw.data() + i, len);
       i += len;
-      const uint8_t type = codec::HevcNalTypeOf(nal);
-      if (codec::IsHevcParameterSet(type)) {
+      const uint8_t type = codec::NalTypeOf(cfg_.codec, nal);
+      if (codec::IsParameterSetNal(cfg_.codec, type)) {
         au.parameter_sets.emplace_back(nal.begin(), nal.end());
         continue;
       }
-      if (type == codec::kNalAud) continue;
-      if (codec::IsHevcIrap(type)) au.keyframe = true;
+      if (codec::IsAudNal(cfg_.codec, type)) continue;
+      if (codec::IsKeyframeNal(cfg_.codec, type)) au.keyframe = true;
       codec::AppendLengthPrefixed(nal, au.nal_data);
     }
     if (au.nal_data.empty()) {
@@ -254,8 +268,7 @@ class VtHevcEncoder final : public codec::IHevcEncoder {
       for (size_t k = 0; k < ps_count; ++k) {
         const uint8_t* ps = nullptr;
         size_t ps_size = 0;
-        if (CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(fmt, k, &ps, &ps_size, nullptr,
-                                                               nullptr) == noErr) {
+        if (GetParameterSet(cfg_.codec, fmt, k, &ps, &ps_size, nullptr, nullptr) == noErr) {
           au.parameter_sets.emplace_back(ps, ps + ps_size);
         }
       }
@@ -280,9 +293,10 @@ class VtHevcEncoder final : public codec::IHevcEncoder {
 
 class VtHevcDecoder final : public codec::IHevcDecoder {
  public:
+  explicit VtHevcDecoder(codec::VideoCodec codec) : codec_(codec) {}
   ~VtHevcDecoder() override { Reset(); }
 
-  std::string name() const override { return "VideoToolbox HEVC"; }
+  std::string name() const override { return std::string("VideoToolbox ") + codec::VideoCodecName(codec_); }
   const std::string& last_error() const override { return error_; }
 
   bool Decode(const std::vector<std::vector<uint8_t>>& parameter_sets,
@@ -358,10 +372,15 @@ class VtHevcDecoder final : public codec::IHevcDecoder {
       sizes.push_back(p.size());
     }
     CMFormatDescriptionRef fmt = nullptr;
-    OSStatus st = CMVideoFormatDescriptionCreateFromHEVCParameterSets(
-        kCFAllocatorDefault, ptrs.size(), ptrs.data(), sizes.data(), 4, nullptr, &fmt);
+    OSStatus st =
+        IsH264(codec_) ? CMVideoFormatDescriptionCreateFromH264ParameterSets(kCFAllocatorDefault, ptrs.size(),
+                                                                             ptrs.data(), sizes.data(), 4, &fmt)
+                       : CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                             kCFAllocatorDefault, ptrs.size(), ptrs.data(), sizes.data(), 4, nullptr, &fmt);
     if (st != noErr) {
-      error_ = OsStatusText("CMVideoFormatDescriptionCreateFromHEVCParameterSets", st);
+      error_ = OsStatusText(IsH264(codec_) ? "CMVideoFormatDescriptionCreateFromH264ParameterSets"
+                                           : "CMVideoFormatDescriptionCreateFromHEVCParameterSets",
+                            st);
       return false;
     }
     if (session_ && VTDecompressionSessionCanAcceptFormatDescription(session_, fmt)) {
@@ -400,6 +419,7 @@ class VtHevcDecoder final : public codec::IHevcDecoder {
     }
   }
 
+  const codec::VideoCodec codec_;
   VTDecompressionSessionRef session_ = nullptr;
   CMFormatDescriptionRef format_ = nullptr;
   CVPixelBufferRef decoded_ = nullptr;
@@ -409,29 +429,38 @@ class VtHevcDecoder final : public codec::IHevcDecoder {
 
 }  // namespace
 
-std::unique_ptr<codec::IHevcEncoder> CreateVtHevcEncoder(const codec::EncoderConfig& cfg,
-                                                         std::string* error) {
+std::unique_ptr<codec::IHevcEncoder> CreateVtEncoder(const codec::EncoderConfig& cfg, std::string* error) {
   using Mode = VtHevcEncoder::Mode;
   std::string errors;
   for (Mode mode : {Mode::kLowLatencyHardware, Mode::kHardware, Mode::kAny}) {
+    if (mode == Mode::kAny && cfg.hardware_only) break;
     std::string err;
     auto probe = std::make_unique<VtHevcEncoder>();
     if (probe->Init(cfg, mode, &err) && probe->Probe(&err)) {
-      // Fresh session for the real stream, so it starts at frame 0.
-      probe.reset();
-      auto enc = std::make_unique<VtHevcEncoder>();
-      if (enc->Init(cfg, mode, &err)) return enc;
+      // A session asked for as hardware that VideoToolbox runs in software
+      // anyway is not what hardware_only means.
+      if (cfg.hardware_only && !probe->hardware()) {
+        err = "runs in software";
+      } else {
+        // Fresh session for the real stream, so it starts at frame 0.
+        probe.reset();
+        auto enc = std::make_unique<VtHevcEncoder>();
+        if (enc->Init(cfg, mode, &err)) return enc;
+      }
     }
     static const char* kNames[] = {"low-latency hardware", "hardware", "any"};
     if (!errors.empty()) errors += "; ";
     errors += std::string(kNames[static_cast<int>(mode)]) + ": " + err;
   }
-  if (error) *error = "no usable VideoToolbox HEVC encoder (" + errors + ")";
+  if (error) {
+    *error = std::string("no usable VideoToolbox ") + (cfg.hardware_only ? "hardware " : "") +
+             codec::VideoCodecName(cfg.codec) + " encoder (" + errors + ")";
+  }
   return nullptr;
 }
 
-std::unique_ptr<codec::IHevcDecoder> CreateVtHevcDecoder(std::string*) {
-  return std::make_unique<VtHevcDecoder>();
+std::unique_ptr<codec::IHevcDecoder> CreateVtDecoder(codec::VideoCodec codec, std::string*) {
+  return std::make_unique<VtHevcDecoder>(codec);
 }
 
 }  // namespace rdacore::platform

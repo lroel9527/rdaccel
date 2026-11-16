@@ -75,7 +75,7 @@ struct Received {
 }  // namespace
 
 TEST(PublicApi, VersionAndPlatform) {
-  EXPECT_STREQ(rdaccel::Version(), "1.10.4");
+  EXPECT_STREQ(rdaccel::Version(), "1.11.0");
   EXPECT_NE(std::string(rdaccel::PlatformName()), "");
   const auto a = rdaccel::NowMicros();
   EXPECT_GE(rdaccel::NowMicros(), a);
@@ -108,6 +108,38 @@ TEST(PublicApi, HostToViewerOverLocalPipe) {
   EXPECT_GT(got.min_psnr, 30.0);
   EXPECT_EQ(viewer->stats().decode_errors, 0u);
   EXPECT_EQ(host.stats().frames_encoded, static_cast<uint64_t>(kFrames));
+}
+
+// 1.11: a host told to send H.264 does so to a viewer that decodes it (on
+// macOS; a Linux viewer does not say it does, and gets HEVC).
+TEST(PublicApi, H264WhenAskedForAndTheViewerDecodesIt) {
+  auto [host_end, viewer_end] = rdaccel::CreateLocalPipe();
+  Received got;
+  std::string err;
+  auto viewer = rdaccel::Viewer::Create(std::move(viewer_end), got.Handlers(), &err);
+  ASSERT_TRUE(viewer) << err;
+  rdaccel::HostConfig cfg;
+  cfg.fps = 30;
+  cfg.bitrate_bps = 4'000'000;
+  cfg.video_codec = rdaccel::HostConfig::VideoCodec::kH264;
+  rdaccel::Host host(std::move(host_end), cfg);
+  ASSERT_TRUE(host.ok());
+  for (int i = 0; i < 200 && host.state() != rdaccel::ConnectionState::kConnected; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  ASSERT_EQ(host.state(), rdaccel::ConnectionState::kConnected);
+  constexpr int kFrames = 20;
+  std::vector<uint8_t> px;
+  for (int i = 0; i < kFrames; ++i) {
+    const auto dirty = rdaccel::RenderTestPattern(i, kW, kH, px);
+    ASSERT_TRUE(host.SubmitFrame({px.data(), kW, kH, kW * 4}, rdaccel::NowMicros(), dirty, &err)) << err;
+  }
+  ASSERT_TRUE(got.WaitFor(kFrames));
+  const bool mac = std::string(rdaccel::PlatformName()) == "macOS";
+  EXPECT_NE(host.encoder_name().find(mac ? "H.264" : "HEVC"), std::string::npos) << host.encoder_name();
+  std::lock_guard<std::mutex> lock(got.mu);
+  EXPECT_GT(got.min_psnr, 30.0);
+  EXPECT_EQ(viewer->stats().decode_errors, 0u);
 }
 
 // Both handler forms (and clearing it) compile and are accepted: code

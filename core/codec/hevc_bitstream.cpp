@@ -58,16 +58,28 @@ void AppendAnnexB(std::span<const uint8_t> nal, std::vector<uint8_t>& out) {
   out.insert(out.end(), nal.begin(), nal.end());
 }
 
-HevcAccessUnit AnnexBToAccessUnit(std::span<const uint8_t> annexb) {
+std::optional<VideoCodec> DetectCodec(const std::vector<std::vector<uint8_t>>& parameter_sets) {
+  bool h264_sps = false;
+  for (const auto& ps : parameter_sets) {
+    if (ps.empty()) continue;
+    if (HevcNalTypeOf(ps) == kNalVps) return VideoCodec::kHevc;
+    // forbidden_zero_bit clear, type 7.
+    if ((ps[0] & 0x80) == 0 && H264NalTypeOf(ps) == kH264NalSps) h264_sps = true;
+  }
+  if (h264_sps) return VideoCodec::kH264;
+  return std::nullopt;
+}
+
+HevcAccessUnit AnnexBToAccessUnit(std::span<const uint8_t> annexb, VideoCodec codec) {
   HevcAccessUnit au;
   for (auto nal : SplitAnnexB(annexb)) {
-    const uint8_t type = HevcNalTypeOf(nal);
-    if (type == kNalAud) continue;
-    if (IsHevcParameterSet(type)) {
+    const uint8_t type = NalTypeOf(codec, nal);
+    if (IsAudNal(codec, type)) continue;
+    if (IsParameterSetNal(codec, type)) {
       au.parameter_sets.emplace_back(nal.begin(), nal.end());
       continue;
     }
-    if (IsHevcIrap(type)) au.keyframe = true;
+    if (IsKeyframeNal(codec, type)) au.keyframe = true;
     AppendLengthPrefixed(nal, au.nal_data);
   }
   return au;

@@ -30,6 +30,15 @@ struct HostConfig {
   // uses VideoToolbox; Linux accepts "hevc_nvenc", "libx265" or
   // "hevc_vaapi" (experimental, never picked automatically).
   std::string encoder;
+  // Which video codec to send (rda_host_config.video_codec). kAuto: HEVC,
+  // unless the viewer decodes H.264 and this machine's hardware HEVC encoder
+  // is missing or below 30 fps at the screen's size while hardware H.264 is
+  // faster (measured once per size, a fraction of a second). kHevc: always
+  // HEVC, nothing measured. kH264: H.264 for viewers that decode it, HEVC
+  // (with a warning) for those that do not. Viewers older than 1.11 always
+  // get HEVC.
+  enum class VideoCodecPreference : int32_t { kAuto = 0, kHevc = 1, kH264 = 2 };
+  VideoCodecPreference video_codec = VideoCodecPreference::kAuto;
 
   // Only used by StartScreenCapture(). 0 = native resolution. Otherwise the
   // screen is captured scaled to this size (even numbers), and the cursor

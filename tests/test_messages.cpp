@@ -175,13 +175,36 @@ TEST(Messages, CursorShapeSizeMustMatch) {
   EXPECT_FALSE(p.error().empty());
 }
 
-TEST(Messages, H264IsRejected) {
-  // Byte 1 was H.264 in early drafts; the protocol is HEVC-only now.
-  auto bytes = Encode(Hello{kProtocolVersion, 1, 1, VideoCodec::kHevc});
-  bytes[5] = 1;  // type, length, version, width, height, then the codec
+TEST(Messages, H264HelloAndCapabilityRoundTrip) {
+  // 1.11: codec 1 is H.264, for viewers that said kCapH264.
+  const Hello h{kProtocolVersion, 2880, 1800, VideoCodec::kH264, kMinViewerVersion, kCapsAll};
+  auto bytes = Encode(h);
+  EXPECT_EQ(bytes[7], 1) << "type, length, version, width (2), height (2), then the codec";
+  ViewerHello vh;
+  vh.caps = kCapsAll | kCapH264;
+  EncodeTo(vh, bytes);
   StreamParser p;
   p.Append(bytes);
-  EXPECT_FALSE(p.Next().has_value());
+  auto got = p.Next();
+  ASSERT_TRUE(got.has_value()) << p.error();
+  EXPECT_EQ(std::get<Hello>(*got), h);
+  EXPECT_EQ(std::get<Hello>(*got).codec, VideoCodec::kH264);
+  got = p.Next();
+  ASSERT_TRUE(got.has_value()) << p.error();
+  EXPECT_EQ(std::get<ViewerHello>(*got).caps & kCapH264, kCapH264);
+  // Not something every viewer has.
+  EXPECT_EQ(kCapsAll & kCapH264, 0u);
+  EXPECT_EQ(kCapH264 & (kCapMessages | kCapTextInput | kCapContextTiles | kCapContextTiles64 | kCapBulk), 0u);
+}
+
+TEST(Messages, UnknownCodecIsRejected) {
+  for (uint8_t codec : {0, 3, 255}) {
+    auto bytes = Encode(Hello{kProtocolVersion, 1, 1, VideoCodec::kHevc});
+    bytes[5] = codec;  // type, length, version, width, height, then the codec
+    StreamParser p;
+    p.Append(bytes);
+    EXPECT_FALSE(p.Next().has_value()) << int(codec);
+  }
 }
 
 TEST(Messages, HugeCountIsRejectedWithoutAllocating) {

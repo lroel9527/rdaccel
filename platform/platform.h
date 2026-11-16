@@ -27,13 +27,30 @@ bool ListDisplays(std::vector<capture::DisplayInfo>& out, std::string* error);
 // failure.
 std::unique_ptr<capture::ICapturer> CreateScreenCapturer(std::string* error);
 
-// `prefer` optionally names a backend to try first (Linux: "hevc_nvenc",
-// "libx265"; ignored on macOS, which always uses VideoToolbox).
-std::unique_ptr<codec::IHevcEncoder> CreateHevcEncoder(const codec::EncoderConfig& cfg,
-                                                       const std::string& prefer,
-                                                       std::string* error);
+// An encoder for cfg.codec (HEVC, or H.264 where the platform has it: macOS;
+// Linux has HEVC only). `prefer` optionally names a backend to try first
+// (Linux: "hevc_nvenc", "libx265"; ignored on macOS, which always uses
+// VideoToolbox). With cfg.hardware_only, null rather than a software encoder.
+std::unique_ptr<codec::IHevcEncoder> CreateVideoEncoder(const codec::EncoderConfig& cfg,
+                                                        const std::string& prefer,
+                                                        std::string* error);
 
-std::unique_ptr<codec::IHevcDecoder> CreateHevcDecoder(std::string* error);
+// A decoder for `codec`; null with `error` set where the platform has none.
+std::unique_ptr<codec::IHevcDecoder> CreateVideoDecoder(codec::VideoCodec codec, std::string* error);
+
+// Whether CreateVideoDecoder() handles `codec` (a viewer then says so to the
+// host: proto::kCapH264).
+bool CanDecode(codec::VideoCodec codec);
+
+// The names from before H.264: CreateHevcEncoder follows cfg.codec as well.
+inline std::unique_ptr<codec::IHevcEncoder> CreateHevcEncoder(const codec::EncoderConfig& cfg,
+                                                              const std::string& prefer,
+                                                              std::string* error) {
+  return CreateVideoEncoder(cfg, prefer, error);
+}
+inline std::unique_ptr<codec::IHevcDecoder> CreateHevcDecoder(std::string* error) {
+  return CreateVideoDecoder(codec::VideoCodec::kHevc, error);
+}
 
 // The system cursor, relative to display `display_index` (invisible while it
 // is on another display). Null with `error` set if it cannot be read (e.g. no

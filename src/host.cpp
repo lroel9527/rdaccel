@@ -7,12 +7,14 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
 #include <thread>
 
 #include "capture/capturer.h"
+#include "codec/codec_choice.h"
 #include "log/log.h"
 #include "platform.h"
 #include "session/cursor_channel.h"
@@ -204,6 +206,63 @@ struct Host::Impl {
   int32_t width = 0, height = 0;
 
   std::unique_ptr<session::RateController> rate;  // only touched under submit_mu
+
+  // The video codec (HostConfig::video_codec, codec/codec_choice.h). All
+  // under submit_mu. The session's codec; the automatic choice per screen
+  // size for a viewer that decodes H.264 (measured once, so video areas and
+  // later sessions at that size do not measure again); sizes where no H.264
+  // encoder could be made; the reason last logged.
+  codec::VideoCodec session_codec = codec::VideoCodec::kHevc;
+  std::map<std::pair<int32_t, int32_t>, codec::VideoCodec> codec_choices;
+  std::map<std::pair<int32_t, int32_t>, bool> h264_failed;
+  std::string codec_reason_logged;
+
+  double MeasureHardware(codec::VideoCodec c, int32_t w, int32_t h) {
+    codec::EncoderConfig cfg{w, h, config.fps, rate ? rate->encoder_bps() : StartBitrate(), config.min_qp};
+    cfg.codec = c;
+    cfg.hardware_only = true;
+    std::string err;
+    const uint64_t t0 = capture::MonotonicMicros();
+    auto enc = platform::CreateVideoEncoder(cfg, config.encoder, &err);
+    const double fps = enc ? codec::MeasureEncodeFps(*enc, w, h) : 0;
+    const uint64_t ms = (capture::MonotonicMicros() - t0) / 1000;
+    if (enc) {
+      log::Info("video codec: " + enc->name() + " encodes " + std::to_string(w) + "x" + std::to_string(h) +
+                " at " + std::to_string(static_cast<int>(fps)) + " fps (measured in " + std::to_string(ms) + " ms)");
+    } else {
+      log::Info(std::string("video codec: no hardware ") + codec::VideoCodecName(c) + " encoder for " +
+                std::to_string(w) + "x" + std::to_string(h) + " (" + err + ")");
+    }
+    return fps;
+  }
+
+  // The codec for a w x h picture to the current viewer.
+  codec::VideoCodec WantedCodec(int32_t w, int32_t h) {
+    const auto pref = static_cast<codec::CodecPreference>(config.video_codec);
+    if (pref == codec::CodecPreference::kHevc) return codec::VideoCodec::kHevc;
+    const auto link = CurrentLink();
+    const bool viewer_h264 = (link->peer_caps() & proto::kCapH264) != 0;
+    const std::pair<int32_t, int32_t> size{w, h};
+    if (viewer_h264 && h264_failed.count(size)) return codec::VideoCodec::kHevc;
+    const bool cacheable = viewer_h264 && pref == codec::CodecPreference::kAuto;
+    if (cacheable) {
+      if (auto it = codec_choices.find(size); it != codec_choices.end()) return it->second;
+    }
+    const auto choice = codec::ChooseVideoCodec(
+        pref, viewer_h264, w, h, [this](codec::VideoCodec c, int32_t cw, int32_t ch) { return MeasureHardware(c, cw, ch); });
+    if (cacheable) codec_choices[size] = choice.codec;
+    // Once per change, and only about a viewer that is there (before it has
+    // said hello its capabilities are not known: HEVC meanwhile).
+    if (choice.reason != codec_reason_logged && link->state() == ConnectionState::kConnected) {
+      codec_reason_logged = choice.reason;
+      if (choice.warn) {
+        log::Warn("video codec: " + choice.reason);
+      } else {
+        log::Info("video codec: " + choice.reason);
+      }
+    }
+    return choice.codec;
+  }
   // Text mode (HostConfig::text_mode): as asked for, and as the session and
   // the rate controller were last set up (under submit_mu).
   // The rate control is the same either way: a lower start and floor (for
@@ -426,17 +485,30 @@ struct Host::Impl {
       return false;
     }
     const bool resized = session && (f.bgra.width != width || f.bgra.height != height);
+    const codec::VideoCodec want_codec = WantedCodec(f.bgra.width, f.bgra.height);
+    const bool recodec = session && !resized && want_codec != session_codec;
+    // A new session in place of the running one, for the same viewer.
+    const bool restart = resized || recodec;
     const bool want_text = text_mode;
     if (want_text != text_applied) {
       text_applied = want_text;
       if (session) session->SetTextMode(want_text);
       log::Info(want_text ? "text mode on" : "text mode off");
     }
-    if (!session || resized) {
+    if (!session || restart) {
       codec::EncoderConfig cfg{f.bgra.width, f.bgra.height, config.fps, rate ? rate->encoder_bps() : StartBitrate(),
                                config.min_qp};
+      cfg.codec = want_codec;
       std::string err;
-      auto enc = platform::CreateHevcEncoder(cfg, config.encoder, &err);
+      auto enc = platform::CreateVideoEncoder(cfg, config.encoder, &err);
+      if (!enc && cfg.codec == codec::VideoCodec::kH264) {
+        // Not again at this size: HEVC as before H.264 existed.
+        h264_failed[{cfg.width, cfg.height}] = true;
+        log::Warn("video codec: no H.264 encoder (" + err + "); HEVC");
+        cfg.codec = codec::VideoCodec::kHevc;
+        err.clear();
+        enc = platform::CreateVideoEncoder(cfg, config.encoder, &err);
+      }
       if (!enc) {
         failed = true;
         if (error) *error = err;
@@ -446,6 +518,10 @@ struct Host::Impl {
       {
         std::lock_guard<std::mutex> l(mu);
         encoder_name = enc->name();
+      }
+      if (recodec || (session && enc->codec() != session_codec)) {
+        log::Info(std::string("video codec ") + codec::VideoCodecName(session_codec) + " -> " +
+                  codec::VideoCodecName(enc->codec()) + " (" + enc->name() + ")");
       }
       if (resized) {
         log::Info("resolution " + std::to_string(width) + "x" + std::to_string(height) + " -> " +
@@ -469,7 +545,7 @@ struct Host::Impl {
       if (config.video_regions) {
         const std::string prefer = config.encoder;
         opts.region_encoder_factory = [prefer](const codec::EncoderConfig& c, std::string* e) {
-          return platform::CreateHevcEncoder(c, prefer, e);
+          return platform::CreateVideoEncoder(c, prefer, e);  // c.codec = the session's
         };
       }
       opts.fps = config.fps;
@@ -477,25 +553,28 @@ struct Host::Impl {
       opts.region_min_qp = config.video_region_min_qp;
       opts.region_bitrate_bps = config.video_region_bitrate_bps;
       opts.own_receiver = false;  // the link receives and passes on
-      // After a resolution change the new Hello travels with the frames, so
-      // the viewer switches sizes exactly between the old and new pictures.
-      opts.hello_on_video = resized;
+      opts.codec = enc->codec();
+      session_codec = enc->codec();
+      // After a resolution (or codec) change the new Hello travels with the
+      // frames, so the viewer switches exactly between the old and new
+      // pictures.
+      opts.hello_on_video = restart;
       HostStats carried;
-      if (resized) {
+      if (restart) {
         carried = session->stats();
         opts.first_frame_id = session->next_frame_id();
         std::lock_guard<std::mutex> l(mu);
-        ++resolution_changes;
+        if (resized) ++resolution_changes;
       }
       auto next = std::make_unique<session::HostSession>(gate.get(), std::move(enc), width,
                                                          height, opts);
-      if (resized) {
+      if (restart) {
         next->AdoptStats(carried);
       } else if (carry_next) {  // the next viewer: the counts go on
         next->AdoptStats(*carry_next);
         carry_next.reset();
       }
-      if (rate && resized) next->SetBitrate(rate->encoder_bps());
+      if (rate && restart) next->SetBitrate(rate->encoder_bps());
       std::unique_ptr<session::HostSession> old;
       {
         std::lock_guard<std::mutex> l(session_mu);

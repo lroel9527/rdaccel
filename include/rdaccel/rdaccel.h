@@ -43,8 +43,8 @@ extern "C" {
 /* ---- version ------------------------------------------------------------ */
 
 #define RDA_VERSION_MAJOR 1
-#define RDA_VERSION_MINOR 10
-#define RDA_VERSION_PATCH 4
+#define RDA_VERSION_MINOR 11
+#define RDA_VERSION_PATCH 0
 /* "rc1" and so on for a pre-release, "" for a release. rda_version() does
  * not include it; rda_version_string() does ("1.0.0-rc1"). */
 #define RDA_VERSION_PRERELEASE ""
@@ -66,7 +66,7 @@ typedef enum rda_status {
   RDA_OK = 0,
   RDA_ERR_INVALID_ARG = -1,  /* null pointer, bad size, unknown option */
   RDA_ERR_NO_MEMORY = -2,
-  RDA_ERR_UNSUPPORTED = -3,  /* e.g. no HEVC encoder or decoder on this machine */
+  RDA_ERR_UNSUPPORTED = -3,  /* e.g. no video encoder or decoder on this machine */
   RDA_ERR_PERMISSION = -4,   /* e.g. macOS Screen Recording not granted */
   RDA_ERR_CODEC = -5,        /* encoder or decoder failed */
   RDA_ERR_TRANSPORT = -6,    /* socket or connection error */
@@ -397,6 +397,11 @@ RDA_API void rda_transport_destroy(rda_transport* t);
 
 typedef struct rda_host rda_host;
 
+/* 1.11: rda_host_config.video_codec. */
+#define RDA_VIDEO_CODEC_AUTO 0
+#define RDA_VIDEO_CODEC_HEVC 1
+#define RDA_VIDEO_CODEC_H264 2
+
 typedef struct rda_host_config {
   uint32_t struct_size;
 
@@ -504,6 +509,24 @@ typedef struct rda_host_config {
    * the bitrate are as without text mode (1.9.1); the cursor is sent at
    * most 60 times a second. See rda_host_set_text_mode(). */
   int32_t text_mode; /* 0 */
+
+  /* Never read. Up to 1.10 these 4 bytes were the struct's unnamed tail
+   * padding, included in an older caller's struct_size: video_codec comes
+   * after them so that such a caller's struct_size ends before it. */
+  int32_t reserved0;
+
+  /* 1.11. Which video codec the host sends. RDA_VIDEO_CODEC_AUTO: HEVC,
+   * unless the viewer decodes H.264 and this machine's hardware HEVC encoder
+   * is missing, or encodes the screen's size at under 30 fps while hardware
+   * H.264 is faster (an Intel Mac of 2016: HEVC 15 fps, H.264 52 fps at
+   * 2880 x 1800). Measured once per screen size, in a fraction of a second,
+   * when such a viewer connects; logged. RDA_VIDEO_CODEC_HEVC: always HEVC,
+   * nothing measured (as before 1.11). RDA_VIDEO_CODEC_H264: H.264 for
+   * viewers that decode it; HEVC, with a warning in the log, for those that
+   * do not or when no H.264 encoder can be made. Viewers older than 1.11,
+   * and Linux viewers, always get HEVC. rda_host_encoder_name() tells which
+   * ("VideoToolbox H.264"). */
+  int32_t video_codec; /* RDA_VIDEO_CODEC_AUTO */
 } rda_host_config;
 
 typedef struct rda_host_stats {

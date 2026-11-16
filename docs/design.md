@@ -9,7 +9,7 @@
 | 延迟 | 局域网端到端低于 50 ms；公网在网络 RTT 之上再加不超过 40 ms |
 | 文字 | 必须清晰；可以先给模糊预览，停下后很快补成无损 |
 | 平台 | macOS（Apple Silicon，VideoToolbox 硬件编解码）和 Linux（X11 / Wayland，FFmpeg） |
-| 编码 | 只用 HEVC，没有 H.264 回退 |
+| 编码 | 默认 HEVC；本机 HEVC 编码器缺失或太慢（不到 30 fps）而接收端能解 H.264 时才回退到 H.264（1.11） |
 
 实测数字见 [评测](benchmarks.md)。
 
@@ -46,7 +46,7 @@ rdaccel 是给其他程序集成的库，不是应用。划分原则是：做错
 | 输入事件和应用消息（剪贴板等）的可靠传送 | 库 |
 | 输入注入（CGEvent、XTest） | 可选模块 `rdaccel::Injector` |
 | 界面、配对、账号、信令、NAT 穿透、中继、文件传输 | 应用 |
-| 多个观看者、Windows、H.264 / AV1、音频 | 暂不做 |
+| 多个观看者、Windows、AV1、音频；Linux 上的 H.264 | 暂不做 |
 
 ### 接口约定
 

@@ -40,14 +40,26 @@ std::unique_ptr<capture::ICapturer> CreateScreenCapturer(std::string* error) {
   return std::make_unique<X11Capturer>();
 }
 
-std::unique_ptr<codec::IHevcEncoder> CreateHevcEncoder(const codec::EncoderConfig& cfg,
-                                                       const std::string& prefer,
-                                                       std::string* error) {
+// HEVC only: H.264 (the fallback for slow HEVC hosts, 1.11) is not built on
+// Linux, so a Linux viewer does not advertise it and a Linux host keeps HEVC.
+std::unique_ptr<codec::IHevcEncoder> CreateVideoEncoder(const codec::EncoderConfig& cfg,
+                                                        const std::string& prefer,
+                                                        std::string* error) {
+  if (cfg.codec != codec::VideoCodec::kHevc) {
+    if (error) *error = "H.264 encoding is not supported on Linux";
+    return nullptr;
+  }
   return CreateFfmpegHevcEncoder(cfg, prefer, error);
 }
 
-std::unique_ptr<codec::IHevcDecoder> CreateHevcDecoder(std::string* error) {
+std::unique_ptr<codec::IHevcDecoder> CreateVideoDecoder(codec::VideoCodec codec, std::string* error) {
+  if (codec != codec::VideoCodec::kHevc) {
+    if (error) *error = "H.264 decoding is not supported on Linux";
+    return nullptr;
+  }
   return CreateFfmpegHevcDecoder(error);
 }
+
+bool CanDecode(codec::VideoCodec codec) { return codec == codec::VideoCodec::kHevc; }
 
 }  // namespace rdacore::platform
