@@ -130,5 +130,22 @@ TEST(FallbackCapturer, TriesThePreferredOneAgainOnEveryStart) {
   EXPECT_EQ(c.fallback_started, 2);
 }
 
+TEST(FallbackCapturer, SkipsThePreferredOneWhenToldItFailedBefore) {
+  Counts c;
+  auto cap = Make(c, true, true, true, true);  // the preferred one would work now
+  cap->SkipPreferred(true);  // but its owner saw it fail earlier in the session
+  const auto t = std::chrono::steady_clock::now();
+  ASSERT_TRUE(cap->Start({}, [&](const CapturedFrame&) { ++c.frames; }));
+  EXPECT_LT(std::chrono::steady_clock::now() - t, 200ms);  // no wait for it
+  EXPECT_TRUE(cap->using_fallback());
+  EXPECT_EQ(c.preferred_started, 0);
+  EXPECT_EQ(c.fallback_started, 1);
+  cap->Stop();
+  cap->SkipPreferred(false);  // a new session asks the preferred one again
+  ASSERT_TRUE(cap->Start({}, [](const CapturedFrame&) {}));
+  EXPECT_FALSE(cap->using_fallback());
+  EXPECT_EQ(c.preferred_started, 1);
+}
+
 }  // namespace
 }  // namespace rdacore::capture

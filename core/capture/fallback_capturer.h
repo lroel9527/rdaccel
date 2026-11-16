@@ -3,7 +3,9 @@
 // A capturer that uses the preferred (newer) capture API and falls back to an
 // older one only when the newer one does not work here: Start() fails, or
 // no picture arrives within a while. The newer one is tried again on every
-// Start(); nothing about a failure is remembered.
+// Start(), unless the owner says it already failed (SkipPreferred): a host
+// remembers that for its own lifetime, which in rdmachine is one session,
+// so the next session asks the newer API again.
 //
 // macOS 12 and 13 use it for ScreenCaptureKit with CGDisplayStream behind
 // it: on some Intel Macs with macOS 12 ScreenCaptureKit starts but never
@@ -38,13 +40,19 @@ class FallbackCapturer final : public ICapturer {
 
   ~FallbackCapturer() override { Stop(); }
 
+  // Set before Start(): go straight to the fallback, the preferred capturer
+  // having given no picture earlier (in the same session).
+  void SkipPreferred(bool skip) { skip_preferred_ = skip; }
+
   bool Start(const CaptureConfig& cfg, FrameFn on_frame) override {
     if (active_) {
       error_ = "already running";
       return false;
     }
     std::string why;
-    {
+    if (skip_preferred_) {
+      why = preferred_name_ + " gave no picture earlier in this session";
+    } else {
       auto p = preferred_();
       p->SetStoppedHandler(on_stopped_);
       auto state = std::make_shared<State>();
@@ -105,6 +113,7 @@ class FallbackCapturer final : public ICapturer {
   std::chrono::milliseconds wait_;
   std::unique_ptr<ICapturer> active_;
   bool using_fallback_ = false;
+  bool skip_preferred_ = false;
   std::string error_;
 };
 

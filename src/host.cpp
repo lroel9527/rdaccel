@@ -14,6 +14,7 @@
 #include <thread>
 
 #include "capture/capturer.h"
+#include "capture/fallback_capturer.h"
 #include "codec/codec_choice.h"
 #include "log/log.h"
 #include "platform.h"
@@ -87,6 +88,10 @@ struct Host::Impl {
     if (session) f(*session);
   }
   std::unique_ptr<capture::ICapturer> capturer;
+  // The preferred capture API gave no picture once (FallbackCapturer, macOS
+  // 12/13): later starts of this host go straight to the fallback. A new
+  // host (in rdmachine: the next session) asks the preferred one again.
+  bool preferred_capture_failed = false;
   std::atomic<bool> screen_capture{false};  // capturer running (read by the idle thread)
   // Handshake, keepalive, messages, for the current viewer. Calls into the
   // session; destroyed after the transport (whose receive thread calls it).
@@ -749,6 +754,8 @@ bool Host::StartScreenCapture(std::string* error) {
   cc.show_cursor = impl_->config.capture_cursor;
   cc.include_own_windows = impl_->config.capture_own_windows;
   Impl* impl = impl_.get();
+  auto* fallback = dynamic_cast<capture::FallbackCapturer*>(cap.get());
+  if (fallback) fallback->SkipPreferred(impl_->preferred_capture_failed);
   cap->SetStoppedHandler([impl](const std::string& why) { impl->ReportError("capture stopped: " + why); });
   if (!cap->Start(cc, [impl](const capture::CapturedFrame& f) {
         // OnFrame reports errors through the error handler itself.
@@ -757,6 +764,7 @@ bool Host::StartScreenCapture(std::string* error) {
     if (error) *error = cap->last_error();
     return false;
   }
+  if (fallback && fallback->using_fallback()) impl_->preferred_capture_failed = true;
   impl_->capturer = std::move(cap);
   impl_->screen_capture = true;
   if (impl_->config.cursor_channel && !impl_->config.capture_cursor) {

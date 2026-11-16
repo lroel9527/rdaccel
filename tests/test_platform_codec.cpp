@@ -242,6 +242,53 @@ TEST(PlatformCodecChoice, AViewerWithoutH264GetsHevcEvenWhenH264IsAskedFor) {
   EXPECT_EQ(c, codec::VideoCodec::kHevc);
 }
 
+// What rdmachine always does: the host captures before the viewer has said
+// what it decodes, so its session starts as HEVC; once a viewer that decodes
+// H.264 is there, the host starts over in H.264 (as for a resolution
+// change, Hello with the frames) and the viewer follows.
+TEST(PlatformCodecChoice, AHostThatStartedInHevcSwitchesOnceTheViewerSaysItDecodesH264) {
+  if (!platform::CanDecode(codec::VideoCodec::kH264)) GTEST_SKIP() << "no H.264 on this platform";
+  constexpr int W = 640, H = 360;
+  auto [host_end, viewer_end] = CreateLocalPipe();
+  HostConfig cfg;
+  cfg.fps = 30;
+  cfg.bitrate_bps = 4'000'000;
+  cfg.video_regions = false;
+  cfg.video_codec = HostConfig::VideoCodecPreference::kH264;
+  Host host(std::move(host_end), cfg);
+  std::vector<uint8_t> px;
+  std::string err;
+  uint64_t i = 0;
+  // Before any viewer: frames go into an HEVC session.
+  for (; i < 5; ++i) {
+    const auto dirty = capture::RenderSyntheticFrame(i, W, H, px);
+    ASSERT_TRUE(host.SubmitFrame({px.data(), W, H, W * 4}, capture::MonotonicMicros(), dirty, &err)) << err;
+  }
+  EXPECT_NE(host.encoder_name().find("HEVC"), std::string::npos) << host.encoder_name();
+  TestViewer viewer(std::move(viewer_end), proto::kCapH264);
+  for (int k = 0; k < 200 && host.state() != ConnectionState::kConnected; ++k) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  ASSERT_EQ(host.state(), ConnectionState::kConnected);
+  for (; i < 25; ++i) {
+    const auto dirty = capture::RenderSyntheticFrame(i, W, H, px);
+    ASSERT_TRUE(host.SubmitFrame({px.data(), W, H, W * 4}, capture::MonotonicMicros(), dirty, &err)) << err;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ASSERT_TRUE(viewer.WaitFor(10));
+  EXPECT_NE(host.encoder_name().find("H.264"), std::string::npos) << host.encoder_name();
+  std::lock_guard<std::mutex> lock(viewer.mu);
+  ASSERT_FALSE(viewer.hello_codecs.empty());
+  EXPECT_EQ(viewer.hello_codecs.back(), codec::VideoCodec::kH264);
+  EXPECT_NE(viewer.vs->decoder_name().find("H.264"), std::string::npos) << viewer.vs->decoder_name();
+  // The HEVC Hello (control channel) and the H.264 one (with the frames)
+  // may arrive in either order; the wrong order costs at most one picture.
+  const auto errors = viewer.vs->stats().decode_errors;
+  std::printf("frames %d, decode errors %llu, min PSNR %.1f\n", viewer.frames,
+              static_cast<unsigned long long>(errors), viewer.min_psnr);
+  EXPECT_LE(errors, 1u);
+}
+
 TEST(PlatformCodecChoice, AutoPicksAWorkingCodec) {
   // On a Mac with fast hardware HEVC (Apple Silicon) this stays HEVC; on one
   // whose HEVC is slow at this size it may be H.264. Either way the stream

@@ -3,6 +3,13 @@
 版本号遵循语义化版本。从 1.0 起，同一主版本内 C ABI 只加不改（新函数、结构体末尾加字段），
 `find_package(rdaccel 1.0)` 接受任何 1.x。1.0 之前次版本号（0.x）变化时 C ABI 可能有不兼容改动。
 
+## 1.11.2
+
+修正：C ABI 和线上格式不变。
+
+- **macOS 12 和 13：一个会话里只等一次 ScreenCaptureKit**：截屏每次开始都先给 ScreenCaptureKit 1.5 秒（1.10.4），在它从不出画面的 Mac 上，同一个会话里每次重新开始截屏（换分辨率、锁屏后恢复）都要再白等这 1.5 秒以上。现在 host 记得它在这个 host 上没出过画面，之后直接用 CGDisplayStream（`FallbackCapturer::SkipPreferred`）；新的 host（rdmachine 里是下一个会话）又先试 ScreenCaptureKit。代价：ScreenCaptureKit 若只是碰巧 1.5 秒内没出帧（显示器刚睡眠、刚锁屏），这个会话剩下的时间都用 CGDisplayStream。
+- **测试**：host 先开始截屏、能解 H.264 的 viewer 后连上（rdmachine 每次都是这样：会话先按 HEVC 建，viewer 说了能力后才换 H.264）的路径以前没有测试，现在有了，连跑 20 次都换到 H.264、没有解码错误。
+
 ## 1.11.1
 
 修正：C ABI 和线上格式不变。代码审查找出的问题。
