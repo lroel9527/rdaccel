@@ -238,3 +238,42 @@ TEST(AudioGate, AGapInTheInputIsSilence) {
   EXPECT_EQ(last.p.spurt, 2);
   EXPECT_EQ(last.p.ts, static_cast<uint32_t>(h.pos - 480));
 }
+
+TEST(AudioGate, ASlowPathLowersTheBitrateAndItComesBackInSteps) {
+  Harness h;
+  h.Tone(1.0, -20, 1500);
+  EXPECT_EQ(h.sender.status().bitrate_bps, 160'000);
+  // 400 kbps: a quarter is 100 kbps, of which the headers of 100 packets a
+  // second take 52: 48 kbps for the sound.
+  h.sender.SetPath(0, 400'000);
+  h.Tone(1.5, -20, 1500);
+  EXPECT_EQ(h.sender.status().bitrate_bps, 48'000);
+  // Slower still: never below 32 kbps.
+  h.sender.SetPath(0, 250'000);
+  h.Tone(1.5, -20, 1500);
+  EXPECT_EQ(h.sender.status().bitrate_bps, 32'000);
+  // The estimate recovers: one step every 5 s, 32 -> 48 -> 64 -> 96 -> 160.
+  h.sender.SetPath(0, 10'000'000);
+  std::vector<int> seen;
+  for (int i = 0; i < 30; ++i) {
+    h.Tone(1.0, -20, 1500);
+    const int b = h.sender.status().bitrate_bps;
+    if (seen.empty() || seen.back() != b) seen.push_back(b);
+  }
+  EXPECT_EQ(seen, (std::vector<int>{32'000, 48'000, 64'000, 96'000, 160'000}));
+  // No estimate (TCP, or not yet trusted): as the profile says, nothing changes.
+  Harness tcp;
+  tcp.sender.SetPath(0, 0);
+  tcp.Tone(2.0, -20, 1500);
+  EXPECT_EQ(tcp.sender.status().bitrate_bps, 160'000);
+}
+
+TEST(AudioGate, DataSaverOnASlowPath) {
+  // 20 ms frames: half the packets, so less of the quarter goes to headers.
+  Harness h(kProfileSaver);
+  h.Tone(1.0, -20, 1500);
+  h.sender.SetPath(0, 400'000);  // 100 - 26 = 74 kbps
+  h.Tone(1.5, -20, 1500);
+  EXPECT_EQ(h.sender.status().bitrate_bps, 74'000);
+  EXPECT_EQ(h.sender.status().frame_ms, 20);
+}

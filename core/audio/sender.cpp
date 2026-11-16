@@ -22,6 +22,15 @@ constexpr uint64_t kGapUs = 60'000;
 // Silence written out in full after a gap (enough for the gate to close);
 // the rest only moves the sample positions on.
 constexpr size_t kGapFillSamples = kSampleRate * 3 / 10;
+// A slow path (5.5): the sound on the wire keeps within a quarter of the
+// estimated bandwidth, down to 32 kbps; once the estimate allows, one step up
+// every 5 s.
+constexpr int kMinPathBitrate = 32'000;
+constexpr int kPathSteps[] = {32'000, 48'000, 64'000, 96'000};
+constexpr uint64_t kPathRaiseUs = 5'000'000;
+// Per packet on the wire besides the Opus data: the sound header, the UDP
+// transport's header, the encryption, UDP and IPv4 (docs/audio.md, 11.2).
+constexpr int kWireOverheadBytes = 9 + 56;
 
 bool Silent(const float* p, size_t n) {
   for (size_t i = 0; i < n; ++i) {
@@ -170,6 +179,34 @@ void Sender::Push(const float* pcm, size_t frames, uint64_t time_us) {
 }
 
 void Sender::AdaptToPath() {
+  // A slow path: what the sound needs on the wire against a quarter of the
+  // estimate (none: as the profile says; it is 0 until the transport trusts
+  // its estimate, and TCP has none).
+  if (const int64_t bw = bandwidth_; bw > 0) {
+    const int top = ProfileBitrate(profile_, 2);
+    const int overhead = kWireOverheadBytes * 8 * (1000 / std::max(1, frame_samples_ / 48));
+    const auto budget = static_cast<int>(std::min<int64_t>(bw / 4 - overhead, top));
+    const int now_bps = path_cap_bps_ > 0 ? path_cap_bps_ : top;
+    if (now_bps > budget) {
+      // Down at once, as far as needed.
+      path_cap_bps_ = std::max(kMinPathBitrate, budget / 1000 * 1000);
+      if (path_cap_bps_ >= top) path_cap_bps_ = 0;
+      path_raise_time_ = frame_time_;
+    } else if (path_cap_bps_ > 0 && frame_time_ - path_raise_time_ >= kPathRaiseUs) {
+      // Up a step at a time while the estimate allows it.
+      int next = top;
+      for (int step : kPathSteps) {
+        if (step > path_cap_bps_) {
+          next = step;
+          break;
+        }
+      }
+      if (next <= budget) {
+        path_cap_bps_ = next >= top ? 0 : next;
+        path_raise_time_ = frame_time_;
+      }
+    }
+  }
   // RED while the path loses packets.
   const double loss = loss_;
   if (loss >= kRedOn) {

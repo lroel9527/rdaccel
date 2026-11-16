@@ -234,3 +234,68 @@ TEST(AudioJitter, ASpurtStartsWhole) {
     EXPECT_LT(before, 1e-3) << profile;
   }
 }
+
+namespace {
+
+// Pictures shown every 33 ms that took `video_ms` from capture to screen;
+// the host's clock is the sender's (1 s behind the fake receiver clock).
+template <class F>
+void RunWithPictures(Sim& s, double seconds, int video_ms, F sound) {
+  const int steps = static_cast<int>(seconds * 10);
+  for (int i = 0; i < steps; ++i) {
+    s.Run(0.1, sound);
+    for (int k = 0; k < 3; ++k) {
+      const uint64_t shown = s.now - static_cast<uint64_t>(k) * 33'000;
+      s.rx.NoteFrameShown(shown - 1'000'000 - static_cast<uint64_t>(video_ms) * 1000, shown);
+    }
+  }
+}
+
+auto ToneFn() {
+  return [](int64_t at, size_t n, float* o) { Sine(at, n, 1000, 0.1, o, 1500); };
+}
+
+}  // namespace
+
+TEST(AudioJitter, SoundAheadOfThePictureIsDelayedToMatch) {
+  Sim s;
+  s.jitter_ms = 2;
+  s.Tone(2);
+  const auto before = s.rx.stats();
+  // The sound plays ~45 ms after capture (20 ms path, ~25 ms buffer); the
+  // picture shows 120 ms after: the sound is ~75 ms ahead.
+  RunWithPictures(s, 2.5, 120, ToneFn());
+  std::printf("sound vs picture: %d ms at first\n", s.rx.stats().av_offset_ms);
+  EXPECT_LT(s.rx.stats().av_offset_ms, -50);
+  RunWithPictures(s, 30, 120, ToneFn());
+  const auto st = s.rx.stats();
+  std::printf("after 30 s: target %d ms (was %d), sound vs picture %d ms\n", st.target_ms, before.target_ms,
+              st.av_offset_ms);
+  EXPECT_GT(st.target_ms, before.target_ms + 50);
+  EXPECT_LE(st.target_ms, before.target_ms + 120 + 5);
+  EXPECT_GT(st.av_offset_ms, -25);  // no longer clearly ahead
+  EXPECT_EQ(st.underruns, 0u);
+  EXPECT_EQ(st.catchups, 0u);
+  // The picture catches up (30 ms): the extra delay goes again, 10 ms a second.
+  RunWithPictures(s, 15, 30, ToneFn());
+  EXPECT_LT(s.rx.stats().target_ms, before.target_ms + 5);
+}
+
+TEST(AudioJitter, AtMost120msMoreAndNothingForAStillScreen) {
+  Sim s;
+  s.jitter_ms = 2;
+  s.Tone(2);
+  const int base = s.rx.stats().target_ms;
+  // Far ahead (the picture 600 ms late): at most 120 ms more.
+  RunWithPictures(s, 40, 600, ToneFn());
+  EXPECT_LE(s.rx.stats().target_ms, base + 120 + 1);
+  EXPECT_GE(s.rx.stats().target_ms, base + 100);
+  // No pictures for a while (a still screen): nothing to align to, the
+  // extra delay stays (it only shrinks once the sound is not ahead).
+  Sim t;
+  t.jitter_ms = 2;
+  t.Tone(2);
+  const int t_base = t.rx.stats().target_ms;
+  t.Tone(10);
+  EXPECT_EQ(t.rx.stats().target_ms, t_base);
+}
