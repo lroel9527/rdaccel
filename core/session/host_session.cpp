@@ -420,7 +420,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       !sharpen_video_ && !polish_owed_ && (!text || carry_video_tiles_.empty())) {
     quiet_ = true;
     moving_ = false;
-    if (use_regions) FinishRegions(busy, region_changed);
+    if (use_regions) FinishRegions(busy, region_changed, frame.capture_time_us);
     std::lock_guard<std::mutex> lock(mu_);
     ++stats_.frames_skipped;
     return true;
@@ -1365,7 +1365,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   }
   if (use_regions) {
     for (const auto& t : video_tiles) busy[static_cast<size_t>(t.row) * differ_.cols() + t.col] = 1;
-    FinishRegions(busy, region_changed);
+    FinishRegions(busy, region_changed, frame.capture_time_us);
   }
 
   // Deflate only after the video encode succeeded: the stream's history must
@@ -1622,8 +1622,8 @@ bool HostSession::EncodeRegions(const capture::CapturedFrame& frame, const std::
 }
 
 void HostSession::FinishRegions(const std::vector<uint8_t>& busy,
-                                const std::vector<uint8_t>& changed) {
-  const auto closed = regions_.Update(busy, changed);
+                                const std::vector<uint8_t>& changed, uint64_t now_us) {
+  const auto closed = regions_.Update(busy, changed, now_us);
   for (const auto& reg : closed) {
     for (size_t idx : TilesOf(reg.rect)) pending_sharpen_.push_back(idx);
   }

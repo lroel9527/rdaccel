@@ -16,7 +16,9 @@
 //     box, at least `min_tiles_w` x `min_tiles_h` tiles and dense enough);
 //   * candidates become areas after they are seen for `confirm` frames in a
 //     row, areas grow (as a new area) when a candidate sticks out of them,
-//     and close once nothing in them changed for `linger` frames.
+//     and close once nothing in them changed for `linger` frames or
+//     `linger_us`, whichever comes first, and may reopen where they were
+//     (`reopen_window`).
 
 #include <cstdint>
 #include <vector>
@@ -33,6 +35,17 @@ struct VideoRegionParams {
   double min_density = 0.5;  // active tiles / bounding-box tiles
   int32_t confirm = 3;       // frames a candidate must persist
   int32_t linger = 30;       // idle frames before an area closes
+  // ... or this long without a change, whichever comes first. A paused
+  // video's picture stays at the area's quality until the area closes and
+  // the full-screen path sharpens it; frames come at 60 Hz while it plays
+  // but at 10 Hz (the Host's idle re-submits) once it stands still, so a
+  // count of frames alone took up to 3 s.
+  int64_t linger_us = 250'000;
+  // An area that closed is remembered this many frames: if most of its tiles
+  // turn busy again for `confirm` frames in a row (the video plays on after
+  // a pause), it reopens where it was at once, instead of earning its way
+  // back in over `min_busy` frames of the full-screen encoder.
+  int32_t reopen_window = 300;
   int32_t max_regions = 2;
   int32_t min_resize_gap = 60;  // frames between two growths of one area
 };
@@ -42,6 +55,7 @@ struct VideoRegion {
   Rect rect;           // pixels, tile aligned (clipped at the screen edge)
   uint64_t created = 0;
   uint64_t last_change = 0;
+  uint64_t last_change_us = 0;
 };
 
 class VideoRegionTracker {
@@ -60,8 +74,9 @@ class VideoRegionTracker {
   // Returns the areas that closed in this call (their tiles should get a
   // final sharp picture from the main path). Areas that were replaced by a
   // larger one are not reported as closed.
+  // `now_us`: the frame's time (0: unknown, then only `linger` counts).
   std::vector<VideoRegion> Update(const std::vector<uint8_t>& busy,
-                                  const std::vector<uint8_t>& changed);
+                                  const std::vector<uint8_t>& changed, uint64_t now_us = 0);
 
   // Drops every area without reporting it (keyframes, encoder failures).
   void Clear();
@@ -88,6 +103,12 @@ class VideoRegionTracker {
   std::vector<uint64_t> history_;  // per tile, bit 0 = latest frame
   std::vector<Candidate> candidates_;
   std::vector<VideoRegion> regions_;
+  struct Closed {
+    Rect rect;  // pixels
+    uint64_t at = 0;
+    int32_t seen = 0;  // frames in a row with most of it busy
+  };
+  std::vector<Closed> closed_;
 };
 
 }  // namespace rdacore::tile

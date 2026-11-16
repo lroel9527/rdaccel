@@ -9,7 +9,7 @@
 //   rdaccel_clip render OUT.clip --scenario=NAME [--background=SCREEN.ppm] [--seconds=20]
 //       One of the example scenes (examples/scenes.h: idle typing scroll drag
 //       zoom video pause) as a clip, at 60 Hz.
-//   rdaccel_clip eval CLIP [--text=0] [--bitrate=8000000] [--label=NAME] [--csv=FRAMES.csv]
+//   rdaccel_clip eval CLIP [--text=0] [--bitrate=8000000] [--label=NAME] [--csv=FRAMES.csv] [--focus=x,y,w,h]
 //       Sends the clip through a host and a viewer with the platform's video
 //       encoder and decoder, as the Host does it: each frame when the screen
 //       changed, and the last one every 100 ms while something is owed.
@@ -54,7 +54,7 @@ int Usage() {
   std::fprintf(stderr,
                "usage: rdaccel_clip record OUT.clip [--seconds=60] [--display=0] [--fps=60]\n"
                "       rdaccel_clip render OUT.clip --scenario=NAME [--background=SCREEN.ppm] [--seconds=20]\n"
-               "       rdaccel_clip eval CLIP [--text=0] [--bitrate=8000000] [--label=NAME] [--csv=FRAMES.csv]\n"
+               "       rdaccel_clip eval CLIP [--text=0] [--bitrate=8000000] [--label=NAME] [--csv=FRAMES.csv] [--focus=x,y,w,h]\n"
                "       rdaccel_clip frame CLIP --index=N --out=FRAME.ppm\n");
   return 2;
 }
@@ -117,7 +117,7 @@ int Render(const Args& args) {
     if (args.str("scenario") == s.name) sc = &s;
   }
   if (!sc) {
-    std::fprintf(stderr, "unknown --scenario (idle typing scroll drag zoom video pause pointer)\n");
+    std::fprintf(stderr, "unknown --scenario (idle typing scroll drag zoom video pause pointer terminal)\n");
     return 2;
   }
   ClipWriter out(args.positional().c_str());
@@ -179,6 +179,10 @@ int Eval(const Args& args) {
     return 1;
   }
   session::ViewerSession viewer(nullptr, std::move(decoder));
+  // Video areas have their own streams and decoders, as in the real viewer
+  // (src/viewer.cpp): without them every area that opened made the viewer
+  // ask for a keyframe, which closed it again.
+  viewer.SetDecoderFactory([] { return platform::CreateHevcDecoder(nullptr); });
   std::mutex mu;
   std::condition_variable cv;
   std::vector<uint8_t> shown;
@@ -201,6 +205,11 @@ int Eval(const Args& args) {
   // Quality weighted by time: what the viewer shows from one frame to the next.
   double w_exact = 0, w_psnr = 0, w_time = 0, last_exact = 0, last_psnr = 0;
   uint64_t last_q_t = 0;
+  // --focus=x,y,w,h: PSNR inside that area (a video window) and outside it,
+  // also weighted by time.
+  Rect focus{};
+  if (args.has("focus")) std::sscanf(args.str("focus").c_str(), "%d,%d,%d,%d", &focus.x, &focus.y, &focus.w, &focus.h);
+  double w_in = 0, w_out = 0, last_in = 0, last_out = 0;
   // Each clip frame opens a stretch until the next one; those of kPauseUs or
   // more are pauses. Samples: (time, exact %) within it.
   struct Stretch {
@@ -227,14 +236,30 @@ int Eval(const Args& args) {
       const double dt = static_cast<double>(t - last_q_t);
       w_exact += last_exact * dt;
       w_psnr += last_psnr * dt;
+      w_in += last_in * dt;
+      w_out += last_out * dt;
       w_time += dt;
     }
-    uint64_t same = 0;
-    double se = 0;
+    uint64_t same = 0, n_in = 0;
+    double se = 0, se_in = 0;
     for (size_t i = 0; i < screen.size(); i += 4) {
       const int d0 = shown[i] - screen[i], d1 = shown[i + 1] - screen[i + 1], d2 = shown[i + 2] - screen[i + 2];
       same += (d0 | d1 | d2) == 0;
-      se += d0 * d0 + d1 * d1 + d2 * d2;
+      const double e = d0 * d0 + d1 * d1 + d2 * d2;
+      se += e;
+      if (focus.w > 0) {
+        const auto p = static_cast<int32_t>(i / 4);
+        const int32_t x = p % W, y = p / W;
+        if (x >= focus.x && x < focus.right() && y >= focus.y && y < focus.bottom()) {
+          se_in += e;
+          ++n_in;
+        }
+      }
+    }
+    if (focus.w > 0) {
+      auto db = [](double sq, double n) { return sq == 0 || n == 0 ? 99.0 : std::min(99.0, 10 * std::log10(255.0 * 255.0 / (sq / (n * 3)))); };
+      last_in = db(se_in, static_cast<double>(n_in));
+      last_out = db(se - se_in, static_cast<double>(screen.size() / 4 - n_in));
     }
     const double px = static_cast<double>(screen.size() / 4);
     last_exact = 100.0 * static_cast<double>(same) / px;
@@ -322,6 +347,8 @@ int Eval(const Args& args) {
     const double dt = static_cast<double>(end_t - last_q_t);
     w_exact += last_exact * dt;
     w_psnr += last_psnr * dt;
+    w_in += last_in * dt;
+    w_out += last_out * dt;
     w_time += dt;
   }
   std::vector<double> pause_exact;
@@ -340,6 +367,10 @@ int Eval(const Args& args) {
               static_cast<unsigned long long>(resent), s.bytes_sent / 1e3, s.bytes_sent * 8 / 1e3 / std::max(secs, 0.001),
               s.video_bytes / 1e3, s.lossless_bytes / 1e3, w_time > 0 ? w_exact / w_time : 0.0,
               w_time > 0 ? w_psnr / w_time : 0.0, pause_exact.size(), pause_exact.empty() ? 0.0 : pe / pause_exact.size());
+  if (focus.w > 0 && w_time > 0) std::printf("  PSNR inside the focus %.1f, outside %.1f\n", w_in / w_time, w_out / w_time);
+  std::printf("  video areas: %llu opened, %llu closed, %.0f kB in their streams\n",
+              static_cast<unsigned long long>(s.regions_opened), static_cast<unsigned long long>(s.regions_closed),
+              s.region_bytes / 1e3);
   if (missed > 0) {
     std::printf("  (%llu frames without a picture of their own on the viewer; measured on what it showed)\n",
                 static_cast<unsigned long long>(missed));

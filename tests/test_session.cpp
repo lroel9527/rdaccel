@@ -532,6 +532,10 @@ TEST(Session, BusyAreaGetsItsOwnStreamAndASharpPictureWhenItStops) {
   ASSERT_EQ(region_sizes.size(), 1u);
   EXPECT_EQ(region_sizes[0], (std::pair<int, int>{192, 128}));
   const uint64_t main_frames = st.video_frames;
+  // An open area is work to do: the Host keeps re-submitting the last frame
+  // while the screen stands still, or the area never closed and a paused
+  // video stayed at its quality.
+  EXPECT_TRUE(host.work_pending());
   // Still: the area closes after `linger` quiet frames, and its tiles are
   // then sent once more through the full-screen encoder.
   for (int i = 0; i < 4; ++i, ++frames) ASSERT_TRUE(host.OnFrame(f));

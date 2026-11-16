@@ -8,7 +8,7 @@
 //                  [--drop-to=BPS --drop-at=SECONDS]   bandwidth change mid-run
 //                  [--bitrate=8000000] [--min-bitrate=300000] [--cc=1] [--abr=1] [--max-queue-ms=50] [--regions=1] [--progressive=1]
 //                  [--text=1]     text mode (the same experience, less traffic on text)
-//                  --scenario: idle typing scroll drag zoom video pause pointer
+//                  --scenario: idle typing scroll drag zoom video pause pointer terminal
 //                  [--warmup=3]   seconds left out of the steady-state numbers
 //                  [--cursor=1]   also move the mouse pointer (cursor channel) and
 //                                 report how long positions take to arrive

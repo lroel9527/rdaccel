@@ -165,13 +165,15 @@ class HostSession {
   bool keyframe_pending() const { return force_keyframe_; }
   // Something is still owed to the viewer that needs no new picture: a
   // keyframe, video tiles of a picture the encoder dropped, tiles waiting to
-  // be sent losslessly or still refining. A source that stops delivering
-  // frames while the screen is static (ScreenCaptureKit) would leave them at
-  // video quality, or stale, until the next change; the Host re-submits the
-  // last frame instead. Not thread-safe against OnFrame.
+  // be sent losslessly or still refining, a video area that is open (it
+  // closes, and its picture is sharpened, only on a frame). A source that
+  // stops delivering frames while the screen is static (ScreenCaptureKit)
+  // would leave them at video quality, or stale, until the next change (a
+  // paused video stayed at the area's quality); the Host re-submits the last
+  // frame instead. Not thread-safe against OnFrame.
   bool work_pending() const {
     return force_keyframe_ || !carry_video_tiles_.empty() || pending_lossless_count_ > 0 || refining_ > 0 ||
-           polish_owed_ || coarse_count_ > 0;
+           polish_owed_ || coarse_count_ > 0 || !regions_.regions().empty();
   }
 
   // The screen as of the last frame passed to OnFrame (BGRA, rows of
@@ -195,7 +197,7 @@ class HostSession {
   bool EncodeRegions(const capture::CapturedFrame& frame, const std::vector<bool>& dirty,
                      uint64_t frame_id, std::vector<uint8_t>& out, size_t& bytes, size_t& pictures,
                      uint64_t& us);
-  void FinishRegions(const std::vector<uint8_t>& busy, const std::vector<uint8_t>& changed);
+  void FinishRegions(const std::vector<uint8_t>& busy, const std::vector<uint8_t>& changed, uint64_t now_us);
   // The encoder's picture is not the screen: lossless tiles are one plain
   // colour in it, and tiles the viewer got by a copy or from its cache are
   // whatever was there before. Colour is coded at half resolution, so the

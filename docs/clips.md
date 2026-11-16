@@ -76,6 +76,8 @@ build/bin/rdaccel_clip eval clips/drag.clip --text=1
 | PSNR | 同样按时间加权 |
 | pauses: exact | 片段里每段 0.5 秒以上没有变化的停顿，结束时逐像素相同的比例的平均 |
 
+另起一行给出视频区域开了几次、关了几次、区域流共多少字节。`--focus=x,y,w,h` 再给出这块区域（比如视频窗口）里面和外面各自的 PSNR，同样按时间加权。
+
 逐像素相同只是一个方面：视频细修后的块看着清楚，但不算在 exact 里。`--csv=FILE` 输出每一帧发了什么（视频、无损字节，无损块数，拷贝和缓存的块数，补发的块数），用来找流量花在哪一帧、哪一类块上。
 
 个别帧在对端没有自己的画面（输出末尾会说有几帧），这时量的是对端当时显示的画面，也就是用户看到的。
@@ -96,7 +98,7 @@ tools/clip/compare.sh v1.9.5 clips
 build/bin/rdaccel_clip render clips/syn-scroll.clip --scenario=scroll --background=SCREEN.ppm --seconds=20
 ```
 
-`examples/scenes.h` 的场景（idle typing scroll drag zoom video pause）按 60 Hz 渲染成片段，和真实片段用同一套测评。
+`examples/scenes.h` 的场景（idle typing scroll drag zoom video pause terminal）按 60 Hz 渲染成片段，和真实片段用同一套测评。
 
 ## 例子：1.9.6 是怎么找到的
 

@@ -27,12 +27,14 @@ void VideoRegionTracker::Reset(int32_t width, int32_t height) {
   history_.assign(static_cast<size_t>(cols_) * rows_, 0);
   candidates_.clear();
   regions_.clear();
+  closed_.clear();
 }
 
 void VideoRegionTracker::Clear() {
   std::fill(history_.begin(), history_.end(), 0);
   candidates_.clear();
   regions_.clear();
+  closed_.clear();
 }
 
 VideoRegion VideoRegionTracker::Close(int index) {
@@ -70,7 +72,7 @@ uint8_t VideoRegionTracker::NextStream() {
 }
 
 std::vector<VideoRegion> VideoRegionTracker::Update(const std::vector<uint8_t>& busy,
-                                                    const std::vector<uint8_t>& changed) {
+                                                    const std::vector<uint8_t>& changed, uint64_t now_us) {
   ++frame_;
   const size_t n = history_.size();
   const uint64_t mask = p_.window >= 64 ? ~0ull : (1ull << p_.window) - 1;
@@ -81,8 +83,34 @@ std::vector<VideoRegion> VideoRegionTracker::Update(const std::vector<uint8_t>& 
     for (int32_t row = reg.rect.y / kTileSize; row * kTileSize < reg.rect.bottom(); ++row) {
       for (int32_t col = reg.rect.x / kTileSize; col * kTileSize < reg.rect.right(); ++col) {
         const size_t i = static_cast<size_t>(row) * cols_ + col;
-        if (i < changed.size() && changed[i]) reg.last_change = frame_;
+        if (i < changed.size() && changed[i]) {
+          reg.last_change = frame_;
+          reg.last_change_us = now_us;
+        }
       }
+    }
+  }
+
+  // Areas that closed and play on.
+  std::erase_if(closed_, [&](const Closed& c) { return frame_ - c.at > static_cast<uint64_t>(p_.reopen_window); });
+  for (size_t k = 0; k < closed_.size();) {
+    Closed& c = closed_[k];
+    bool overlaps = false;
+    for (const auto& reg : regions_) overlaps = overlaps || reg.rect.intersects(c.rect);
+    int32_t tiles = 0, hot = 0;
+    for (int32_t row = c.rect.y / kTileSize; row * kTileSize < c.rect.bottom(); ++row) {
+      for (int32_t col = c.rect.x / kTileSize; col * kTileSize < c.rect.right(); ++col) {
+        const size_t i = static_cast<size_t>(row) * cols_ + col;
+        ++tiles;
+        hot += i < busy.size() && busy[i];
+      }
+    }
+    c.seen = hot >= p_.min_density * tiles ? c.seen + 1 : 0;
+    if (!overlaps && c.seen >= p_.confirm && static_cast<int32_t>(regions_.size()) < p_.max_regions) {
+      regions_.push_back({NextStream(), c.rect, frame_, frame_, now_us});
+      closed_.erase(closed_.begin() + static_cast<ptrdiff_t>(k));
+    } else {
+      ++k;
     }
   }
 
@@ -145,7 +173,7 @@ std::vector<VideoRegion> VideoRegionTracker::Update(const std::vector<uint8_t>& 
         for (size_t j = 0; j < regions_.size(); ++j) {
           if (j != k && regions_[j].rect.intersects(u)) u = Union(u, regions_[j].rect);
         }
-        VideoRegion grown{NextStream(), u, frame_, frame_};
+        VideoRegion grown{NextStream(), u, frame_, frame_, now_us};
         std::erase_if(regions_, [&](const VideoRegion& r) { return r.rect.intersects(u); });
         regions_.push_back(grown);
       }
@@ -156,7 +184,7 @@ std::vector<VideoRegion> VideoRegionTracker::Update(const std::vector<uint8_t>& 
       if (old.tiles.intersects(t)) c.seen = std::max(c.seen, old.seen + 1);
     }
     if (c.seen >= p_.confirm && static_cast<int32_t>(regions_.size()) < p_.max_regions) {
-      regions_.push_back({NextStream(), px, frame_, frame_});
+      regions_.push_back({NextStream(), px, frame_, frame_, now_us});
     } else {
       next_candidates.push_back(c);
     }
@@ -165,8 +193,12 @@ std::vector<VideoRegion> VideoRegionTracker::Update(const std::vector<uint8_t>& 
 
   std::vector<VideoRegion> closed;
   for (size_t k = 0; k < regions_.size();) {
-    if (frame_ - regions_[k].last_change >= static_cast<uint64_t>(p_.linger)) {
+    const VideoRegion& reg = regions_[k];
+    const bool quiet_long = p_.linger_us > 0 && now_us > 0 && reg.last_change_us > 0 &&
+                            now_us - reg.last_change_us >= static_cast<uint64_t>(p_.linger_us);
+    if (frame_ - reg.last_change >= static_cast<uint64_t>(p_.linger) || quiet_long) {
       closed.push_back(Close(static_cast<int>(k)));
+      if (p_.reopen_window > 0) closed_.push_back({closed.back().rect, frame_, 0});
     } else {
       ++k;
     }

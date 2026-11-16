@@ -117,6 +117,26 @@ inline void Drag(const Scene& s, Image& img, uint64_t i) {
   s.Blit(img, win, x, y);
 }
 
+// A terminal printing a log: in the left half of the screen, below a fixed
+// title bar, the text moves up a line (18 px) every 3 frames and a new line
+// appears at the bottom, taken from rows of the screenshot further down each
+// time, for 4 seconds; then it rests for 2. What scrolls is text, and most of
+// the tiles keep changing, as with `tail -f` on a busy log or a build.
+inline void Terminal(const Scene& s, Image& img, uint64_t i) {
+  constexpr int kLine = 18;
+  const rdaccel::Rect area{0, s.h / 10, s.w / 2, (s.h - s.h / 10) / kLine * kLine};
+  const int lines = area.h / kLine;
+  const uint64_t printed = (i / 360) * 80 + std::min<uint64_t>(i % 360, 240) / 3;  // lines so far
+  const int src_lines = s.h / kLine;
+  for (int l = 0; l < lines; ++l) {
+    // Line l on screen shows log line (printed + l); log line k is screenshot
+    // row band (k * 7) mod src_lines.
+    const uint64_t k = printed + static_cast<uint64_t>(l);
+    const int sy = static_cast<int>((k * 7) % static_cast<uint64_t>(src_lines)) * kLine;
+    s.Blit(img, {0, sy, area.w, kLine}, area.x, area.y + l * kLine);
+  }
+}
+
 // A "video" window: a slowly panning, zooming, colour-shifting view of the
 // screenshot, bilinearly resampled, so every pixel changes every frame.
 inline rdaccel::Rect VideoRect(const Scene& s) {
@@ -195,6 +215,7 @@ const Scenario kScenarios[] = {
     {"pause", [](const Scene& s, Image& img, uint64_t i) {
        Video(s, img, i % 300 < 180 ? i : i - i % 300 + 179);
      }, VideoRect},
+    {"terminal", Terminal},
     // Nothing on the screen changes but the mouse pointer (use with
     // --cursor=frame or --cursor=channel).
     {"pointer", [](const Scene&, Image&, uint64_t) {}},
