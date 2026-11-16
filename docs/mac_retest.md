@@ -4,7 +4,7 @@
 
 ## 静音
 
-整个过程不发声：rdaccel 没有任何音频代码（ScreenCaptureKit 配置了 `capturesAudio = NO`），脚本不调用 `say`、`afplay`、`osascript` 或其他会发声的命令，也不改音量。
+整个过程不发声：ScreenCaptureKit 配置了 `capturesAudio = NO`；1.13 起的声音代码在测试里只用空设备（CTest 设 `RDACCEL_AUDIO_NULL_OUTPUT=1`，播放器不打开任何输出设备）和算出来的测试信号；读系统声音的测试默认跳过，打开时也只建不让本机静音的 tap（`CATapUnmuted`）。脚本不调用 `say`、`afplay`、`osascript` 或其他会发声的命令，也不改音量。
 
 ## 一键脚本
 

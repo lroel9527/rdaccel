@@ -1035,7 +1035,7 @@ struct ViewerOptions {
   std::vector<uint8_t> auth_token;   // for the host's auth hook, at most 4096 bytes
   std::vector<uint8_t> encryption_key;  // 32 bytes, the host's; empty = none
   bool allow_plaintext = false;         // needed for TCP / UDP without a key
-  bool audio = false;  // take the host's sound (1.13): ReadAudio()
+  bool audio = false;  // take the host's sound (1.13): ReadAudio() or an AudioPlayer
 };
 
 class Viewer {
@@ -1188,6 +1188,33 @@ class Viewer {
 
   std::unique_ptr<State> state_;  // outlives v_
   rda_viewer* v_ = nullptr;
+};
+
+// Plays a viewer's sound (rda_audio_player_create): the default output
+// device, or with `null_device` (or RDACCEL_AUDIO_NULL_OUTPUT=1) none at all.
+// Destroy it before the viewer.
+class AudioPlayer {
+ public:
+  static std::unique_ptr<AudioPlayer> Create(Viewer& viewer, bool null_device = false, std::string* error = nullptr) {
+    rda_audio_player_config c;
+    rda_audio_player_config_default(&c);
+    c.null_device = null_device ? 1 : 0;
+    std::unique_ptr<AudioPlayer> p(new AudioPlayer());
+    if (rda_audio_player_create(viewer.handle(), &c, &p->p_) != RDA_OK) {
+      detail::SetError(error);
+      return nullptr;
+    }
+    return p;
+  }
+  ~AudioPlayer() { rda_audio_player_destroy(p_); }
+  AudioPlayer(const AudioPlayer&) = delete;
+  AudioPlayer& operator=(const AudioPlayer&) = delete;
+  // 1 muted or at volume 0, 0 audible, -1 not known.
+  int output_muted() const { return rda_audio_player_output_muted(p_); }
+
+ private:
+  AudioPlayer() = default;
+  rda_audio_player* p_ = nullptr;
 };
 
 }  // namespace rdaccel

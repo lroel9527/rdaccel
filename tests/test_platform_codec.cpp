@@ -189,7 +189,7 @@ struct TestViewer {
 };
 
 // Streams synthetic frames from a Host with `pref` to a viewer that does or
-// does not say it decodes H.264; returns the codec of the last Hello and the
+// does not claim to decode H.264; returns the codec of the last Hello and the
 // host's encoder name.
 void StreamWithCodec(HostConfig::VideoCodecPreference pref, bool viewer_h264, codec::VideoCodec& hello_codec,
                      std::string& encoder) {

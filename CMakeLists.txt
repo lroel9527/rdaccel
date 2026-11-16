@@ -1,17 +1,17 @@
 cmake_minimum_required(VERSION 3.24)
-# The lowest macOS the binaries run on (14.0).
-# Must come before project(): there
+# The lowest macOS the binaries run on (14.2: Core Audio Process Taps, the
+# system sound capture). Must come before project(): there
 # CMake creates the cache entry (empty, i.e. "this machine's macOS") and a
 # later set(... CACHE ...) no longer changes it. -DCMAKE_OSX_DEPLOYMENT_TARGET
-# of 14.0 or later, or the MACOSX_DEPLOYMENT_TARGET environment variable,
+# of 14.2 or later, or the MACOSX_DEPLOYMENT_TARGET environment variable,
 # still win; anything lower (a build directory configured when the default
-# was 12.3 keeps that in its cache) is raised to 14.0. Ignored on other
-# systems.
+# was 12.3 or 14.0 keeps that in its cache) is raised to 14.2. Ignored on
+# other systems.
 if(NOT DEFINED ENV{MACOSX_DEPLOYMENT_TARGET} AND
-   (NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET OR CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS 14.0))
-  set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version" FORCE)
+   (NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET OR CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS 14.2))
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "14.2" CACHE STRING "Minimum macOS version" FORCE)
 endif()
-project(rdaccel VERSION 1.12.0 LANGUAGES C CXX)
+project(rdaccel VERSION 1.13.0 LANGUAGES C CXX)
 # Pre-release label ("rc1"), empty for a release. The full version, as the
 # library, the packages and the tag (v1.0.0-rc1) show it, is
 # PROJECT_VERSION[-RDACCEL_PRERELEASE].
@@ -135,8 +135,13 @@ if(RDACCEL_AUDIO)
     core/audio/receiver.cpp
     core/audio/resampler.cpp
     core/audio/test_signal.cpp
+    core/audio/player.cpp
   )
-  list(APPEND RDACCEL_SOURCES core/audio/system_source_none.cpp)
+  if(APPLE)
+    list(APPEND RDACCEL_SOURCES platform/mac/audio_tap.mm platform/mac/audio_player.mm)
+  else()
+    list(APPEND RDACCEL_SOURCES core/audio/no_platform_audio.cpp)
+  endif()
 endif()
 if(APPLE)
   list(APPEND RDACCEL_SOURCES
@@ -245,6 +250,8 @@ if(APPLE)
     "-framework ScreenCaptureKit"
     "-framework IOSurface"
     "-framework IOKit"
+    "-framework CoreAudio"
+    "-framework AudioToolbox"
   )
 else()
   find_package(PkgConfig REQUIRED)
@@ -334,7 +341,7 @@ if(RDACCEL_INSTALL)
     set(RDA_PC_OPUS "")
   endif()
   if(APPLE)
-    set(RDA_PC_LIBS_PRIVATE "${RDA_PC_OPUS}-lz -lc++ -framework Foundation -framework AppKit -framework Carbon -framework CoreGraphics -framework CoreMedia -framework CoreVideo -framework VideoToolbox -framework ScreenCaptureKit -framework IOSurface -framework IOKit")
+    set(RDA_PC_LIBS_PRIVATE "${RDA_PC_OPUS}-lz -lc++ -framework Foundation -framework AppKit -framework Carbon -framework CoreGraphics -framework CoreMedia -framework CoreVideo -framework VideoToolbox -framework ScreenCaptureKit -framework IOSurface -framework IOKit -framework CoreAudio -framework AudioToolbox")
   else()
     string(JOIN " " RDA_PC_LIBS_PRIVATE ${RDA_PC_OPUS} ${FFMPEG_LDFLAGS} ${X11_LDFLAGS} ${PIPEWIRE_LDFLAGS} -lz -lstdc++ -lm -pthread)
   endif()
@@ -439,6 +446,11 @@ if(RDACCEL_BUILD_TESTS)
   add_executable(rdaccel_platform_tests tests/test_platform_codec.cpp tests/test_api.cpp
     tests/test_capi.cpp)
   target_link_libraries(rdaccel_platform_tests PRIVATE rdaccel_internal GTest::gtest_main)
+  if(APPLE AND RDACCEL_AUDIO)
+    target_sources(rdaccel_platform_tests PRIVATE tests/test_platform_audio_mac.mm)
+    target_compile_options(rdaccel_platform_tests PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+    target_link_libraries(rdaccel_platform_tests PRIVATE "-framework CoreAudio")
+  endif()
   if(NOT APPLE)
     target_sources(rdaccel_platform_tests PRIVATE tests/test_platform_x11.cpp)
     target_link_libraries(rdaccel_platform_tests PRIVATE PkgConfig::X11)

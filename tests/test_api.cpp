@@ -75,7 +75,7 @@ struct Received {
 }  // namespace
 
 TEST(PublicApi, VersionAndPlatform) {
-  EXPECT_STREQ(rdaccel::Version(), "1.12.0");
+  EXPECT_STREQ(rdaccel::Version(), "1.13.0");
   EXPECT_NE(std::string(rdaccel::PlatformName()), "");
   const auto a = rdaccel::NowMicros();
   EXPECT_GE(rdaccel::NowMicros(), a);
@@ -111,7 +111,7 @@ TEST(PublicApi, HostToViewerOverLocalPipe) {
 }
 
 // 1.11: a host told to send H.264 does so to a viewer that decodes it (on
-// macOS; a Linux viewer does not say it does, and gets HEVC).
+// macOS; a Linux viewer does not claim it, and gets HEVC).
 TEST(PublicApi, H264WhenAskedForAndTheViewerDecodesIt) {
   auto [host_end, viewer_end] = rdaccel::CreateLocalPipe();
   Received got;

@@ -5,8 +5,12 @@
 //
 //   rdaccel_view HOST [--udp=PORT | --tcp=PORT] [--seconds=10] [--dump=last.ppm] [--keyframe-at=S]
 //                (--key=<64 hex digits> | --plaintext)   (as on the serving side)
+//                [--audio [--audio-device]]
 //
 // The protocol of both ends must match: --udp with --udp, --tcp with --tcp.
+// --audio takes the host's sound (UDP only) and plays it on a null device:
+// read in real time and thrown away, so the statistics show what came; only
+// --audio-device plays it on this computer's default output device.
 // Uses only the public API; a GUI application would draw the picture from
 // on_frame and the cursor from on_cursor instead of counting them.
 
@@ -16,6 +20,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -90,10 +95,20 @@ int main(int argc, char** argv) {
     if (st == rdaccel::ConnectionState::kDisconnected) std::printf("disconnected: %s\n", rda_status_str(reason));
     std::fflush(stdout);
   };
+  options.audio = args.has("audio");
   auto viewer = rdaccel::Viewer::Create(std::move(transport), std::move(handlers), options, &err);
   if (!viewer) {
     std::fprintf(stderr, "%s\n", err.c_str());
     return 1;
+  }
+  std::unique_ptr<rdaccel::AudioPlayer> player;
+  if (options.audio) {
+    // The null device unless asked for the real one.
+    player = rdaccel::AudioPlayer::Create(*viewer, /*null_device=*/!args.has("audio-device"), &err);
+    if (!player) {
+      std::fprintf(stderr, "sound: %s\n", err.c_str());
+      return 1;
+    }
   }
 
   const auto t0 = std::chrono::steady_clock::now();
@@ -142,6 +157,14 @@ int main(int argc, char** argv) {
       std::fclose(f);
       std::printf("wrote %s\n", dump.c_str());
     }
+  }
+  if (player) {
+    const auto st = viewer->stats();
+    std::printf("sound: %llu packets, %.1f kB, %llu concealed, %llu late, %llu underruns, buffer %d ms, target %d ms\n",
+                static_cast<unsigned long long>(st.audio_packets), st.audio_bytes / 1e3,
+                static_cast<unsigned long long>(st.audio_lost), static_cast<unsigned long long>(st.audio_late),
+                static_cast<unsigned long long>(st.audio_underruns), st.audio_buffer_ms, st.audio_target_ms);
+    player.reset();  // before the viewer
   }
   std::printf("decoder %s, %llu frames\n", viewer->decoder_name().c_str(), static_cast<unsigned long long>(frames));
   return frames > 0 ? 0 : 1;

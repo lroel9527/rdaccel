@@ -2,21 +2,27 @@
 
 ## macOS
 
-需要 macOS 14+（Apple Silicon 或 Intel）、Xcode 命令行工具和 CMake（`brew install cmake`）。默认部署目标是 14.0，在新系统上构建的产物也能在 14.0 上运行；用到更新系统才有的接口时必须加 `@available` 分支，否则编译报错（`-Werror=unguarded-availability-new`）。
+需要 macOS 14.2+（Apple Silicon 或 Intel）、Xcode 命令行工具和 CMake（`brew install cmake`）。默认部署目标是 14.2（声音采集用的 Process Tap 从 14.2 起才有），在新系统上构建的产物也能在 14.2 上运行；用到更新系统才有的接口时必须加 `@available` 分支，否则编译报错（`-Werror=unguarded-availability-new`）。
+
+第一次配置时 CMake 从 `downloads.xiph.org` 下载 Opus 1.6.1（声音的编解码，核对 SHA256 后静态编进库里）。离线构建：`-DFETCHCONTENT_SOURCE_DIR_OPUS=<解开的 opus-1.6.1 目录>`；不要声音：`-DRDACCEL_AUDIO=OFF`。
 
 ```bash
 git clone https://github.com/lroel9527/rdaccel && cd rdaccel
 cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build -j
 
-./build/bin/rdaccel_tests            # 单元测试 + 公开 API 测试
-./build/bin/rdaccel_platform_tests   # VideoToolbox 编解码、采集等平台测试
+ctest --test-dir build -j8           # 全部测试（单元测试、公开 API、平台测试）
+# 或者直接跑，这时自己设 RDACCEL_AUDIO_NULL_OUTPUT=1（声音播放器只用空设备）：
+RDACCEL_AUDIO_NULL_OUTPUT=1 ./build/bin/rdaccel_tests
+RDACCEL_AUDIO_NULL_OUTPUT=1 ./build/bin/rdaccel_platform_tests
 
 # 本机回环：采集主屏 -> 硬编 -> 硬解 -> 窗口显示
 open build/bin/rdaccel_loopback.app --args --fps=60 --bitrate=8000000
 ```
 
-第一次采集屏幕时 macOS 会要求“屏幕录制”权限：系统设置 → 隐私与安全性 → 屏幕与系统录音，给程序（或运行命令的终端）打开后重启程序。输入注入（`rdaccel_serve --inject`）还需要“辅助功能”权限。库不采集也不播放声音。
+第一次采集屏幕时 macOS 会要求“屏幕录制”权限：系统设置 → 隐私与安全性 → 屏幕与系统录音，给程序（或运行命令的终端）打开后重启程序。输入注入（`rdaccel_serve --inject`）还需要“辅助功能”权限。采集系统声音（`RDA_AUDIO_SOURCE_SYSTEM`，`rdaccel_serve --audio`）要同一页里的“仅系统音频录制”，它和屏幕录制是两项：应用的 Info.plist 必须有 `NSAudioCaptureUsageDescription`，否则系统直接拒绝、不弹询问；询问在第一次开始读声音时出现，建 tap 本身不问；没有权限时读到的全是零。
+
+**测试不出声**：CTest 给每个测试设 `RDACCEL_AUDIO_NULL_OUTPUT=1`，这时播放器不打开任何输出设备；测试信号都是算出来的，没有测试放声音或改音量。读系统声音的测试默认跳过，`RDACCEL_TEST_AUDIO_TAP=1` 才跑，它建的 tap 不让本机静音（`CATapUnmuted`），读到的样本只数个数、看时间戳，不保存。
 
 ## Linux
 

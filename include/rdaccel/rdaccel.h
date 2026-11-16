@@ -43,7 +43,7 @@ extern "C" {
 /* ---- version ------------------------------------------------------------ */
 
 #define RDA_VERSION_MAJOR 1
-#define RDA_VERSION_MINOR 12
+#define RDA_VERSION_MINOR 13
 #define RDA_VERSION_PATCH 0
 /* "rc1" and so on for a pre-release, "" for a release. rda_version() does
  * not include it; rda_version_string() does ("1.0.0-rc1"). */
@@ -701,7 +701,7 @@ typedef struct rda_viewer_config {
   int32_t reserved0;
   /* 1.13. 1: take the host's sound, over a transport that carries datagrams
    * (UDP, simulated networks, pipes; not TCP or a custom transport). Read it
-   * with rda_viewer_read_audio(). */
+   * with rda_viewer_read_audio() or play it with rda_audio_player_create(). */
   int32_t audio; /* 0 */
 } rda_viewer_config;
 
@@ -826,6 +826,29 @@ RDA_API rda_status rda_host_get_audio_status(const rda_host* h, rda_audio_status
  * clock), 0 = now. One caller at a time. A viewer without
  * rda_viewer_config.audio gets silence. */
 RDA_API size_t rda_viewer_read_audio(rda_viewer* v, float* out, size_t frames, uint64_t play_time_us);
+
+/* Optional, like rda_injector: plays the viewer's sound (it calls
+ * rda_viewer_read_audio itself) on the default output device, following it
+ * when it changes (macOS; elsewhere only the null device). The system's
+ * volume applies; nothing is set. With null_device, or the environment
+ * variable RDACCEL_AUDIO_NULL_OUTPUT=1 whatever null_device says, it opens no
+ * device: a thread of its own takes 5 ms every 5 ms and throws it away
+ * (tests, command-line tools). */
+typedef struct rda_audio_player rda_audio_player;
+typedef struct rda_audio_player_config {
+  uint32_t struct_size;
+  int32_t null_device; /* 0; 1: open no device, read and discard (tests) */
+} rda_audio_player_config;
+RDA_API void rda_audio_player_config_default(rda_audio_player_config* c);
+/* RDA_ERR_UNSUPPORTED where there is no device to open (Linux without
+ * null_device) or the library was built without sound. Destroy it before
+ * the viewer. */
+RDA_API rda_status rda_audio_player_create(rda_viewer* v, const rda_audio_player_config* config,
+                                           rda_audio_player** out);
+RDA_API void rda_audio_player_destroy(rda_audio_player* p);
+/* 1: the default output is muted or at volume 0; 0: audible; -1: not known
+ * (the null device). Read-only. Thread-safe. */
+RDA_API int rda_audio_player_output_muted(const rda_audio_player* p);
 
 /* ---- recordings ---------------------------------------------------------- */
 

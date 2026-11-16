@@ -18,7 +18,7 @@ rdaccel 是一个“分层混合编码”的远程桌面库：先判断哪些块
  └──────────┘         码率控制 ◀── 传输统计（带宽、RTT、队列）       └──────────────────────┘
 ```
 
-1. **采集**：macOS 用 ScreenCaptureKit（带系统脏区，不采集声音），Linux 用 X11 MIT-SHM，Wayland 下用 xdg-desktop-portal + PipeWire（带合成器脏区）；应用也可以自己调用 `SubmitFrame` 喂 BGRA 画面。光标不画进画面，单独采样。
+1. **采集**：macOS 用 ScreenCaptureKit（带系统脏区，不采集声音：声音走 Process Tap，见“声音”一节），Linux 用 X11 MIT-SHM，Wayland 下用 xdg-desktop-portal + PipeWire（带合成器脏区）；应用也可以自己调用 `SubmitFrame` 喂 BGRA 画面。光标不画进画面，单独采样。
 2. **分块比对**（`core/tile/tile_diff`）：画面切成 64×64 块，逐块算内容哈希，和上一帧比较。没有块变化的帧整帧跳过。
 3. **分流**：变化块按代价从低到高试四条路。
    - **平移**（`core/tile/motion`）：变化块多时，取每块最有细节的一行做滚动哈希，在上一帧里找位置投票出位移，逐块精确比对后发拷贝指令。滚动区和窗口边缘的块按 4 像素宽的条和像素行再拆，只把新露出的像素送去编码。
@@ -49,15 +49,39 @@ rdaccel 是一个“分层混合编码”的远程桌面库：先判断哪些块
 | video | HEVC 码流和本帧的区域列表 |
 | cursor | 指针位置和光标图像，高优先级 |
 | message | 应用消息（剪贴板文本或自定义类型），可靠有序 |
+| bulk | 大块传输（文件）的应用消息：可靠有序，排在画面之后，只用路径空出来的部分（1.10） |
+
+另有**数据报**（1.13，`Transport::SendDatagram`）：不重传、不保序，排在所有通道前面，给声音用。UDP 传输（包类型 5）、模拟网络和进程内管道带它，TCP 和应用自己的传输不带（`CarriesDatagrams()`）。
 
 **UDP 可靠传输**（`core/net/reliable_transport`）：
 
 - **丢包恢复**：每个包有新的包号，接收端按区间确认，发送端判定丢失后重传那段字节。判定条件是之后三个包已确认、明显早于一个往返，或探测超时。每个通道是独立的有序字节流，丢一个视频包不会卡住输入、光标和控制。
 - **拥塞控制**：简化的 BBR。从确认里测投递速率和最小 RTT，按测得的瓶颈带宽发包，在途字节不超过约两个带宽时延积，所以不会把路由器缓冲塞满，也不会因为随机丢包就退让。弱网下的几处细节（排队时冻结平滑 RTT、只让“确认比发送慢”的样本拉低估计、裁剪时至少留 4 个样本）见 [CHANGELOG](../CHANGELOG.md) 0.4.0。
 
-**加密**（`core/transport/secure_transport`）：TCP 和 UDP 上的数据用应用提供的 32 字节密钥做 XChaCha20-Poly1305（内置 Monocypher）。不加密必须显式 `allow_plaintext`。密钥由应用的配对流程产生，库不做证书和配对。
+- **数据报**：和数据包共用包号、照常确认，所以算进在途字节、投递速率和 RTT，发包间隔按它的大小往后推（画面让出这部分速率）；但发送时不等拥塞窗口和发包间隔（声音只占百分之几，排队就是抖动），排在所有通道前面，丢了只计数不重发，入队 100 ms 还没发出去的丢弃。带宽采样优先用确认里最新的数据包（数据报不经发包间隔，拿它采样会拖住起步阶段的结束）。画面的码率控制把数据报最近一秒的速率从带宽估计里扣掉。
+
+**加密**（`core/transport/secure_transport`）：TCP 和 UDP 上的数据用应用提供的 32 字节密钥做 XChaCha20-Poly1305（内置 Monocypher）。不加密必须显式 `allow_plaintext`。密钥由应用的配对流程产生，库不做证书和配对。数据报一个个单独封（`[计数器][密文][标签]`，nonce 首字节 0xFE），接收端 128 个位置的重放窗口，验不过的丢弃并计数、不断开连接。
 
 **连接层**（`core/session/link`）：握手和版本协商（能力位）、心跳和断线检测、关闭时通知对方、认证钩子、应用消息。
+
+## 声音
+
+1.13 起。一个 host 一路声音，48 kHz 立体声：
+
+```text
+host：Process Tap（全局、排除本进程）→ 私有聚合设备的 IOProc（实时线程，只拷贝）
+      → 声音线程：转 48 kHz → 切帧（10 / 20 ms）→ 静音门 → 单声道判断 → Opus（CELT）→ 声音包
+      → 数据报（加密）
+viewer：数据报 → 无锁环 → rda_viewer_read_audio（渲染线程）：抖动缓冲 → Opus 解码 / 丢包补偿
+      → 可变比例重采样（跟住对方的时钟）→ 输出
+```
+
+- 采集在 `platform/mac/audio_tap.mm`：只有 tap 的私有聚合设备，不放硬件子设备，被控端从不打开输出设备。`mute_local`（被读时本机不出声，`CATapMutedWhenTapped`）只在确认有“系统声音录制”权限之后才用：没权限时 tap 照常运行但只给零，这时静音会让两边都没声音。tap 和聚合设备属于本进程，进程没了 coreaudiod 就回收，本机声音自己回来。
+- 声音包（`core/audio/audio_packet.h`）：9 字节头（类型、标志、声音段号、包号、样本位置），可带采集时刻（每段开头 5 个包，之后每 250 个包一次）和上一帧的副本。
+- 发送端（`core/audio/sender`）：静音门（2⁻¹⁵，200 ms 尾巴，之后不发；恢复时带上前一帧，两端都重置编解码器，起音完整），左右相同 500 ms 后按单声道编，有丢包时带副本，对方听不到时暂停。档位（10 ms / 160 kbps，20 ms / 96 kbps）中途可换，Opus 包自带帧长和声道数。
+- 接收端（`core/audio/receiver`）：按样本位置排好的帧；目标延迟跟着测到的抖动（20–60 ms）；缺帧补偿、积压追赶、PI 控制的轻微变速（`core/audio/resampler`，多相 sinc）；和画面对时间（声音早于画面超过 20 ms 时才推迟它）。
+- 协商：能力位 `kCapAudio`，host 只给有这一位的 viewer 采集和发送。
+- 播放器（`core/audio/player`、`platform/mac/audio_player.mm`）是可选模块；`RDACCEL_AUDIO_NULL_OUTPUT=1` 时一律用空设备，测试都在这个条件下跑。
 
 ## 自适应码率
 
@@ -104,12 +128,13 @@ core/              平台无关的内部实现（命名空间 rdacore），可�
   tile/            分块比对、平移检测、块缓存索引、视频区域
   codec/           调色板无损层、HEVC / H.264 码流格式、编解码器接口、编码选择
   session/         Host / Viewer 会话、连接层、码率控制、光标通道
+  audio/           声音：包格式、Opus 发送端（静音门）、接收端（抖动缓冲、漂移）、重采样、测试信号、空设备播放器
   net/             UDP、可靠传输、网络模拟
   transport/       进程内管道、TCP、加密层
   proto/ io/ log/  线上消息、录制文件、日志
-platform/mac/      ScreenCaptureKit、VideoToolbox、光标、显示器列表、CGEvent 注入
+platform/mac/      ScreenCaptureKit、VideoToolbox、光标、显示器列表、CGEvent 注入、Process Tap 声音采集、声音播放
 platform/linux/    X11 / XFixes / RandR、Wayland（portal + PipeWire）、FFmpeg（NVENC、x265、VAAPI）、XTest 注入
-third_party/       Monocypher
+third_party/       Monocypher（Opus 在配置时下载，见 building.md）
 examples/          只用公开 API 的示例和工具
 tools/clip/        测试片段：录真实屏幕、按场景自动录、测评、两个版本对比（见 clips.md）
 tests/ fuzz/       GoogleTest 单元测试、libFuzzer 目标

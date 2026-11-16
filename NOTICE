@@ -10,3 +10,9 @@ terms of the GPL.
 third_party/monocypher: Monocypher 4.0.2, Copyright (c) 2017-2023 Loup
 Vaillant, Michael Savage, Fabio Scotoni; BSD-2-Clause or CC0 (see
 third_party/monocypher/LICENCE.md).
+
+Opus 1.6.1 (fetched at configure time, built into the library unless
+RDACCEL_AUDIO=OFF), Copyright 2001-2023 Xiph.Org, Skype Limited, Octasic,
+Jean-Marc Valin, Timothy B. Terriberry, CSIRO, Gregory Maxwell, Mark Borgerding,
+Erik de Castro Lopo, Mozilla, Amazon; BSD-3-Clause (see COPYING in the Opus
+sources, https://opus-codec.org/license/).

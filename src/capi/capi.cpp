@@ -20,6 +20,9 @@
 
 #include "capture/capturer.h"
 #include "capture/synthetic_capturer.h"
+#if RDACCEL_HAVE_AUDIO
+#include "audio/player.h"
+#endif
 #include "log/log.h"
 #include "platform.h"
 #include "rdacore/rdacore.h"
@@ -1336,6 +1339,63 @@ size_t rda_viewer_read_audio(rda_viewer* v, float* out, size_t frames, uint64_t 
   }
   // No exceptions here: Read neither allocates nor throws.
   return v->viewer->ReadAudio(out, frames, play_time_us);
+}
+
+}  // extern "C"
+
+struct rda_audio_player {
+#if RDACCEL_HAVE_AUDIO
+  std::unique_ptr<rdacore::audio::Player> player;
+#endif
+};
+
+extern "C" {
+
+void rda_audio_player_config_default(rda_audio_player_config* c) {
+  if (!c) return;
+  *c = rda_audio_player_config{};
+  c->struct_size = sizeof(*c);
+}
+
+rda_status rda_audio_player_create(rda_viewer* v, const rda_audio_player_config* config, rda_audio_player** out) {
+  RDA_GUARD_BEGIN
+  if (!v || !out) return Fail(RDA_ERR_INVALID_ARG, "viewer and out are required");
+  rda_audio_player_config c;
+  rda_audio_player_config_default(&c);
+  if (config && !ReadStruct(config, c)) return Fail(RDA_ERR_INVALID_ARG, "config needs struct_size");
+#if RDACCEL_HAVE_AUDIO
+  rdacore::Viewer* viewer = v->viewer.get();
+  auto render = [viewer](float* buf, size_t frames, uint64_t t) { return viewer->ReadAudio(buf, frames, t); };
+  auto p = std::make_unique<rda_audio_player>();
+  // Tests (and anything else that sets the variable) never open a device.
+  if (c.null_device || rdacore::audio::NullOutputForced()) {
+    p->player = rdacore::audio::CreateNullPlayer(render);
+  } else {
+    std::string err;
+    p->player = rdacore::audio::CreateDevicePlayer(render, &err);
+    if (!p->player) return Fail(RDA_ERR_UNSUPPORTED, err);
+  }
+  *out = p.release();
+  return RDA_OK;
+#else
+  return Fail(RDA_ERR_UNSUPPORTED, "this library was built without sound (RDACCEL_AUDIO=OFF)");
+#endif
+  RDA_GUARD_END
+}
+
+void rda_audio_player_destroy(rda_audio_player* p) { delete p; }
+
+int rda_audio_player_output_muted(const rda_audio_player* p) {
+#if RDACCEL_HAVE_AUDIO
+  try {
+    return p && p->player ? p->player->OutputMuted() : -1;
+  } catch (...) {
+    return -1;
+  }
+#else
+  (void)p;
+  return -1;
+#endif
 }
 
 size_t rda_viewer_decoder_name(const rda_viewer* v, char* buf, size_t buf_size) {

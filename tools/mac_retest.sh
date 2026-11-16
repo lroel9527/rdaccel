@@ -3,10 +3,12 @@
 #
 #   tools/mac_retest.sh [--skip-build] [--skip-screen] [--background=SCREEN.ppm]
 #
-# SILENT: nothing here plays or records sound. rdaccel has no audio code at
-# all (ScreenCaptureKit is configured with capturesAudio = NO), and the
-# script never calls say, afplay, osascript, or anything else that makes
-# sound. It does not touch the volume either.
+# SILENT: nothing here plays or records sound. ScreenCaptureKit is
+# configured with capturesAudio = NO; the sound code (1.13) is tested with
+# computed signals and the player's null device only (RDACCEL_AUDIO_NULL_OUTPUT
+# below), and the test that reads this computer's sound is skipped. The
+# script runs no speech, sound player or scripting command, nothing else that
+# makes a sound, and does not touch the volume either.
 #
 # --skip-screen leaves out the steps that capture the real screen (they need
 # the Screen Recording permission for the terminal; macOS asks once, which is
@@ -79,6 +81,10 @@ if [[ $skip_build == 0 ]]; then
     exit 1
   fi
 fi
+
+# Sound: the player opens no output device, whatever a test asks for (as
+# under CTest).
+export RDACCEL_AUDIO_NULL_OUTPUT=1
 
 # 1. Unit tests, then VideoToolbox + public API tests (hardware encoder).
 run unit_tests "$bin/rdaccel_tests"

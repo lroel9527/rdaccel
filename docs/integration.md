@@ -139,12 +139,42 @@ host.SetInputHandler([&](const rdaccel::InputEvent& ev) { injector->Inject(ev); 
 | `Host::SetCursor`、`SetCursorImage`、`RequestKeyframe`、`stats` | 任意线程 | 线程安全 |
 | `Viewer::SendInput`、`RequestKeyframe`、`stats` | 任意线程 | 线程安全 |
 | `SendMessage`、`state()`（两端） | 任意线程 | 线程安全；大消息会分块，多线程同时发也不会交错 |
+| `rda_host_submit_audio` | 调用者的线程 | 不能并发调用；编码在这个线程上做 |
+| `rda_host_set_audio_profile`、`set_audio_paused`、`get_audio_status`、`stop_audio` | 任意线程 | 线程安全 |
+| `rda_viewer_read_audio` | 一个调用者（声音的渲染线程） | 不阻塞、不分配、不打日志，可以直接在 Core Audio 的渲染回调里调 |
+| 播放器（`rda_audio_player`） | 自己的线程（真设备：AudioUnit 的渲染线程；空设备：库的线程） | 在 viewer 之前销毁 |
 
 ## 3. 生命周期
 
 - `Host` 和 `Viewer` 拥有传给它们的 `Transport`，析构时先停接收线程，再释放会话。析构返回后不会再有任何回调。C 接口里 `rda_host_create` / `rda_viewer_create` 无论成功失败都接管传入的 `rda_transport*`，调用方不要再释放它；没交出去的传输用 `rda_transport_destroy` 释放。
 - 回调里捕获的对象必须活得比 `Host` / `Viewer` 长，或者在它们析构之前不再被用到。最简单的做法是先声明回调用到的状态，再声明 `Host` / `Viewer`，让它们先析构。
 - 分辨率可以随时变：送进一帧新尺寸的画面（或采集到的屏幕分辨率变了），Host 就以新尺寸重开编码器、发关键帧，新的尺寸信息跟画面走同一个有序通道，接收端在新旧画面之间准确切换，再收到一次 `on_stream_info`。`HostStats::resolution_changes` 记录次数，帧号连续。
+
+## 3.1 声音（1.13）
+
+```c
+/* host：开了以后，有一个要声音的 viewer 连上就开始采集，它走了就停 */
+rda_audio_config ac;
+rda_audio_config_default(&ac);
+ac.source = RDA_AUDIO_SOURCE_SYSTEM;      /* 或 _TEST（算出来的测试信号）、_APP（自己 submit） */
+ac.profile = RDA_AUDIO_PROFILE_FULL;      /* _SAVER：20 ms 一帧、96 kbps */
+ac.mute_local = 1;                        /* 传声音时本机不出声（有权限时才生效） */
+rda_host_start_audio(host, &ac);
+
+/* viewer：在 config 里要声音，然后要么自己读，要么交给播放器 */
+vc.audio = 1;
+rda_viewer_create(transport, &vc, &viewer);
+rda_audio_player* player;
+rda_audio_player_create(viewer, NULL, &player);   /* 默认输出设备 */
+...
+rda_audio_player_destroy(player);                  /* 在 viewer 之前 */
+```
+
+- 只有带数据报的传输有声音：UDP（`rda_udp_*`）、模拟网络、进程内管道。TCP 和自定义传输上 viewer 不声明能力位，host 的状态停在 `RDA_AUDIO_STATE_WAITING_PEER`，什么都不采集。
+- 权限（macOS）：采集要“系统声音录制”（TCC `kTCCServiceAudioCapture`，系统设置 → 隐私与安全性 → 屏幕与系统音频录制里的“仅系统音频录制”），和屏幕录制是两项。应用的 Info.plist 要有 `NSAudioCaptureUsageDescription`。询问在第一次开始读声音时出现；没有权限时采集照常运行但只给零（状态是 `RUNNING`，`silent` 为 1），明确拒绝时是 `NO_PERMISSION`。TCC 在一个进程里按缓存回答，进程运行中改了的授权可能要到下一个进程才查得到；所以没确认有权限时 tap 每 5 秒重建一次，读到非零样本就算确认。
+- `mute_local`：被读时本机不出声。只在确认有权限之后生效（`rda_audio_status.muted_local` 说现在是否在静音）；没确认之前本机照常出声。本机的音量、静音键、默认设备都不动；进程退出（包括崩溃）后本机声音自己回来。
+- 统计：`rda_host_stats.bytes_sent` 和 `rda_viewer_stats.bytes_received` 都包含声音；单独的 `audio_*` 字段见头文件。和画面一样不含 UDP/IP 和加密的包头，声音包小，线上每包另有约 56 字节。
+- 测试：设环境变量 `RDACCEL_AUDIO_NULL_OUTPUT=1`，播放器就不打开任何设备；`RDA_AUDIO_SOURCE_TEST` 不碰任何设备。
 
 ## 4. 传输怎么选
 
@@ -210,10 +240,11 @@ host.SetInputHandler([&](const rdaccel::InputEvent& ev) { injector->Inject(ev); 
 | | macOS | Linux |
 | --- | --- | --- |
 | 编码 / 解码 | VideoToolbox（HEVC 硬件；HEVC 太慢时 H.264，见 `rda_host_config.video_codec`） | FFmpeg：NVENC，否则 libx265；解码 FFmpeg（只有 HEVC） |
-| 屏幕采集 | ScreenCaptureKit，需要"屏幕录制"权限，不采集声音 | X11 MIT-SHM；Wayland 用 xdg-desktop-portal + PipeWire（系统弹窗选屏，见 building.md） |
+| 屏幕采集 | ScreenCaptureKit，需要"屏幕录制"权限 | X11 MIT-SHM；Wayland 用 xdg-desktop-portal + PipeWire（系统弹窗选屏，见 building.md） |
+| 声音 | 采集：Process Tap，需要“系统声音录制”权限和 `NSAudioCaptureUsageDescription`；播放：默认输出设备 | 编解码、传输和空设备；没有系统采集和真设备播放 |
 | 光标 | CoreGraphics + NSCursor | XFixes；Wayland 用 PipeWire 光标元数据，没有时画进画面 |
-| 系统版本 | macOS 14+，Apple Silicon 或 Intel（发布包是 universal） | 见 building.md |
-| 依赖 | 系统框架 | `libavcodec libavutil libswscale libx11 libxext libxfixes zlib`，Wayland 另需 `libpipewire-0.3 gio-2.0` |
+| 系统版本 | macOS 14.2+，Apple Silicon 或 Intel（发布包是 universal） | 见 building.md |
+| 依赖 | 系统框架；Opus（配置时下载，编进库里） | `libavcodec libavutil libswscale libx11 libxext libxfixes zlib`，Wayland 另需 `libpipewire-0.3 gio-2.0`；Opus 同左 |
 
 ## 8. 版本
 

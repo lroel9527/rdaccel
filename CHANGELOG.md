@@ -3,6 +3,35 @@
 版本号遵循语义化版本。从 1.0 起，同一主版本内 C ABI 只加不改（新函数、结构体末尾加字段），
 `find_package(rdaccel 1.0)` 接受任何 1.x。1.0 之前次版本号（0.x）变化时 C ABI 可能有不兼容改动。
 
+## 1.13.0
+
+新功能：声音。C ABI 只加不改（新函数；`rda_viewer_config`、`rda_host_stats`、`rda_viewer_stats` 末尾加字段），线上格式多了一个能力位和一种传输包，和旧版本互通（旧的一端没有声音）。最低系统改为 macOS 14.2。
+
+### 声音
+
+- **采集**（`RDA_AUDIO_SOURCE_SYSTEM`，macOS 14.2）：Core Audio 的 Process Tap，全局、立体声、排除本进程（和 `exclude_bundle_ids` 列的应用），经一个只含这个 tap 的私有聚合设备读出（不放任何硬件子设备：被控端从不打开输出设备）。IOProc 只把样本和时间戳拷进无锁环；声音线程转成 48 kHz 立体声（tap 不是 48 kHz 时才用 AudioConverter）。默认输出设备变、tap 格式变、coreaudiod 重启、设备停了、要排除的应用出现时自己重建（300 ms 内合并，失败每 2 秒再试）。`mute_local`：被读时本机不出声（`CATapMutedWhenTapped`），只在确认有“系统声音录制”权限之后（TCC 说已允许，或者读到了非零样本）；没确认之前用 `CATapUnmuted`，每 5 秒重建一次，让中途给的权限生效。进程一死 tap 就没了，本机声音自己回来；不改任何音量、静音或默认设备。另有 `RDA_AUDIO_SOURCE_TEST`（算出来的测试信号，不碰任何设备）和 `RDA_AUDIO_SOURCE_APP`（`rda_host_submit_audio`）。
+- **编码**：Opus（CELT，`RESTRICTED_LOWDELAY`，VBR，复杂度 10，全频带）。两个档位：`RDA_AUDIO_PROFILE_FULL` 10 ms 一帧、立体声 160 kbps，`RDA_AUDIO_PROFILE_SAVER` 20 ms 一帧、96 kbps（`rda_host_set_audio_profile` 中途可换）。不用 Opus 的带内 FEC 和 DTX。
+- **听不出来的节省**：静音门（一帧所有样本都低于 2⁻¹⁵，约 −90 dBFS，连续 200 ms 后最后一个包带 END，之后不编码不发；有声音的那一帧连同前一帧一起发，解码端同样重置，起音完整）；左右逐样本相同 500 ms 后按单声道编（码率换成单声道那档，出现一个不同的样本就回到立体声）；有丢包（≥1%）时每包带上一帧的副本，连续 30 秒低于 0.3% 再关；`rda_host_set_audio_paused`（对方听不到）时不发。
+- **传输**：传输的新“数据报”（`Transport::SendDatagram`）：不重传、不保序，排在所有通道前面、不等拥塞窗口和发包间隔，但照常编号确认，算进在途、投递速率和 RTT，发包间隔给它让路；画面的码率控制扣掉它最近一秒的速率。入队 100 ms 还没发出去的丢弃。UDP 传输（包类型 5）、模拟网络和进程内管道带数据报；TCP 和应用自己的传输不带（那里没有声音）。加密：每个数据报单独用 XChaCha20-Poly1305 封（nonce 首字节 0xFE、每方向一个计数器），接收端 128 个位置的重放窗口；验不过的丢弃并计数，不断开连接。
+- **协商**：能力位 `kCapAudio`（不在 `kCapsAll` 里）：viewer 要声音（`rda_viewer_config.audio`）且传输带数据报时放进 ViewerHello，host 开了声音时放进 Welcome。host 只在对方有这一位时才采集、才发；没有时（旧版本、没要、TCP）状态是 `RDA_AUDIO_STATE_WAITING_PEER`，tap 根本不建。
+- **接收**：抖动缓冲（目标延迟 = 最近 5 秒相对延迟的 99 分位 − 最近 10 秒的最小值 + 5 ms，限制在 20–60 ms，起始 30；欠载后 30 秒内上限放宽到 200 ms）；缺帧用 Opus 丢包补偿（最多连续 5 帧，之后淡出、计一次欠载）；网络停顿后积得太多时一次跳回目标、5 ms 交叉淡化；时钟漂移靠轻微变速（PI 控制，最多 ±5000 ppm，正常 ±100 ppm 以内）经可变比例的多相 sinc 重采样器（64 抽头、256 相位），不丢不插。缓冲水位在每个包到达时取样（固定间隔取样会把每帧一次的锯齿混叠成随漂移游走的偏差）。声音比画面早 20 ms 以上持续 2 秒时把目标延迟加上差额（最多 120 ms），回到不早于画面后每秒收回 10 ms；画面静止时不做。`rda_viewer_read_audio` 给渲染线程用：不阻塞、不分配、不打日志。
+- **播放器**（可选模块，和 `rda_injector` 一样）：`rda_audio_player_create`，macOS 上用默认输出设备（DefaultOutput AudioUnit，跟随默认设备；请求 256 帧的 IO 缓冲），音量跟系统走、从不设置；`rda_audio_player_output_muted` 只读地报告默认输出是否静音或音量为 0。`null_device = 1`，或者环境变量 `RDACCEL_AUDIO_NULL_OUTPUT=1`（不管 `null_device` 怎么设），不打开任何设备，一个线程每 5 ms 取 240 帧后丢弃。CTest 给每个测试都设这个变量。
+- **状态和统计**：`rda_host_get_audio_status`（状态、是否在静音段、当前码率、帧长、声道数、是否正让本机静音、失败原因）；`rda_host_stats` 加 `audio_packets / audio_bytes / audio_frames / audio_frames_gated / audio_red_bytes / audio_dropped_stale`，`bytes_sent` 包含 `audio_bytes`；`rda_viewer_stats` 加 `audio_packets / audio_bytes / audio_lost / audio_late / audio_underruns / audio_buffer_ms / audio_target_ms / audio_drift_ppm / av_offset_ms`，`bytes_received` 包含 `audio_bytes`。`rda_viewer_config` 先加不读的 `reserved0`（1.12 的尾部补齐，旧程序的 `struct_size` 包含它），再加 `audio`。
+- **依赖**：Opus 1.6.1，配置时由 CMake 下载（`downloads.xiph.org`，固定版本和 SHA256；`FETCHCONTENT_SOURCE_DIR_OPUS` 可指向本地源码），静态编进库里，动态库不导出它的符号；`RDACCEL_AUDIO=OFF` 不要它，声音函数都返回 `RDA_ERR_UNSUPPORTED`。关掉了 Opus 的内联指令（`OPUS_DISABLE_INTRINSICS`）：它的 CMake 按配置时的一种 CPU 选 SSE / NEON 文件，universal 构建会把一种架构的指令编进另一种；纯 C 在这台 Apple Silicon 上编码也有实时的 250 倍以上。Opus 是 BSD 许可，见 NOTICE。Linux 上编解码、传输、抖动缓冲和空设备照常，没有系统采集和真设备播放器。
+- **示例和工具**：`rdaccel_serve --audio[=test] [--mute-local]`、`rdaccel_view --audio`（空设备；`--audio-device` 才开真设备）、`rdaccel_netsim --audio` 和 `--scenario=audio`、`tools/netsim_matrix.py --audio`（0 / 1 / 5% 丢包 × 0 / 20 ms 抖动 × 1 / 10 Mbps）、`fuzz/fuzz_audio.cpp`。
+- **测试**：包格式、静音门、单声道、冗余、编解码（各频带能量、信噪比、起音、码率、速度、切换）、重采样器、抖动缓冲（假时钟下的抖动、丢包、乱序、停顿、±200 ppm 跑 10 分钟、声音段开头）、传输和加密的数据报、C 接口端到端；macOS 上时钟换算、空设备，`RDACCEL_TEST_AUDIO_TAP=1` 时一个不静音（`CATapUnmuted`）的 tap。所有信号都是算出来的，没有测试打开输出设备。
+
+### 实测（这台 Mac，模拟网络，测试信号）
+
+- 测试信号循环（4 秒里约 2 秒有声音）：普通模式统计口径约 108 kbps、线上约 131 kbps；省流量模式约 73 / 85 kbps。路径上有 ≥1% 丢包、冗余打开后普通模式约 162–182 kbps、省流量约 120 kbps。
+- 多音信号：普通模式 Opus 数据约 181 kbps（目标 160），省流量约 114 kbps（目标 96），都在 ±25% 内。
+- 画面占满 4 Mbps 时数据报的单程延迟：中位数比空闲时多约 15 ms，99 分位多约 30 ms（是画面在网络瓶颈里留的排队，和画面自己的包一样）。
+
+### 其他
+
+- **数据报不打乱起步**：确认里最新的包是数据报时，带宽采样改用最新的数据包：数据报不经发包间隔、算应用受限，拿它采样会让起步阶段一直看不到“带宽不再增长”，起步时的排队站了好几秒（一次测量里 3 秒多的 120 ms RTT）。
+- **最低 macOS 14.2**（原来 14.0）：Process Tap 从 14.2 起才有。`CMakeLists.txt` 照旧把缓存里更低的部署目标提到 14.2。
+
 ## 1.12.0
 
 最低系统改为 macOS 14：C ABI 和线上格式不变，macOS 12 和 13 不再支持。

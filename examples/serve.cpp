@@ -5,6 +5,7 @@
 //   rdaccel_serve [--udp=PORT | --tcp=PORT] [--source=screen|synthetic] [--seconds=0]
 //                 (--key=<64 hex digits> | --plaintext)
 //                 [--size=WxH] [--fps=60] [--bitrate=8000000] [--display=0] [--inject] [--once]
+//                 [--audio[=system|test]] [--mute-local]
 //   rdaccel_serve --list-displays
 //
 // UDP (the default, port 7300) has congestion control and adaptive bitrate;
@@ -13,6 +14,10 @@
 // with --source=screen the size the screen is captured at (default: native). --seconds=0 runs until the process is
 // killed (or, with --once, until the viewer disconnects). --inject plays the viewer's mouse and
 // keyboard into this machine (macOS: needs the Accessibility permission).
+// --audio sends this computer's sound (macOS 14.2: needs the System Audio
+// Recording permission) to a viewer that asks for it (rdaccel_view --audio,
+// over UDP); --audio=test sends the computed test loop instead, touching no
+// device. --mute-local keeps this computer silent while its sound is sent.
 // Uses only the public API.
 
 #include <rdaccel/rdaccel.hpp>
@@ -164,6 +169,17 @@ int main(int argc, char** argv) {
     if (injector && !injector->Inject(ev, &e)) std::fprintf(stderr, "inject: %s\n", e.c_str());
   });
 
+  if (args.has("audio")) {
+    rdaccel::AudioConfig ac;
+    const std::string which = args.str("audio", "system");
+    ac.source = which == "test" ? rdaccel::AudioConfig::Source::kTest : rdaccel::AudioConfig::Source::kSystem;
+    ac.mute_local = args.has("mute-local");
+    if (!host.StartAudio(ac, &err)) {
+      std::fprintf(stderr, "sound: %s\n", err.c_str());
+      return 1;
+    }
+  }
+
   if (source == "screen") {
     if (!host.StartScreenCapture(&err)) {
       std::fprintf(stderr, "screen capture: %s\n", err.c_str());
@@ -200,6 +216,14 @@ int main(int argc, char** argv) {
     }
   }
   host.StopScreenCapture();
+  if (args.has("audio")) {
+    const auto st = host.stats();
+    const auto a = host.audio_status();
+    std::printf("sound: state %d%s%s, %llu packets, %.1f kB, %llu frames silent\n", a.state,
+                a.message.empty() ? "" : ": ", a.message.c_str(), static_cast<unsigned long long>(st.audio_packets),
+                st.audio_bytes / 1e3, static_cast<unsigned long long>(st.audio_frames_gated));
+  }
+  host.StopAudio();
   std::printf("encoder %s, %llu frames, %.1f MB sent\n", host.encoder_name().c_str(),
               static_cast<unsigned long long>(host.stats().frames_encoded), host.stats().bytes_sent / 1e6);
   return failed ? 1 : 0;
