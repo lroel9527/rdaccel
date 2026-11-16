@@ -4,6 +4,9 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <map>
+#include <mutex>
+#include <tuple>
 #include <vector>
 
 namespace rdacore::codec {
@@ -102,6 +105,36 @@ double MeasureEncodeFps(IHevcEncoder& enc, int32_t w, int32_t h, int frames, dou
     if (spent_s > budget_s) break;  // cannot reach stop_below_fps any more
   }
   return spent_s > 0 ? done / spent_s : 1e6;
+}
+
+namespace {
+
+std::mutex& FpsMu() {
+  static std::mutex mu;
+  return mu;
+}
+std::map<std::tuple<int, int32_t, int32_t>, double>& FpsCache() {
+  static std::map<std::tuple<int, int32_t, int32_t>, double> cache;
+  return cache;
+}
+
+}  // namespace
+
+std::optional<double> CachedHardwareFps(VideoCodec c, int32_t w, int32_t h) {
+  std::lock_guard<std::mutex> l(FpsMu());
+  auto it = FpsCache().find({static_cast<int>(c), w, h});
+  if (it == FpsCache().end()) return std::nullopt;
+  return it->second;
+}
+
+void CacheHardwareFps(VideoCodec c, int32_t w, int32_t h, double fps) {
+  std::lock_guard<std::mutex> l(FpsMu());
+  FpsCache()[{static_cast<int>(c), w, h}] = fps;
+}
+
+void ClearHardwareFpsCacheForTests() {
+  std::lock_guard<std::mutex> l(FpsMu());
+  FpsCache().clear();
 }
 
 }  // namespace rdacore::codec

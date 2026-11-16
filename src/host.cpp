@@ -209,8 +209,8 @@ struct Host::Impl {
 
   // The video codec (HostConfig::video_codec, codec/codec_choice.h). All
   // under submit_mu. The session's codec; the automatic choice per screen
-  // size for a viewer that decodes H.264 (measured once, so video areas and
-  // later sessions at that size do not measure again); sizes where no H.264
+  // size for a viewer that decodes H.264 (video areas follow it; the
+  // measurements behind it are kept per process, codec_choice.h); sizes where no H.264
   // encoder could be made; the reason last logged.
   codec::VideoCodec session_codec = codec::VideoCodec::kHevc;
   std::map<std::pair<int32_t, int32_t>, codec::VideoCodec> codec_choices;
@@ -218,6 +218,8 @@ struct Host::Impl {
   std::string codec_reason_logged;
 
   double MeasureHardware(codec::VideoCodec c, int32_t w, int32_t h) {
+    // Once per process (codec_choice.h): rdmachine makes a host per session.
+    if (auto fps = codec::CachedHardwareFps(c, w, h)) return *fps;
     codec::EncoderConfig cfg{w, h, config.fps, rate ? rate->encoder_bps() : StartBitrate(), config.min_qp};
     cfg.codec = c;
     cfg.hardware_only = true;
@@ -233,6 +235,7 @@ struct Host::Impl {
       log::Info(std::string("video codec: no hardware ") + codec::VideoCodecName(c) + " encoder for " +
                 std::to_string(w) + "x" + std::to_string(h) + " (" + err + ")");
     }
+    codec::CacheHardwareFps(c, w, h, fps);
     return fps;
   }
 

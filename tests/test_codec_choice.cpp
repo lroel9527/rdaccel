@@ -180,3 +180,22 @@ TEST(CodecChoice, MeasureEncodeFpsIsShortAndGivesUpOnSlowEncoders) {
     EXPECT_EQ(broken.calls, 1);
   }
 }
+
+namespace rdacore::codec {
+
+TEST(HardwareFpsCache, RemembersPerCodecAndSizeForTheProcess) {
+  ClearHardwareFpsCacheForTests();
+  EXPECT_FALSE(CachedHardwareFps(VideoCodec::kHevc, 2880, 1800));
+  CacheHardwareFps(VideoCodec::kHevc, 2880, 1800, 15);
+  CacheHardwareFps(VideoCodec::kH264, 2880, 1800, 52);
+  CacheHardwareFps(VideoCodec::kHevc, 5120, 2880, 0);  // no hardware encoder: remembered too
+  EXPECT_EQ(CachedHardwareFps(VideoCodec::kHevc, 2880, 1800), 15);
+  EXPECT_EQ(CachedHardwareFps(VideoCodec::kH264, 2880, 1800), 52);
+  EXPECT_EQ(CachedHardwareFps(VideoCodec::kHevc, 5120, 2880), 0);
+  EXPECT_FALSE(CachedHardwareFps(VideoCodec::kH264, 5120, 2880));
+  EXPECT_FALSE(CachedHardwareFps(VideoCodec::kHevc, 2880, 1801));
+  ClearHardwareFpsCacheForTests();
+  EXPECT_FALSE(CachedHardwareFps(VideoCodec::kHevc, 2880, 1800));
+}
+
+}  // namespace rdacore::codec

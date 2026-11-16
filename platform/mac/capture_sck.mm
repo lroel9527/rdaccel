@@ -23,12 +23,17 @@ using rdacore::capture::StoppedFn;
 @interface RDStreamOutput : NSObject <SCStreamOutput, SCStreamDelegate>
 - (instancetype)initWithCallback:(FrameFn)fn stopped:(StoppedFn)stopped;
 - (void)ignoreStops;
+// No more frames to the caller either: for a stream given up on (a start
+// that timed out may still succeed later, while another capturer feeds the
+// host).
+- (void)detach;
 @end
 
 @implementation RDStreamOutput {
   FrameFn _fn;
   StoppedFn _stopped;
   std::atomic<bool> _ignore_stops;
+  std::atomic<bool> _detached;
 }
 
 - (instancetype)initWithCallback:(FrameFn)fn stopped:(StoppedFn)stopped {
@@ -36,12 +41,18 @@ using rdacore::capture::StoppedFn;
     _fn = std::move(fn);
     _stopped = std::move(stopped);
     _ignore_stops = false;
+    _detached = false;
   }
   return self;
 }
 
 - (void)ignoreStops {
   _ignore_stops = true;
+}
+
+- (void)detach {
+  _ignore_stops = true;
+  _detached = true;
 }
 
 - (void)stream:(SCStream*)stream didStopWithError:(NSError*)error {
@@ -58,7 +69,7 @@ using rdacore::capture::StoppedFn;
 - (void)stream:(SCStream*)stream
     didOutputSampleBuffer:(CMSampleBufferRef)sample
                    ofType:(SCStreamOutputType)type {
-  if (type != SCStreamOutputTypeScreen || !CMSampleBufferIsValid(sample)) return;
+  if (_detached || type != SCStreamOutputTypeScreen || !CMSampleBufferIsValid(sample)) return;
 
   CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(sample, false);
   if (!attachments || CFArrayGetCount(attachments) == 0) return;
@@ -228,7 +239,7 @@ bool SckCapturer::Start(const capture::CaptureConfig& cfg, capture::FrameFn on_f
   }];
   if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, kSystemAnswerLimit)) != 0) {
     error_ = "startCapture: the system did not start the capture in time";
-    [impl_->output ignoreStops];
+    [impl_->output detach];
     [impl_->stream stopCaptureWithCompletionHandler:^(NSError*){
     }];
     impl_->stream = nil;
@@ -245,7 +256,7 @@ bool SckCapturer::Start(const capture::CaptureConfig& cfg, capture::FrameFn on_f
 
 void SckCapturer::Stop() {
   if (!impl_ || !impl_->stream) return;
-  [impl_->output ignoreStops];  // stopping on purpose is not news
+  [impl_->output detach];  // stopping on purpose is not news, and no frame follows
   dispatch_semaphore_t sem = dispatch_semaphore_create(0);
   [impl_->stream stopCaptureWithCompletionHandler:^(NSError*) {
     dispatch_semaphore_signal(sem);

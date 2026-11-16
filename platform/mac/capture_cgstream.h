@@ -25,7 +25,9 @@ class CgStreamCapturer final : public capture::ICapturer {
 
  private:
   struct Impl;
-  std::unique_ptr<Impl> impl_;
+  // Shared with the stream's handler block, so a callback that comes late
+  // (after Stop gave up waiting) finds it alive. A new one for each Start.
+  std::shared_ptr<Impl> impl_;
   std::string error_;
 };
 

@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 
 #include "codec/video_codec.h"
@@ -52,5 +53,13 @@ CodecChoice ChooseVideoCodec(CodecPreference pref, bool viewer_decodes_h264, int
 // seconds). 0 if the encoder fails.
 double MeasureEncodeFps(IHevcEncoder& enc, int32_t w, int32_t h, int frames = 8,
                         double stop_below_fps = kMinUsableFps);
+
+// Hardware encoding speed measured in this process, per codec and size
+// (0: no hardware encoder). What the machine can do does not change between
+// sessions, and an application may make a host per session (rdmachine
+// does): measured once per process, not once per host. Thread-safe.
+std::optional<double> CachedHardwareFps(VideoCodec c, int32_t w, int32_t h);
+void CacheHardwareFps(VideoCodec c, int32_t w, int32_t h, double fps);
+void ClearHardwareFpsCacheForTests();
 
 }  // namespace rdacore::codec

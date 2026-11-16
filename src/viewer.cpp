@@ -15,7 +15,6 @@ struct Viewer::Impl {
   // Declared after `session` and `link`, so it is destroyed first: its
   // destructor stops the receive thread that calls into them.
   std::unique_ptr<Transport> transport;
-  std::string decoder_name;
 };
 
 Viewer::Viewer(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
@@ -41,7 +40,6 @@ std::unique_ptr<Viewer> Viewer::Create(std::unique_ptr<Transport> transport,
     return nullptr;
   }
   auto impl = std::make_unique<Impl>();
-  impl->decoder_name = dec->name();
   impl->session = std::make_unique<session::ViewerSession>(nullptr, std::move(dec));
   impl->session->SetDecoderFactory([](codec::VideoCodec c) { return platform::CreateVideoDecoder(c, nullptr); });
   if (handlers.on_stream_info) {
@@ -143,7 +141,7 @@ void Viewer::FeedRecording(std::span<const uint8_t> bytes) {
   impl_->session->FeedVideoBytes(bytes);
 }
 
-std::string Viewer::decoder_name() const { return impl_->decoder_name; }
+std::string Viewer::decoder_name() const { return impl_->session->decoder_name(); }  // follows a codec change
 
 ViewerStats Viewer::stats() const { return impl_->session->stats(); }
 

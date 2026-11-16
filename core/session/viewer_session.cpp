@@ -10,6 +10,7 @@ namespace rdacore::session {
 ViewerSession::ViewerSession(transport::ITransport* transport,
                              std::unique_ptr<codec::IHevcDecoder> decoder)
     : decoder_(std::move(decoder)) {
+  if (decoder_) decoder_name_ = decoder_->name();
   if (transport) Attach(transport);
 }
 
@@ -152,6 +153,10 @@ void ViewerSession::SwitchCodec(codec::VideoCodec c) {
   if (!dec) return;  // keep what there is; its errors ask for keyframes
   decoder_ = std::move(dec);
   codec_ = c;
+  {
+    std::lock_guard<std::mutex> l(name_mu_);
+    decoder_name_ = decoder_->name();
+  }
   // The host started a new session: its video areas start over too (each
   // with a keyframe, which makes its decoder).
   region_dec_.clear();

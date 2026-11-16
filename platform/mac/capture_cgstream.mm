@@ -27,26 +27,25 @@ struct CgStreamCapturer::Impl {
   int32_t w = 0, h = 0;
 };
 
-CgStreamCapturer::CgStreamCapturer() : impl_(std::make_unique<Impl>()) {}
+CgStreamCapturer::CgStreamCapturer() = default;
 
 CgStreamCapturer::~CgStreamCapturer() { Stop(); }
 
 bool CgStreamCapturer::Start(const capture::CaptureConfig& cfg, capture::FrameFn on_frame) {
-  if (impl_->stream) {
+  if (impl_ && impl_->stream) {
     error_ = "already running";
     return false;
   }
   CGDirectDisplayID id = 0;
   if (!MacDisplayId(cfg.display_index, id, &error_)) return false;
-  Impl* impl = impl_.get();
+  impl_ = std::make_shared<Impl>();
+  std::shared_ptr<Impl> impl = impl_;  // the block keeps its own reference
   impl->scale = MacDisplayScale(id);
   const CGRect b = CGDisplayBounds(id);
   impl->w = cfg.width > 0 ? cfg.width : static_cast<int32_t>(std::lround(b.size.width * impl->scale));
   impl->h = cfg.height > 0 ? cfg.height : static_cast<int32_t>(std::lround(b.size.height * impl->scale));
   impl->on_frame = std::move(on_frame);
   impl->on_stopped = on_stopped_;
-  impl->stopping = false;
-  impl->reported = false;
   impl->queue = dispatch_queue_create("rdaccel.capture.cgstream", DISPATCH_QUEUE_SERIAL);
   impl->stopped = dispatch_semaphore_create(0);
   NSDictionary* props = @{
