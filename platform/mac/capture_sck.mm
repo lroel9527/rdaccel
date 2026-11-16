@@ -152,10 +152,9 @@ bool SckCapturer::Start(const capture::CaptureConfig& cfg, capture::FrameFn on_f
   }
 
   // Shareable content is delivered asynchronously; wait for it, but not
-  // forever: a system that never answers (seen on macOS 12 while the
-  // displays are being rearranged) must not hang the caller. A display
-  // that was just added or rearranged may be missing from it for a moment
-  // (macOS 12 is slow to update it): ask again for a little while.
+  // forever: a system that never answers must not hang the caller. A
+  // display that was just added or rearranged may be missing from it for a
+  // moment: ask again for a little while.
   dispatch_semaphore_t sem = dispatch_semaphore_create(0);
   SCShareableContent* content = nil;
   SCDisplay* display = nil;
@@ -204,8 +203,7 @@ bool SckCapturer::Start(const capture::CaptureConfig& cfg, capture::FrameFn on_f
                                                     exceptingWindows:@[]];
 
   SCStreamConfiguration* conf = [[SCStreamConfiguration alloc] init];
-  double scale = 0;
-  if (@available(macOS 14.0, *)) scale = filter.pointPixelScale;
+  double scale = filter.pointPixelScale;
   if (scale <= 0) scale = rdacore::platform::MacDisplayScale(display.displayID);
   conf.width = cfg.width > 0 ? static_cast<size_t>(cfg.width)
                              : static_cast<size_t>(std::lround(display.width * scale));
@@ -215,9 +213,8 @@ bool SckCapturer::Start(const capture::CaptureConfig& cfg, capture::FrameFn on_f
   conf.minimumFrameInterval = CMTimeMake(1, cfg.fps > 0 ? cfg.fps : 60);
   conf.showsCursor = cfg.show_cursor ? YES : NO;
   conf.queueDepth = 5;
-  // Video only: rdaccel never captures or plays audio. The property exists
-  // from macOS 13 (and is NO by default); 12.x has no audio capture at all.
-  if (@available(macOS 13.0, *)) conf.capturesAudio = NO;
+  // Video only: rdaccel never captures or plays audio (NO is the default).
+  conf.capturesAudio = NO;
 
   impl_->queue = dispatch_queue_create("rdaccel.capture", DISPATCH_QUEUE_SERIAL);
   impl_->output = [[RDStreamOutput alloc] initWithCallback:std::move(on_frame) stopped:on_stopped_];

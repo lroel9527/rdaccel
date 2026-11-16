@@ -3,6 +3,15 @@
 版本号遵循语义化版本。从 1.0 起，同一主版本内 C ABI 只加不改（新函数、结构体末尾加字段），
 `find_package(rdaccel 1.0)` 接受任何 1.x。1.0 之前次版本号（0.x）变化时 C ABI 可能有不兼容改动。
 
+## 1.12.0
+
+最低系统改为 macOS 14：C ABI 和线上格式不变，macOS 12 和 13 不再支持。
+
+- **部署目标 14.0**（原来 12.3）。在 12 或 13 上，库和用它的程序都启动不了。
+- **去掉 CGDisplayStream 兜底**（1.10.4、1.11.2 加的）：`CgStreamCapturer`、`FallbackCapturer` 和它们的测试都删了，macOS 上截屏只用 ScreenCaptureKit，和 14 上原来的做法一样。
+- **去掉版本分支**：最低 QP（`MinAllowedFrameQP`）、`capturesAudio = NO`、`pointPixelScale` 不再包在 `@available` 里。
+- 留下的：ScreenCaptureKit 列显示器最多等 5 秒、刚加的显示器没列出来时再问一会儿（1.10.2）；HEVC 不够快时换 H.264（1.11.0）。这两条在 14 上同样有用。
+
 ## 1.11.2
 
 修正：C ABI 和线上格式不变。

@@ -1,14 +1,17 @@
 cmake_minimum_required(VERSION 3.24)
-# The lowest macOS the binaries run on (12.3: first with ScreenCaptureKit).
+# The lowest macOS the binaries run on (14.0).
 # Must come before project(): there
 # CMake creates the cache entry (empty, i.e. "this machine's macOS") and a
 # later set(... CACHE ...) no longer changes it. -DCMAKE_OSX_DEPLOYMENT_TARGET
-# or the MACOSX_DEPLOYMENT_TARGET environment variable still win. Ignored
-# on other systems.
-if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET AND NOT DEFINED ENV{MACOSX_DEPLOYMENT_TARGET})
-  set(CMAKE_OSX_DEPLOYMENT_TARGET "12.3" CACHE STRING "Minimum macOS version")
+# of 14.0 or later, or the MACOSX_DEPLOYMENT_TARGET environment variable,
+# still win; anything lower (a build directory configured when the default
+# was 12.3 keeps that in its cache) is raised to 14.0. Ignored on other
+# systems.
+if(NOT DEFINED ENV{MACOSX_DEPLOYMENT_TARGET} AND
+   (NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET OR CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS 14.0))
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version" FORCE)
 endif()
-project(rdaccel VERSION 1.11.2 LANGUAGES C CXX)
+project(rdaccel VERSION 1.12.0 LANGUAGES C CXX)
 # Pre-release label ("rc1"), empty for a release. The full version, as the
 # library, the packages and the tag (v1.0.0-rc1) show it, is
 # PROJECT_VERSION[-RDACCEL_PRERELEASE].
@@ -64,11 +67,6 @@ endif()
 if(APPLE)
   enable_language(OBJCXX)
   set(CMAKE_OBJCXX_STANDARD 20)
-  # A build directory configured before the default moved above project()
-  # has an empty entry; give it the default too.
-  if(CMAKE_OSX_DEPLOYMENT_TARGET STREQUAL "" AND NOT DEFINED ENV{MACOSX_DEPLOYMENT_TARGET})
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "12.3" CACHE STRING "Minimum macOS version" FORCE)
-  endif()
 endif()
 
 if(MSVC)
@@ -129,7 +127,6 @@ if(APPLE)
   list(APPEND RDACCEL_SOURCES
     platform/mac/platform_mac.mm
     platform/mac/capture_sck.mm
-    platform/mac/capture_cgstream.mm
     platform/mac/displays_mac.mm
     platform/mac/cursor_mac.mm
     platform/mac/inject_mac.mm
@@ -344,7 +341,6 @@ if(RDACCEL_BUILD_TESTS)
     tests/test_messages.cpp
     tests/test_tile_diff.cpp
     tests/test_dirty_rects.cpp
-    tests/test_fallback_capturer.cpp
     tests/test_motion.cpp
     tests/test_tile_cache.cpp
     tests/test_video_region.cpp
@@ -372,11 +368,6 @@ if(RDACCEL_BUILD_TESTS)
   add_executable(rdaccel_platform_tests tests/test_platform_codec.cpp tests/test_api.cpp
     tests/test_capi.cpp)
   target_link_libraries(rdaccel_platform_tests PRIVATE rdaccel_internal GTest::gtest_main)
-  if(APPLE)
-    target_sources(rdaccel_platform_tests PRIVATE tests/test_platform_mac_capture.mm)
-    target_compile_options(rdaccel_platform_tests PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
-    target_link_libraries(rdaccel_platform_tests PRIVATE "-framework CoreGraphics")
-  endif()
   if(NOT APPLE)
     target_sources(rdaccel_platform_tests PRIVATE tests/test_platform_x11.cpp)
     target_link_libraries(rdaccel_platform_tests PRIVATE PkgConfig::X11)
