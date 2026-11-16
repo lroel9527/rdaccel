@@ -206,3 +206,162 @@ TEST(SecureTransport, TamperingAndReplayAreDetected) {
     EXPECT_EQ(vs.size(Channel::kInput), mode == 0 ? 50u : 100u);
   }
 }
+
+// ---- datagrams (1.13) -------------------------------------------------------
+
+namespace {
+
+// Between the pipe and a SecureTransport: lets a test hold, change, repeat
+// and reorder the datagrams it sends.
+class DatagramTap final : public Transport {
+ public:
+  explicit DatagramTap(std::unique_ptr<Transport> inner) : inner_(std::move(inner)) {}
+  ~DatagramTap() override { inner_.reset(); }
+  std::function<void(std::vector<uint8_t>&)> on_datagram;
+  std::atomic<bool> hold{false};  // keep datagrams instead of sending them
+  std::vector<std::vector<uint8_t>> held, sent;
+  bool Send(Channel ch, std::span<const uint8_t> b) override { return inner_->Send(ch, b); }
+  void SetReceiver(ReceiveFn fn) override { inner_->SetReceiver(std::move(fn)); }
+  void Close() override { inner_->Close(); }
+  bool CarriesDatagrams() const override { return inner_->CarriesDatagrams(); }
+  bool SendDatagram(std::span<const uint8_t> b) override {
+    std::vector<uint8_t> v(b.begin(), b.end());
+    if (on_datagram) on_datagram(v);
+    sent.push_back(v);
+    if (hold) {
+      held.push_back(v);
+      return true;
+    }
+    return inner_->SendDatagram(v);
+  }
+  void SetDatagramReceiver(DatagramFn fn) override { inner_->SetDatagramReceiver(std::move(fn)); }
+  void Inject(std::span<const uint8_t> b) { inner_->SendDatagram(b); }
+
+ private:
+  std::unique_ptr<Transport> inner_;
+};
+
+struct DatagramSink {
+  std::mutex mu;
+  std::vector<std::vector<uint8_t>> got;
+  Transport::DatagramFn Fn() {
+    return [this](std::span<const uint8_t> b) {
+      std::lock_guard<std::mutex> lock(mu);
+      got.emplace_back(b.begin(), b.end());
+    };
+  }
+  size_t count() {
+    std::lock_guard<std::mutex> lock(mu);
+    return got.size();
+  }
+};
+
+struct DatagramPair {
+  DatagramSink at_viewer;
+  Sink streams, errors;
+  DatagramTap* tap = nullptr;
+  std::unique_ptr<SecureTransport> host, viewer;
+  DatagramPair() {
+    auto [a, b] = CreateLocalPipe();
+    auto t = std::make_unique<DatagramTap>(std::move(a));
+    tap = t.get();
+    const auto key = Key(1);
+    host = std::make_unique<SecureTransport>(std::move(t), true, key);
+    viewer = std::make_unique<SecureTransport>(std::move(b), false, key);
+    host->SetErrorHandler(errors.OnError());
+    viewer->SetErrorHandler(errors.OnError());
+    host->SetReceiver(Sink().Fn());
+    viewer->SetReceiver(streams.Fn());
+    viewer->SetDatagramReceiver(at_viewer.Fn());
+  }
+  ~DatagramPair() {
+    host.reset();
+    viewer.reset();
+  }
+  bool Ready() { return WaitUntil([&] { return host->PeerKnown() && viewer->PeerKnown(); }); }
+};
+
+std::vector<uint8_t> Numbered(uint8_t n) { return std::vector<uint8_t>(50, n); }
+
+}  // namespace
+
+TEST(SecureTransport, DatagramsRoundTrip) {
+  DatagramPair p;
+  EXPECT_TRUE(p.host->CarriesDatagrams());
+  ASSERT_TRUE(p.Ready());
+  for (uint8_t i = 0; i < 20; ++i) ASSERT_TRUE(p.host->SendDatagram(Numbered(i)));
+  ASSERT_TRUE(WaitUntil([&] { return p.at_viewer.count() == 20; }));
+  std::lock_guard<std::mutex> lock(p.at_viewer.mu);
+  for (uint8_t i = 0; i < 20; ++i) EXPECT_EQ(p.at_viewer.got[i], Numbered(i));
+  // Sealed: 8 counter bytes and a 16-byte tag around the ciphertext.
+  ASSERT_EQ(p.tap->sent.size(), 20u);
+  EXPECT_EQ(p.tap->sent[0].size(), 50u + 24u);
+  EXPECT_NE(std::vector<uint8_t>(p.tap->sent[0].begin() + 8, p.tap->sent[0].end() - 16), Numbered(0));
+  EXPECT_FALSE(p.host->SendDatagram(std::vector<uint8_t>(kMaxDatagramPayload + 1)));
+}
+
+TEST(SecureTransport, ATamperedDatagramIsDroppedAndTheConnectionStays) {
+  DatagramPair p;
+  ASSERT_TRUE(p.Ready());
+  std::atomic<bool> flip{true};
+  p.tap->on_datagram = [&](std::vector<uint8_t>& d) {
+    if (flip.exchange(false)) d[20] ^= 1;
+  };
+  ASSERT_TRUE(p.host->SendDatagram(Numbered(1)));
+  ASSERT_TRUE(p.host->SendDatagram(Numbered(2)));
+  ASSERT_TRUE(WaitUntil([&] { return p.at_viewer.count() == 1; }));
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  EXPECT_EQ(p.at_viewer.count(), 1u);
+  EXPECT_EQ(p.at_viewer.got[0], Numbered(2));
+  EXPECT_EQ(p.viewer->datagrams_rejected(), 1u);
+  EXPECT_EQ(p.errors.errors.load(), 0);
+  // The streams go on.
+  const std::vector<uint8_t> msg = {1, 2, 3};
+  ASSERT_TRUE(p.host->Send(Channel::kMessage, msg));
+  EXPECT_TRUE(WaitUntil([&] { return p.streams.size(Channel::kMessage) == 3; }));
+}
+
+TEST(SecureTransport, AReplayedDatagramIsDropped) {
+  DatagramPair p;
+  ASSERT_TRUE(p.Ready());
+  ASSERT_TRUE(p.host->SendDatagram(Numbered(1)));
+  ASSERT_TRUE(WaitUntil([&] { return p.at_viewer.count() == 1; }));
+  p.tap->Inject(p.tap->sent[0]);  // the same bytes again
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  EXPECT_EQ(p.at_viewer.count(), 1u);
+  // Older than the window: dropped too, even unseen.
+  p.tap->hold = true;
+  ASSERT_TRUE(p.host->SendDatagram(Numbered(2)));  // counter 1, held back
+  p.tap->hold = false;
+  for (uint8_t i = 0; i < 130; ++i) ASSERT_TRUE(p.host->SendDatagram(Numbered(3)));
+  ASSERT_TRUE(WaitUntil([&] { return p.at_viewer.count() == 131; }));
+  p.tap->Inject(p.tap->held[0]);
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  EXPECT_EQ(p.at_viewer.count(), 131u);
+  EXPECT_EQ(p.viewer->datagrams_rejected(), 0u);
+}
+
+TEST(SecureTransport, ReorderedDatagramsWithinTheWindowAllArrive) {
+  DatagramPair p;
+  ASSERT_TRUE(p.Ready());
+  p.tap->hold = true;
+  for (uint8_t i = 0; i < 100; ++i) ASSERT_TRUE(p.host->SendDatagram(Numbered(i)));
+  p.tap->hold = false;
+  for (size_t i = p.tap->held.size(); i-- > 0;) p.tap->Inject(p.tap->held[i]);  // newest first
+  ASSERT_TRUE(WaitUntil([&] { return p.at_viewer.count() == 100; }));
+  std::lock_guard<std::mutex> lock(p.at_viewer.mu);
+  for (size_t i = 0; i < 100; ++i) EXPECT_EQ(p.at_viewer.got[i], Numbered(static_cast<uint8_t>(99 - i)));
+}
+
+TEST(SecureTransport, NoDatagramsBeforeTheKeys) {
+  // The peer never says hello: no keys, nothing is sent.
+  auto [a, b] = CreateLocalPipe();
+  DatagramSink sink;
+  b->SetDatagramReceiver(sink.Fn());
+  b->SetReceiver([](Channel, std::span<const uint8_t>) {});
+  SecureTransport host(std::move(a), true, Key(1));
+  host.SetReceiver([](Channel, std::span<const uint8_t>) {});
+  EXPECT_FALSE(host.SendDatagram(Numbered(1)));
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  EXPECT_EQ(sink.count(), 0u);
+}

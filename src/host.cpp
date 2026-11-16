@@ -64,6 +64,15 @@ class ViewerGate final : public Transport {
     std::shared_lock<std::shared_mutex> l(mu_);
     return inner_->CarriesBulk();
   }
+  bool CarriesDatagrams() const override {
+    std::shared_lock<std::shared_mutex> l(mu_);
+    return inner_->CarriesDatagrams();
+  }
+  // Nothing before the viewer is accepted (as for the channels).
+  bool SendDatagram(std::span<const uint8_t> bytes) override {
+    std::shared_lock<std::shared_mutex> l(mu_);
+    return open_.load() && inner_->SendDatagram(bytes);
+  }
 
  private:
   mutable std::shared_mutex mu_;
@@ -206,6 +215,23 @@ struct Host::Impl {
   int32_t width = 0, height = 0;
 
   std::unique_ptr<session::RateController> rate;  // only touched under submit_mu
+  // What the transport's datagrams (sound) take of the path, over about the
+  // last second, in bits per second (under submit_mu): the picture's rate
+  // control leaves it to them.
+  uint64_t datagram_rate_time = 0, datagram_rate_bytes = 0;
+  int64_t datagram_bps = 0;
+  void UpdateDatagramRate(const TransportStats& st, uint64_t now) {
+    if (datagram_rate_time == 0 || st.datagram_bytes_sent < datagram_rate_bytes) {
+      datagram_rate_time = now;
+      datagram_rate_bytes = st.datagram_bytes_sent;
+      return;
+    }
+    if (now - datagram_rate_time < 1'000'000) return;
+    datagram_bps = static_cast<int64_t>(static_cast<double>(st.datagram_bytes_sent - datagram_rate_bytes) * 8e6 /
+                                        static_cast<double>(now - datagram_rate_time));
+    datagram_rate_time = now;
+    datagram_rate_bytes = st.datagram_bytes_sent;
+  }
 
   // The video codec (HostConfig::video_codec, codec/codec_choice.h). All
   // under submit_mu. The session's codec; the automatic choice per screen
@@ -445,6 +471,8 @@ struct Host::Impl {
     old_session.reset();  // before the gate points at the next viewer
     skipped_px.clear();
     rate.reset();
+    datagram_rate_time = 0;
+    datagram_bps = 0;
     {
       std::lock_guard<std::mutex> m(mu);
       net = {};
@@ -600,11 +628,18 @@ struct Host::Impl {
             config.bitrate_bps, std::min(config.min_bitrate_bps, config.bitrate_bps), config.max_queue_ms);
       }
       const auto ss = session->stats();
+      // The sound's share of the path is not the picture's to take.
+      UpdateDatagramRate(st, capture::MonotonicMicros());
+      TransportStats for_picture = st;
+      if (datagram_bps > 0 && st.bandwidth_bps > 0) {
+        for_picture.bandwidth_bps =
+            std::max(st.bandwidth_bps - datagram_bps, std::min(config.min_bitrate_bps, st.bandwidth_bps));
+      }
       // What shows whether the target is used: the encoders' output, or in
       // text mode, where they hardly send, everything the session sends
       // (judged by video alone the target only ever came down: 46 kbps on a
       // 100 kbps path).
-      const auto d = rate->Update(capture::MonotonicMicros(), st, text_applied ? ss.bytes_sent : ss.video_bytes,
+      const auto d = rate->Update(capture::MonotonicMicros(), for_picture, text_applied ? ss.bytes_sent : ss.video_bytes,
                                   ss.bytes_sent);
       if (d.new_target_bps > 0) session->SetBitrate(d.new_target_bps);
       {

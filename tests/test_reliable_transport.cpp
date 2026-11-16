@@ -1065,3 +1065,234 @@ TEST(UdpSocket, MarksBulkAsBackgroundAndTheRestAsInteractive) {
   ::close(rx);
 }
 
+
+// ---- datagrams (1.13) -------------------------------------------------------
+
+namespace {
+
+struct DatagramSink {
+  std::mutex mu;
+  std::condition_variable cv;
+  std::vector<std::vector<uint8_t>> got;
+  std::vector<uint64_t> times;  // when each arrived
+
+  transport::ITransport::DatagramFn Fn() {
+    return [this](std::span<const uint8_t> b) {
+      std::lock_guard<std::mutex> lock(mu);
+      got.emplace_back(b.begin(), b.end());
+      times.push_back(capture::MonotonicMicros());
+      cv.notify_all();
+    };
+  }
+  size_t count() {
+    std::lock_guard<std::mutex> lock(mu);
+    return got.size();
+  }
+};
+
+// A datagram that says which one it is and when it was sent.
+std::vector<uint8_t> NumberedDatagram(uint32_t n, size_t size = 200) {
+  std::vector<uint8_t> d(size, static_cast<uint8_t>(n));
+  const uint64_t t = capture::MonotonicMicros();
+  std::memcpy(d.data(), &n, 4);
+  std::memcpy(d.data() + 4, &t, 8);
+  return d;
+}
+
+}  // namespace
+
+TEST(ReliableTransport, DatagramsArriveAndAreNeverResent) {
+  net::LinkConditions c;
+  c.bandwidth_bps = 20'000'000;
+  c.delay_ms = 10;
+  c.loss = 0.05;
+  c.seed = 7;
+  DatagramSink sink;
+  auto [a, b] = net::MakeSimulatedLink(c, net::LinkConditions{.delay_ms = 10});
+  net::ReliableTransport host(std::move(a));
+  net::ReliableTransport viewer(std::move(b), {.client = true});
+  viewer.SetDatagramReceiver(sink.Fn());
+  EXPECT_TRUE(host.CarriesDatagrams());
+  // The listening host learns its peer from the viewer's hello first.
+  for (int i = 0; i < 200 && !host.PeerKnown(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  ASSERT_TRUE(host.PeerKnown());
+  constexpr uint32_t kCount = 2000;
+  for (uint32_t i = 0; i < kCount; ++i) {
+    ASSERT_TRUE(host.SendDatagram(NumberedDatagram(i)));
+    std::this_thread::sleep_for(std::chrono::microseconds(500));
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  std::lock_guard<std::mutex> lock(sink.mu);
+  std::vector<int> seen(kCount, 0);
+  for (const auto& d : sink.got) {
+    uint32_t n = 0;
+    std::memcpy(&n, d.data(), 4);
+    ASSERT_LT(n, kCount);
+    ++seen[n];
+    EXPECT_EQ(d.size(), 200u);
+  }
+  const auto received = static_cast<double>(std::count(seen.begin(), seen.end(), 1));
+  EXPECT_EQ(std::count_if(seen.begin(), seen.end(), [](int k) { return k > 1; }), 0) << "a datagram came twice";
+  EXPECT_GT(received / kCount, 0.92);
+  EXPECT_LT(received / kCount, 0.98);
+  TransportStats st;
+  ASSERT_TRUE(host.GetStats(&st));
+  EXPECT_EQ(st.datagrams_sent, kCount);
+  EXPECT_GT(st.packets_lost, 0u);  // lost and counted, not resent
+  EXPECT_LT(st.packets_sent, kCount + 50);
+  EXPECT_FALSE(host.SendDatagram(std::vector<uint8_t>(kMaxDatagramPayload + 1)));
+}
+
+namespace {
+
+struct DatagramRun {
+  bool ok = false;
+  double idle_p50 = 0, idle_p95 = 0, p50 = 0, p95 = 0, p99 = 0;
+  int64_t bandwidth_bps = 0;
+  // As for the cursor channel (CursorRun): what the load adds over what the
+  // machine adds by itself.
+  bool Passes() const { return ok && p50 < idle_p50 + 20 && p95 < idle_p95 + 70; }
+};
+
+// Video keeps a 4 Mbps path busy; datagrams every 10 ms (sound) go out ahead
+// of it, so they wait at most behind what the picture keeps queued inside
+// the network, which the congestion control keeps short.
+DatagramRun MeasureDatagramsUnderLoad() {
+  net::LinkConditions c;
+  c.bandwidth_bps = 4'000'000;
+  c.delay_ms = 20;
+  c.queue_ms = 300;
+  DatagramSink sink;
+  Sink video_sink;
+  auto [a, b] = net::MakeSimulatedLink(c, net::LinkConditions{.delay_ms = 20});
+  net::ReliableTransport host(std::move(a));
+  net::ReliableTransport viewer(std::move(b), {.client = true});
+  viewer.SetReceiver(video_sink.Fn());
+  viewer.SetDatagramReceiver(sink.Fn());
+  const auto chunk = Pattern(10'000, 9);
+  TransportStats st;
+  uint32_t n = 0;
+  // A second of datagrams alone (what the machine adds by itself), then
+  // four with the picture saturating the path.
+  auto run = [&](uint64_t duration_us, bool video) {
+    const uint64_t t0 = capture::MonotonicMicros();
+    uint64_t next_datagram = t0;
+    while (capture::MonotonicMicros() - t0 < duration_us) {
+      host.GetStats(&st);
+      if (video && st.queued_bytes < 30'000) host.Send(Channel::kVideo, chunk);
+      const uint64_t now = capture::MonotonicMicros();
+      if (now >= next_datagram) {
+        host.SendDatagram(NumberedDatagram(n++, 300));  // 100 a second: about 240 kbps
+        next_datagram += 10'000;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  };
+  run(1'000'000, false);
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  const uint32_t loaded_from = n;
+  run(4'000'000, true);
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  std::vector<double> idle, loaded;
+  {
+    std::lock_guard<std::mutex> lock(sink.mu);
+    for (size_t i = 0; i < sink.got.size(); ++i) {
+      uint32_t k = 0;
+      uint64_t sent = 0;
+      std::memcpy(&k, sink.got[i].data(), 4);
+      std::memcpy(&sent, sink.got[i].data() + 4, 8);
+      // The loaded part past the estimate's start-up (its first second).
+      if (k < loaded_from) {
+        idle.push_back((sink.times[i] - sent) / 1000.0);
+      } else if (k >= loaded_from + 100) {
+        loaded.push_back((sink.times[i] - sent) / 1000.0);
+      }
+    }
+  }
+  if (idle.size() < 80 || loaded.size() < static_cast<size_t>(n - loaded_from - 100) * 9 / 10) return {};
+  std::sort(idle.begin(), idle.end());
+  std::sort(loaded.begin(), loaded.end());
+  host.GetStats(&st);
+  DatagramRun r{true,
+                idle[idle.size() / 2],
+                idle[idle.size() * 95 / 100],
+                loaded[loaded.size() / 2],
+                loaded[loaded.size() * 95 / 100],
+                loaded[loaded.size() * 99 / 100],
+                st.bandwidth_bps};
+  std::printf("datagrams idle: p50 %.1f p95 %.1f ms; under load: p50 %.1f p95 %.1f p99 %.1f ms, estimate %.2f Mbps, rtt %u ms\n",
+              r.idle_p50, r.idle_p95, r.p50, r.p95, r.p99, r.bandwidth_bps / 1e6, static_cast<unsigned>(st.rtt_us / 1000));
+  return r;
+}
+
+}  // namespace
+
+TEST(ReliableTransport, DatagramsGoAheadOfASaturatingPicture) {
+  // The sender's own queue is skipped altogether; what is left is the queue
+  // the picture keeps inside the network (10-15 ms at the median here).
+  // Retried as the cursor test is: a loaded machine stalls threads now and
+  // then, a standing queue fails every run.
+  DatagramRun r;
+  for (int attempt = 0; attempt < 3 && !r.Passes(); ++attempt) r = MeasureDatagramsUnderLoad();
+  ASSERT_TRUE(r.ok) << "too few datagrams arrived";
+  EXPECT_LT(r.p50, r.idle_p50 + 20);
+  EXPECT_LT(r.p95, r.idle_p95 + 70);
+  EXPECT_GT(r.bandwidth_bps, 3'000'000);  // the picture still fills the path
+}
+
+TEST(ReliableTransport, DatagramsAloneMakeAnEstimate) {
+  net::LinkConditions c;
+  c.bandwidth_bps = 10'000'000;
+  c.delay_ms = 10;
+  DatagramSink sink;
+  auto [a, b] = net::MakeSimulatedLink(c, net::LinkConditions{.delay_ms = 10});
+  net::ReliableTransport host(std::move(a));
+  net::ReliableTransport viewer(std::move(b), {.client = true});
+  viewer.SetDatagramReceiver(sink.Fn());
+  for (int i = 0; i < 200 && !host.PeerKnown(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  TransportStats st;
+  bool in_flight_seen = false;
+  for (uint32_t i = 0; i < 100; ++i) {
+    host.SendDatagram(NumberedDatagram(i, 400));
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    host.GetStats(&st);
+    in_flight_seen |= st.bytes_in_flight > 0;
+  }
+  host.GetStats(&st);
+  EXPECT_TRUE(in_flight_seen);
+  EXPECT_GT(st.bandwidth_bps, 0);
+  EXPECT_GT(st.rtt_us, 15'000u);
+  EXPECT_EQ(st.datagrams_sent, 100u);
+  EXPECT_GT(st.datagram_bytes_sent, 100u * 400);
+  EXPECT_GT(sink.count(), 95u);
+}
+
+TEST(ReliableTransport, DatagramsThatWaitTooLongAreDropped) {
+  // No viewer yet: the listening host cannot send, so what waits over
+  // 100 ms goes, and none of it arrives late once a viewer comes.
+  auto [a, b] = net::MakeSimulatedLink({}, {});
+  net::ReliableTransport host(std::move(a));
+  for (uint32_t i = 0; i < 10; ++i) ASSERT_TRUE(host.SendDatagram(NumberedDatagram(i)));
+  std::this_thread::sleep_for(std::chrono::milliseconds(250));
+  DatagramSink sink;
+  net::ReliableTransport viewer(std::move(b), {.client = true});
+  viewer.SetDatagramReceiver(sink.Fn());
+  for (int i = 0; i < 200 && !host.PeerKnown(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  ASSERT_TRUE(host.SendDatagram(NumberedDatagram(99)));
+  for (int i = 0; i < 100 && sink.count() == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  TransportStats st;
+  host.GetStats(&st);
+  EXPECT_EQ(st.datagrams_dropped, 10u);
+  std::lock_guard<std::mutex> lock(sink.mu);
+  ASSERT_EQ(sink.got.size(), 1u);
+  EXPECT_EQ(sink.got[0][0], 99);
+}
+
+TEST(ReliableTransport, NoDatagramsLeavesTheStreamsAsTheyWere) {
+  // Without datagrams nothing of theirs is sent or counted.
+  const TransportStats st = SendThrough(net::LinkConditions{.bandwidth_bps = 10'000'000, .delay_ms = 10}, 200'000);
+  EXPECT_EQ(st.datagrams_sent, 0u);
+  EXPECT_EQ(st.datagram_bytes_sent, 0u);
+  EXPECT_EQ(st.datagrams_dropped, 0u);
+}

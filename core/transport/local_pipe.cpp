@@ -8,12 +8,14 @@ struct LocalPipeEndpoint::Shared {
   struct Item {
     Channel ch;
     std::vector<uint8_t> bytes;
+    bool datagram = false;
   };
 
   std::mutex mu;
   std::condition_variable cv;
   std::deque<Item> queue[2];
   ITransport::ReceiveFn receiver[2];
+  ITransport::DatagramFn datagram_receiver[2];
   bool closed = false;
 };
 
@@ -42,6 +44,22 @@ bool LocalPipeEndpoint::Send(Channel ch, std::span<const uint8_t> bytes) {
   return true;
 }
 
+bool LocalPipeEndpoint::SendDatagram(std::span<const uint8_t> bytes) {
+  if (bytes.size() > kMaxDatagramPayload) return false;
+  {
+    std::lock_guard<std::mutex> lock(shared_->mu);
+    if (shared_->closed) return false;
+    shared_->queue[1 - self_].push_back({Channel::kControl, {bytes.begin(), bytes.end()}, true});
+  }
+  shared_->cv.notify_all();
+  return true;
+}
+
+void LocalPipeEndpoint::SetDatagramReceiver(DatagramFn fn) {
+  std::lock_guard<std::mutex> lock(shared_->mu);
+  shared_->datagram_receiver[self_] = std::move(fn);
+}
+
 void LocalPipeEndpoint::SetReceiver(ReceiveFn fn) {
   std::lock_guard<std::mutex> lock(shared_->mu);
   shared_->receiver[self_] = std::move(fn);
@@ -61,17 +79,23 @@ void LocalPipeEndpoint::Run() {
   for (;;) {
     Shared::Item item;
     ReceiveFn fn;
+    DatagramFn dfn;
     {
       std::unique_lock<std::mutex> lock(shared_->mu);
       // Hold items until a receiver is installed, so nothing is dropped
-      // during setup.
+      // during setup (datagrams are not held: without a receiver they go).
       shared_->cv.wait(lock, [&] {
-        return shared_->closed || (!q.empty() && shared_->receiver[self_]);
+        return shared_->closed || (!q.empty() && (q.front().datagram || shared_->receiver[self_]));
       });
       if (shared_->closed) return;
       item = std::move(q.front());
       q.pop_front();
       fn = shared_->receiver[self_];
+      dfn = shared_->datagram_receiver[self_];
+    }
+    if (item.datagram) {
+      if (dfn) dfn(item.bytes);
+      continue;
     }
     fn(item.ch, item.bytes);
   }

@@ -42,6 +42,12 @@ inline constexpr uint64_t kCapBulk = 16;
 // is missing or too slow may send it. Not in kCapsAll: only a viewer whose
 // platform decoder handles H.264 adds it (LinkOptions::extra_caps). 1.11.
 inline constexpr uint64_t kCapH264 = 32;
+// Both: takes sound (audio packets, core/audio/audio_packet.h) in
+// transport datagrams. Not in kCapsAll: a viewer adds it when the
+// application asked for sound and its transport carries datagrams; a host
+// when it has sound to send on such a transport. The host captures and sends
+// only to a viewer that has it. 1.13.
+inline constexpr uint64_t kCapAudio = 64;
 inline constexpr uint64_t kCapsAll = kCapMessages | kCapTextInput | kCapContextTiles | kCapContextTiles64 | kCapBulk;
 
 enum class MsgType : uint8_t {

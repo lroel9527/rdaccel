@@ -28,6 +28,11 @@ class LocalPipeEndpoint final : public ITransport {
   void SetReceiver(ReceiveFn fn) override;
   void Close() override;
   bool CarriesBulk() const override { return true; }
+  // Datagrams go through the same queue (nothing is lost in a pipe), to the
+  // peer's datagram receiver; dropped while it has none.
+  bool CarriesDatagrams() const override { return true; }
+  bool SendDatagram(std::span<const uint8_t> bytes) override;
+  void SetDatagramReceiver(DatagramFn fn) override;
 
  private:
   friend std::pair<std::unique_ptr<LocalPipeEndpoint>, std::unique_ptr<LocalPipeEndpoint>>

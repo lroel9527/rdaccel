@@ -9,9 +9,13 @@
 namespace rdacore::net {
 namespace {
 
-enum PacketType : uint8_t { kData = 1, kAck = 2, kHello = 3, kFec = 4 };
+enum PacketType : uint8_t { kData = 1, kAck = 2, kHello = 3, kFec = 4, kDatagram = 5 };
 // A parity packet in flight: not a channel's bytes, never resent.
 constexpr uint8_t kFecChannel = 0xff;
+// A datagram in flight: counted as data (lost or not), never resent.
+constexpr uint8_t kDatagramChannel = 0xfe;
+constexpr size_t kMaxQueuedDatagrams = 64;
+constexpr uint64_t kDatagramMaxWaitUs = 100'000;
 constexpr size_t kMaxRecvBodies = 2048;
 constexpr size_t kMaxPendingParities = 256;
 constexpr uint64_t kFecMinRtt = 40'000;     // below it a resend is quick enough
@@ -128,6 +132,71 @@ bool ReliableTransport::Send(transport::Channel ch, std::span<const uint8_t> byt
   return true;
 }
 
+bool ReliableTransport::SendDatagram(std::span<const uint8_t> bytes) {
+  if (bytes.size() > kMaxDatagramPayload) return false;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (closed_) return false;
+    if (datagrams_.size() >= kMaxQueuedDatagrams) {
+      datagrams_.pop_front();
+      ++datagrams_dropped_;
+    }
+    datagrams_.push_back({{bytes.begin(), bytes.end()}, Now()});
+  }
+  cv_.notify_all();
+  return true;
+}
+
+void ReliableTransport::SetDatagramReceiver(DatagramFn fn) {
+  std::lock_guard<std::mutex> lock(recv_mu_);
+  datagram_receiver_ = std::move(fn);
+}
+
+void ReliableTransport::SendDatagrams(uint64_t now, bool can_send) {
+  while (!datagrams_.empty() && now - std::min(now, datagrams_.front().time) > kDatagramMaxWaitUs) {
+    datagrams_.pop_front();
+    ++datagrams_dropped_;
+  }
+  if (!can_send) return;
+  while (!datagrams_.empty()) {
+    proto::ByteWriter w;
+    w.u8(kDatagram);
+    const uint64_t pn = next_pn_++;
+    w.varint(pn);
+    std::vector<uint8_t> d = w.take();
+    const auto& bytes = datagrams_.front().bytes;
+    d.insert(d.end(), bytes.begin(), bytes.end());
+    datagrams_.pop_front();
+    socket_->Send(d, TrafficClass::kInteractive);
+    ++packets_sent_;
+    ++datagrams_sent_;
+    datagram_bytes_sent_ += d.size();
+    if (in_flight_.empty()) {
+      first_sent_time_ = now;
+      delivered_time_ = now;
+    }
+    // In flight like data: the window, the round trip and the delivery rate
+    // see it. Application limited, as it rides on what the sound asks for
+    // (its samples may raise the estimate, never lower it).
+    SentPacket p;
+    p.ch = kDatagramChannel;
+    p.size = static_cast<uint32_t>(d.size());
+    p.time = now;
+    p.delivered = delivered_;
+    p.delivered_time = delivered_time_;
+    p.first_sent_time = first_sent_time_;
+    p.app_limited = true;
+    in_flight_[pn] = p;
+    bytes_in_flight_ += p.size;
+    if (opt_.congestion_control) {
+      // The pacer makes room for it: what the channels send next waits that
+      // much longer, so the picture gives the sound its share of the rate.
+      const uint64_t base = std::max(next_send_time_, now > kPacingCredit ? now - kPacingCredit : 0);
+      next_send_time_ = base + static_cast<uint64_t>(static_cast<double>(p.size) / PacingRate());
+    }
+  }
+}
+
 void ReliableTransport::SetReceiver(ReceiveFn fn) {
   {
     std::lock_guard<std::mutex> lock(recv_mu_);
@@ -151,6 +220,10 @@ bool ReliableTransport::GetStats(TransportStats* out) const {
   out->packets_spurious = packets_spurious_;
   out->fec_parity_sent = fec_parity_sent_;
   out->fec_recovered = peer_fec_recovered_;
+  out->datagrams_sent = datagrams_sent_;
+  out->datagram_bytes_sent = datagram_bytes_sent_;
+  out->datagrams_dropped = datagrams_dropped_;
+  out->bandwidth_settled = mode_ != Mode::kStartup;
   return true;
 }
 
@@ -331,6 +404,8 @@ void ReliableTransport::Run() {
     // Send while the window and the pacer allow. A listening side has no
     // peer address before the peer's first packet: hold the data until then.
     const bool can_send = opt_.client || heard_peer_;
+    // Datagrams first, whatever the window and the pacer say.
+    SendDatagrams(Now(), can_send);
     // The probe goes out even when the window is full. After the path slows
     // down sharply (4 -> 0.4 Mbps), the bottleneck drops the tail of what is
     // in flight, and nothing later is acknowledged to declare it lost; each
@@ -356,6 +431,7 @@ void ReliableTransport::Run() {
       wake = std::min(wake, since + (Pto() << std::min(pto_count_, 6)));
     }
     if (opt_.client && !heard_peer_) wake = std::min(wake, next_hello_);
+    if (!datagrams_.empty()) wake = std::min(wake, datagrams_.front().time + kDatagramMaxWaitUs + 1);
     const bool have_data = can_send && SendableBytes() > 0;
     if (have_data && opt_.congestion_control && bytes_in_flight_ + kMaxDatagram <= Cwnd()) {
       wake = std::min(wake, next_send_time_);
@@ -578,6 +654,7 @@ void ReliableTransport::MarkLost(uint64_t pn, const SentPacket& p, uint64_t now)
          (!lost_recent_.empty() && now - lost_recent_.begin()->second.time > 2'000'000 + 4 * srtt_)) {
     lost_recent_.erase(lost_recent_.begin());
   }
+  if (p.ch == kDatagramChannel) return;  // lost (and counted), never resent
   AddRange(out_[p.ch].resend, p.offset, p.offset + p.len);
 }
 
@@ -755,6 +832,13 @@ void ReliableTransport::HandleAck(std::span<const uint8_t> payload, uint64_t now
   bool newest_acked = false;
   const SentPacket* newest = nullptr;
   SentPacket newest_copy;
+  // The rate sample comes from the newest packet that is not a datagram,
+  // where there is one: datagrams go out unpaced and application limited,
+  // and as the newest of most acknowledgements they kept start-up from
+  // seeing the bandwidth stop growing (its test takes samples that are not
+  // application limited), so the start-up queue stood for seconds.
+  const SentPacket* newest_data = nullptr;
+  SentPacket newest_data_copy;
   bool touched[kChannels] = {};
   for (const auto& [lo, hi] : ranges) {
     for (auto it = in_flight_.lower_bound(lo); it != in_flight_.end() && it->first <= hi;) {
@@ -771,6 +855,10 @@ void ReliableTransport::HandleAck(std::span<const uint8_t> payload, uint64_t now
       if (!newest || p.time > newest->time) {
         newest_copy = p;
         newest = &newest_copy;
+      }
+      if (p.ch != kDatagramChannel && (!newest_data || p.time > newest_data->time)) {
+        newest_data_copy = p;
+        newest_data = &newest_data_copy;
       }
       it = in_flight_.erase(it);
     }
@@ -814,7 +902,7 @@ void ReliableTransport::HandleAck(std::span<const uint8_t> payload, uint64_t now
       srtt_ = (7 * srtt_ + adjusted) / 8;
     }
   }
-  OnRateSample(*newest, now);
+  OnRateSample(newest_data ? *newest_data : *newest, now);
 
   if (!any_acked_ || largest > largest_acked_) largest_acked_ = largest;
   any_acked_ = true;
@@ -1006,6 +1094,7 @@ void ReliableTransport::TryRecover(uint64_t now, Deliveries& deliver) {
 void ReliableTransport::OnDatagram(std::span<const uint8_t> d) {
   if (d.empty()) return;
   std::vector<std::pair<int, std::vector<uint8_t>>> deliver;
+  std::span<const uint8_t> datagram;  // a kDatagram's payload, delivered below
   {
     std::lock_guard<std::mutex> lock(mu_);
     // Read under the lock: a packet the sender thread sent while this one
@@ -1054,7 +1143,23 @@ void ReliableTransport::OnDatagram(std::span<const uint8_t> d) {
       if (fec_pending_.size() >= kMaxPendingParities) fec_pending_.erase(fec_pending_.begin());
       fec_pending_.push_back({std::move(parity), now});
       TryRecover(now, deliver);
+    } else if (d[0] == kDatagram) {
+      uint64_t pn = 0;
+      if (!r.varint(pn) || !r.bytes(r.remaining(), datagram)) return;
+      // Acknowledged like data (the sender's window and estimate count it);
+      // a duplicate is acknowledged again and passed on (the encryption's
+      // replay window drops it).
+      MarkReceived(pn, now, true);
     }
+  }
+  if (!datagram.empty()) {
+    DatagramFn fn;
+    {
+      std::lock_guard<std::mutex> lock(recv_mu_);
+      fn = datagram_receiver_;
+    }
+    if (fn) fn(datagram);
+    return;
   }
   if (deliver.empty()) return;
   ReceiveFn fn;

@@ -35,6 +35,10 @@ enum class Channel : uint8_t {
 
 inline constexpr int kChannelCount = 7;
 
+// Largest datagram (Transport::SendDatagram) a transport takes: room for the
+// encryption and the UDP transport's own header within one packet of any path.
+inline constexpr size_t kMaxDatagramPayload = 1100;
+
 // What a transport knows about the path. The Host uses it to adapt its
 // bitrate and to skip frames instead of letting a queue build up.
 struct TransportStats {
@@ -52,6 +56,15 @@ struct TransportStats {
   uint64_t packets_spurious = 0;  // of those, acknowledged after all (late, not lost)
   uint64_t fec_parity_sent = 0;   // forward error correction packets sent
   uint64_t fec_recovered = 0;     // of our lost packets, rebuilt by the peer from them
+  // Datagrams (Transport::SendDatagram, 1.13): sent (also in packets_sent),
+  // their bytes on the wire (headers included), and those dropped because
+  // they waited too long to go out.
+  uint64_t datagrams_sent = 0;
+  uint64_t datagram_bytes_sent = 0;
+  uint64_t datagrams_dropped = 0;
+  // The bandwidth estimate has left its start-up phase (it measured the path
+  // under load); before that it may be far off either way.
+  bool bandwidth_settled = false;
 };
 
 class Transport {
@@ -89,6 +102,22 @@ class Transport {
   // application's transport made before 1.10 knows only the first six
   // channels, so the link sends bulk messages on kMessage through it).
   virtual bool CarriesBulk() const { return false; }
+
+  // Datagrams (1.13): unreliable, unordered, never resent, ahead of every
+  // channel; for sound. Transports that carry them say so; the default
+  // carries none. SendDatagram returns false for more than
+  // kMaxDatagramPayload bytes, on a closed connection, or (encryption)
+  // before the keys are agreed: the datagram is gone then. The receiver runs
+  // on a transport-owned thread; datagrams that arrive while none is set are
+  // dropped.
+  virtual bool CarriesDatagrams() const { return false; }
+  virtual bool SendDatagram(std::span<const uint8_t> bytes) {
+    (void)bytes;
+    return false;
+  }
+  using DatagramFn = std::function<void(std::span<const uint8_t>)>;
+  virtual void SetDatagramReceiver(DatagramFn fn) { (void)fn; }
+
   virtual bool GetStats(TransportStats* out) const {
     (void)out;
     return false;

@@ -17,6 +17,16 @@
 // number. Records cannot be forged, replayed, reordered or moved between
 // channels without the receiver noticing (it then stops: a wrong key or
 // tampering).
+//
+// Datagrams (1.13) are sealed one by one with the same direction keys:
+//   [counter: u64 little-endian][ciphertext][Poly1305 tag: 16]
+// The nonce is 0xFE (no channel has that number) and the per-direction
+// datagram counter, the associated data the byte 0xFE. They may be lost or
+// reordered: the receiver keeps a window of the last 128 counters and drops
+// repeats and anything older (replays), and drops a datagram that fails
+// authentication without ending the connection (a stream cannot go on after
+// a bad record; one lost datagram costs nothing else). Before the keys are
+// agreed nothing is sent.
 
 #include <array>
 #include <atomic>
@@ -54,6 +64,11 @@ class SecureTransport final : public ITransport {
   void Close() override { inner_->Close(); }
   bool GetStats(TransportStats* out) const override { return inner_->GetStats(out); }
   bool CarriesBulk() const override { return inner_->CarriesBulk(); }
+  bool CarriesDatagrams() const override { return inner_->CarriesDatagrams(); }
+  bool SendDatagram(std::span<const uint8_t> bytes) override;
+  void SetDatagramReceiver(DatagramFn fn) override;
+  // Datagrams dropped because they failed authentication.
+  uint64_t datagrams_rejected() const { return dgram_rejected_.load(); }
   // Only once the keys are agreed: until then the host holds frames.
   bool PeerKnown() const override { return ready_.load() && inner_->PeerKnown(); }
   bool PeerPresent() const override { return inner_->PeerPresent(); }
@@ -70,6 +85,7 @@ class SecureTransport final : public ITransport {
   void DeriveKeys(std::span<const uint8_t> peer_random);
   bool Drain(size_t ch);  // decrypts complete records of rx_[ch]
   bool SendSealed(size_t ch, std::span<const uint8_t> bytes);  // under tx_mu_[ch]
+  void OnInnerDatagram(std::span<const uint8_t> bytes);
 
   std::unique_ptr<ITransport> inner_;
   const bool is_host_;
@@ -97,6 +113,21 @@ class SecureTransport final : public ITransport {
   std::array<uint64_t, kChannelCount> tx_count_{};
   std::atomic<bool> ready_{false};
   std::array<std::vector<uint8_t>, kChannelCount> sealed_;  // scratch, under tx_mu_
+
+  // Datagrams. Sending: a counter of its own (under dgram_tx_mu_). Receiving
+  // (under dgram_rx_mu_: a transport may deliver them on another thread than
+  // its streams): the highest counter seen and a bitmap of the 128 below it.
+  std::mutex dgram_tx_mu_;
+  uint64_t dgram_tx_count_ = 0;
+  std::vector<uint8_t> dgram_sealed_;
+  std::mutex dgram_rx_mu_;
+  bool dgram_any_ = false;
+  uint64_t dgram_top_ = 0;
+  std::array<uint64_t, 2> dgram_seen_{};  // bit i: counter dgram_top_ - i
+  std::vector<uint8_t> dgram_plain_;
+  DatagramFn dgram_receiver_;  // under dgram_rx_mu_
+  bool dgram_receiving_ = false;
+  std::atomic<uint64_t> dgram_rejected_{0};
 };
 
 }  // namespace rdacore::transport

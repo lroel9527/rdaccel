@@ -9,6 +9,7 @@
 #include <cstring>
 #include <stdexcept>
 
+#include "log/log.h"
 #include "monocypher.h"
 
 namespace rdacore::transport {
@@ -29,6 +30,10 @@ void Random(uint8_t* out, size_t n) {
     n -= k;
   }
 }
+
+// Datagrams: the nonce's first byte, and the associated data.
+constexpr uint8_t kDatagramTag = 0xFE;
+constexpr size_t kDatagramWindow = 128;
 
 void Nonce(size_t ch, uint64_t counter, uint8_t nonce[24]) {
   std::memset(nonce, 0, 24);
@@ -210,6 +215,84 @@ bool SecureTransport::Drain(size_t ch) {
   }
   buf.erase(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(pos));
   return true;
+}
+
+}  // namespace rdacore::transport
+
+namespace rdacore::transport {
+
+bool SecureTransport::SendDatagram(std::span<const uint8_t> bytes) {
+  if (bytes.size() > kMaxDatagramPayload) return false;
+  if (!ready_.load()) return false;  // no keys yet: dropped
+  std::lock_guard<std::mutex> lock(dgram_tx_mu_);
+  const uint64_t counter = dgram_tx_count_++;
+  dgram_sealed_.resize(8 + bytes.size() + kTagSize);
+  for (int i = 0; i < 8; ++i) dgram_sealed_[i] = static_cast<uint8_t>(counter >> (8 * i));
+  uint8_t nonce[24];
+  Nonce(kDatagramTag, counter, nonce);
+  const uint8_t ad = kDatagramTag;
+  crypto_aead_lock(dgram_sealed_.data() + 8, dgram_sealed_.data() + 8 + bytes.size(), tx_key_.data(), nonce, &ad,
+                   1, bytes.data(), bytes.size());
+  return inner_->SendDatagram(dgram_sealed_);
+}
+
+void SecureTransport::SetDatagramReceiver(DatagramFn fn) {
+  bool start = false;
+  {
+    std::lock_guard<std::mutex> lock(dgram_rx_mu_);
+    dgram_receiver_ = std::move(fn);
+    start = !dgram_receiving_;
+    dgram_receiving_ = true;
+  }
+  if (start) inner_->SetDatagramReceiver([this](std::span<const uint8_t> b) { OnInnerDatagram(b); });
+}
+
+void SecureTransport::OnInnerDatagram(std::span<const uint8_t> bytes) {
+  // The keys come with the peer's hello on the control channel; a datagram
+  // that overtook it cannot be opened yet and is dropped.
+  if (!ready_.load() || bytes.size() < 8 + kTagSize) return;
+  uint64_t counter = 0;
+  for (int i = 0; i < 8; ++i) counter |= static_cast<uint64_t>(bytes[i]) << (8 * i);
+  const size_t n = bytes.size() - 8 - kTagSize;
+  DatagramFn fn;
+  std::lock_guard<std::mutex> lock(dgram_rx_mu_);
+  // Replays: a counter seen already, or older than the window.
+  if (dgram_any_) {
+    if (counter + kDatagramWindow <= dgram_top_) return;
+    if (counter <= dgram_top_) {
+      const uint64_t back = dgram_top_ - counter;
+      if (dgram_seen_[back / 64] >> (back % 64) & 1) return;
+    }
+  }
+  dgram_plain_.resize(n);
+  uint8_t nonce[24];
+  Nonce(kDatagramTag, counter, nonce);
+  const uint8_t ad = kDatagramTag;
+  if (crypto_aead_unlock(dgram_plain_.data(), bytes.data() + 8 + n, rx_key_.data(), nonce, &ad, 1,
+                         bytes.data() + 8, n) != 0) {
+    if (dgram_rejected_.fetch_add(1) == 0) {
+      log::Warn("a datagram failed authentication (tampered or corrupted); dropped");
+    }
+    return;
+  }
+  // Only an authentic datagram moves the window.
+  if (!dgram_any_ || counter > dgram_top_) {
+    const uint64_t shift = dgram_any_ ? counter - dgram_top_ : kDatagramWindow;
+    if (shift >= kDatagramWindow) {
+      dgram_seen_ = {};
+    } else {
+      for (uint64_t i = 0; i < shift; ++i) {  // shift the 128-bit map left by `shift`
+        dgram_seen_[1] = dgram_seen_[1] << 1 | dgram_seen_[0] >> 63;
+        dgram_seen_[0] <<= 1;
+      }
+    }
+    dgram_top_ = counter;
+    dgram_any_ = true;
+  }
+  const uint64_t back = dgram_top_ - counter;
+  dgram_seen_[back / 64] |= uint64_t{1} << (back % 64);
+  fn = dgram_receiver_;
+  if (fn) fn(dgram_plain_);
 }
 
 }  // namespace rdacore::transport

@@ -84,6 +84,10 @@ class Link {
   int64_t BulkQueuedBytes() const;
 
   LinkState state() const { return state_.load(); }
+  // Sound (proto::kCapAudio): the viewer asks for it, the host offers it, in
+  // the handshake; only where the transport carries datagrams. Set before
+  // the handshake (the viewer before Start()).
+  void SetAudio(bool on) { audio_ = on; }
   // The peer's capability bits (proto::kCap*), known once connected.
   uint64_t peer_caps() const { return peer_caps_.load(); }
   LinkError error() const;
@@ -114,6 +118,7 @@ class Link {
 
   std::atomic<LinkState> state_{LinkState::kConnecting};
   std::atomic<uint64_t> peer_caps_{0};
+  std::atomic<bool> audio_{false};
   mutable std::mutex state_mu_;     // guards error_ with state_ transitions
   std::recursive_mutex cb_mu_;      // serializes state callbacks
   LinkError error_ = LinkError::kNone;

@@ -55,6 +55,7 @@ void Link::Start() {
     hello.auth_token = options_.auth_token;
     hello.caps |= options_.extra_caps;
     if (!transport_->CarriesBulk()) hello.caps &= ~proto::kCapBulk;
+    if (audio_ && transport_->CarriesDatagrams()) hello.caps |= proto::kCapAudio;
     SendControl(hello);
   }
   timer_ = std::thread([this] { Timer(); });
@@ -191,6 +192,7 @@ void Link::HandleControl(proto::Message&& m) {
     SetState(LinkState::kConnected, LinkError::kNone);
     proto::Welcome welcome;
     if (!transport_->CarriesBulk()) welcome.caps &= ~proto::kCapBulk;
+    if (audio_ && transport_->CarriesDatagrams()) welcome.caps |= proto::kCapAudio;
     SendControl(welcome);
     return;
   }

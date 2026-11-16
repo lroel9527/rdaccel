@@ -26,6 +26,12 @@
 //     a round trip for its resend. A rebuilt packet is acknowledged as
 //     received; resends stay the fallback. Off where loss is rare or the
 //     round trip short (a resend is quick there).
+//   * Datagrams (SendDatagram, 1.13; for sound): never resent, sent ahead of
+//     every channel without waiting for the window or the pacer (they are a
+//     few percent of the traffic, and a queue would only be jitter), but
+//     numbered and acknowledged like data, so they count in the window, the
+//     delivery rate and the round trip, and the pacer makes room for them.
+//     One that waited 100 ms (no peer yet) is dropped.
 //   * Path statistics (GetStats) for the Host's adaptive bitrate.
 //
 // The wire format is private to this file pair; both ends must run it.
@@ -67,6 +73,9 @@ class ReliableTransport final : public transport::ITransport {
   void Close() override;
   bool GetStats(TransportStats* out) const override;
   bool CarriesBulk() const override { return true; }
+  bool CarriesDatagrams() const override { return true; }
+  bool SendDatagram(std::span<const uint8_t> bytes) override;
+  void SetDatagramReceiver(DatagramFn fn) override;
   bool PeerKnown() const override;
   std::unique_ptr<transport::ITransport> NextPeer(std::string* error) override;
 
@@ -102,6 +111,8 @@ class ReliableTransport final : public transport::ITransport {
   // Lock held for all of these.
   bool SendOne(uint64_t now);
   void SendAck(uint64_t now);
+  // Sends the queued datagrams (and drops the stale ones).
+  void SendDatagrams(uint64_t now, bool can_send);
   void MarkLost(uint64_t pn, const SentPacket& p, uint64_t now);
   // Declares lost what the acknowledgements and the reorder window say is,
   // and sets loss_time_ to when the next packet held back by them would be.
@@ -139,6 +150,14 @@ class ReliableTransport final : public transport::ITransport {
   bool closed_ = false;
   bool heard_peer_ = false;
   uint64_t next_hello_ = 0;
+
+  // Datagrams waiting to go out (at most kMaxQueuedDatagrams), oldest first.
+  struct QueuedDatagram {
+    std::vector<uint8_t> bytes;
+    uint64_t time = 0;  // when queued
+  };
+  std::deque<QueuedDatagram> datagrams_;
+  uint64_t datagrams_sent_ = 0, datagram_bytes_sent_ = 0, datagrams_dropped_ = 0;
 
   // Sending.
   SendStream out_[kChannels];
@@ -249,6 +268,7 @@ class ReliableTransport final : public transport::ITransport {
   std::mutex recv_mu_;
   std::condition_variable recv_cv_;
   ReceiveFn receiver_;
+  DatagramFn datagram_receiver_;  // under recv_mu_
 
   std::thread worker_;
 };
