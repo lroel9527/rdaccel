@@ -77,16 +77,23 @@ int AudioCapturePermission() {
   return r >= 0 && r <= 2 ? r : -1;
 }
 
-bool LocalMuteAllowed() {
-  for (const char* name : {"RDACCEL_AUDIO_NULL_OUTPUT", "RDACCEL_AUDIO_NO_LOCAL_MUTE"}) {
-    const char* v = std::getenv(name);
+bool LocalMuteAllowedFor(const char* null_output, const char* no_local_mute) {
+  for (const char* v : {null_output, no_local_mute}) {
     if (v && v[0] != '\0' && std::strcmp(v, "0") != 0) return false;
   }
   return true;
 }
 
+bool LocalMuteAllowed() {
+  return LocalMuteAllowedFor(std::getenv("RDACCEL_AUDIO_NULL_OUTPUT"), std::getenv("RDACCEL_AUDIO_NO_LOCAL_MUTE"));
+}
+
+bool TapMutesLocalWith(bool permission_confirmed, bool mute_local, bool allowed) {
+  return mute_local && permission_confirmed && allowed;
+}
+
 bool TapMutesLocal(bool permission_confirmed, bool mute_local) {
-  return mute_local && permission_confirmed && LocalMuteAllowed();
+  return TapMutesLocalWith(permission_confirmed, mute_local, LocalMuteAllowed());
 }
 
 uint64_t HostTimeToMicros(uint64_t host_time) {
@@ -113,6 +120,10 @@ namespace {
 constexpr uint64_t kRetryUs = 2'000'000;
 constexpr uint64_t kCoalesceUs = 300'000;
 constexpr uint64_t kUnconfirmedRebuildUs = 5'000'000;
+// While TCC says denied, the unconfirmed rebuilds back off (doubling) up to
+// this: a grant still shows within a minute, without a rebuild every 5 s all
+// session long.
+constexpr uint64_t kDeniedRebuildMaxUs = 60'000'000;
 constexpr uint64_t kPermissionCheckUs = 2'000'000;
 
 uint64_t Now() { return capture::MonotonicMicros(); }
@@ -289,6 +300,7 @@ class TapSource final : public Source {
           }
         }
         if (confirmed_) denied_ = false;
+        if (confirmed_ || !denied_) denied_interval_ = kUnconfirmedRebuildUs;
         if (built) {
           // Mute only once the permission is known (and the tap does not yet).
           if (platform::TapMutesLocal(confirmed_, config_.mute_local) != muting_wanted_built_) rebuild = true;
@@ -303,7 +315,11 @@ class TapSource final : public Source {
           }
           // Not known yet: rebuild now and then, so a permission given
           // meanwhile reaches the capture (it is checked when IO starts).
-          if (!confirmed_ && now - built_at >= kUnconfirmedRebuildUs) rebuild = true;
+          const uint64_t interval = denied_ ? denied_interval_ : kUnconfirmedRebuildUs;
+          if (!confirmed_ && now - built_at >= interval) {
+            rebuild = true;
+            if (denied_) denied_interval_ = std::min(denied_interval_ * 2, kDeniedRebuildMaxUs);
+          }
           if (!rebuild) continue;
           Teardown();
           built = false;
@@ -433,9 +449,15 @@ class TapSource final : public Source {
     }
     started_ = true;
     muting_ = muting_wanted_built_;
-    log::Info(std::string("sound: process tap running, ") + std::to_string(channels_) + " channels at " +
-              std::to_string(static_cast<int>(format_.mSampleRate)) + " Hz" +
-              (muting_wanted_built_ ? ", this computer muted while it is read" : ""));
+    // Once per change: the unconfirmed rebuilds would repeat it every few
+    // seconds.
+    const std::string running = std::string("sound: process tap running, ") + std::to_string(channels_) +
+                                " channels at " + std::to_string(static_cast<int>(format_.mSampleRate)) + " Hz" +
+                                (muting_wanted_built_ ? ", this computer muted while it is read" : "");
+    if (running != last_running_log_) {
+      log::Info(running);
+      last_running_log_ = running;
+    }
     return true;
   }
 
@@ -712,6 +734,8 @@ class TapSource final : public Source {
   std::atomic<bool> confirmed_{false};  // the permission is known to be there
   bool denied_ = false;                   // TCC said denied (rebuild thread)
   bool mute_refusal_logged_ = false;
+  uint64_t denied_interval_ = kUnconfirmedRebuildUs;  // rebuild thread
+  std::string last_running_log_;                      // rebuild thread
   std::shared_ptr<ListenerHub> hub_;
   dispatch_queue_t listener_queue_ = nullptr;
   AudioObjectPropertyListenerBlock system_block_ = nil, device_block_ = nil, tap_block_ = nil;

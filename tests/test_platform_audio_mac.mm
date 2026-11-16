@@ -148,26 +148,15 @@ TEST(PlatformAudioMac, UnderTheTestEnvironmentNoTapMutes) {
   ASSERT_TRUE(NullOutputSet());
   EXPECT_FALSE(platform::LocalMuteAllowed());
   EXPECT_FALSE(platform::TapMutesLocal(/*permission_confirmed=*/true, /*mute_local=*/true));
-  // What it would decide elsewhere (the variable away for a moment; this
-  // only reads it).
-  unsetenv("RDACCEL_AUDIO_NULL_OUTPUT");
-  const char* other = std::getenv("RDACCEL_AUDIO_NO_LOCAL_MUTE");
-  const std::string saved = other ? other : "";
-  unsetenv("RDACCEL_AUDIO_NO_LOCAL_MUTE");
-  const bool allowed = platform::LocalMuteAllowed();
-  const bool mutes = platform::TapMutesLocal(true, true);
-  const bool unconfirmed = platform::TapMutesLocal(false, true);
-  setenv("RDACCEL_AUDIO_NO_LOCAL_MUTE", "1", 1);
-  const bool with_no_mute = platform::TapMutesLocal(true, true);
-  if (other) {
-    setenv("RDACCEL_AUDIO_NO_LOCAL_MUTE", saved.c_str(), 1);
-  } else {
-    unsetenv("RDACCEL_AUDIO_NO_LOCAL_MUTE");
-  }
-  setenv("RDACCEL_AUDIO_NULL_OUTPUT", "1", 1);
-  EXPECT_TRUE(allowed);
-  EXPECT_TRUE(mutes);
-  EXPECT_FALSE(unconfirmed);  // no muting before the permission is known
-  EXPECT_FALSE(with_no_mute);
-  EXPECT_FALSE(platform::TapMutesLocal(true, true));  // back under the test environment
+  // What it would decide elsewhere, from the values alone: the variables
+  // stay set the whole time.
+  EXPECT_TRUE(platform::LocalMuteAllowedFor(nullptr, nullptr));
+  EXPECT_TRUE(platform::LocalMuteAllowedFor("0", ""));
+  EXPECT_FALSE(platform::LocalMuteAllowedFor("1", nullptr));
+  EXPECT_FALSE(platform::LocalMuteAllowedFor(nullptr, "1"));
+  EXPECT_TRUE(platform::TapMutesLocalWith(true, true, /*allowed=*/true));
+  EXPECT_FALSE(platform::TapMutesLocalWith(false, true, true));  // no muting before the permission is known
+  EXPECT_FALSE(platform::TapMutesLocalWith(true, false, true));
+  EXPECT_FALSE(platform::TapMutesLocalWith(true, true, /*allowed=*/false));
+  EXPECT_TRUE(NullOutputSet());
 }
