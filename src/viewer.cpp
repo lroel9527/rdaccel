@@ -5,10 +5,20 @@
 #include "session/viewer_session.h"
 #include "log/log.h"
 #include "transport/secure_transport.h"
+#if RDACCEL_HAVE_AUDIO
+#include "audio/receiver.h"
+#endif
+#include "capture/capturer.h"
+#include <cstring>
 
 namespace rdacore {
 
 struct Viewer::Impl {
+#if RDACCEL_HAVE_AUDIO
+  // The host's sound (ViewerOptions::audio). Outlives the transport, whose
+  // receive thread feeds it, and the session, whose frames it times.
+  std::unique_ptr<audio::Receiver> audio;
+#endif
   std::unique_ptr<session::ViewerSession> session;
   // Handshake, keepalive, messages; passes the session its bytes.
   std::unique_ptr<session::Link> link;
@@ -40,6 +50,13 @@ std::unique_ptr<Viewer> Viewer::Create(std::unique_ptr<Transport> transport,
     return nullptr;
   }
   auto impl = std::make_unique<Impl>();
+#if RDACCEL_HAVE_AUDIO
+  const bool audio = options.audio && transport && transport->CarriesDatagrams();
+  if (audio) impl->audio = std::make_unique<audio::Receiver>();
+  audio::Receiver* receiver = impl->audio.get();
+#else
+  const bool audio = false;
+#endif
   impl->session = std::make_unique<session::ViewerSession>(nullptr, std::move(dec));
   impl->session->SetDecoderFactory([](codec::VideoCodec c) { return platform::CreateVideoDecoder(c, nullptr); });
   if (handlers.on_stream_info) {
@@ -47,11 +64,17 @@ std::unique_ptr<Viewer> Viewer::Create(std::unique_ptr<Transport> transport,
       fn(static_cast<int32_t>(h.width), static_cast<int32_t>(h.height));
     });
   }
-  if (handlers.on_frame) {
-    impl->session->SetFrameHandler([fn = std::move(handlers.on_frame)](
+  // When a picture was shown, for keeping the sound with it.
+  std::function<void(uint64_t capture_time_us)> shown;
+#if RDACCEL_HAVE_AUDIO
+  if (receiver) shown = [receiver](uint64_t t) { receiver->NoteFrameShown(t, capture::MonotonicMicros()); };
+#endif
+  if (handlers.on_frame || shown) {
+    impl->session->SetFrameHandler([fn = std::move(handlers.on_frame), shown](
                                        const tile::ImageView& img, const std::vector<Rect>& regions,
                                        uint64_t frame_id, uint64_t capture_time_us) {
-      fn(img, regions, FrameInfo{frame_id, capture_time_us});
+      if (fn) fn(img, regions, FrameInfo{frame_id, capture_time_us});
+      if (shown) shown(capture_time_us);
     });
   }
   if (handlers.on_cursor) impl->session->SetCursorHandler(std::move(handlers.on_cursor));
@@ -85,6 +108,13 @@ std::unique_ptr<Viewer> Viewer::Create(std::unique_ptr<Transport> transport,
     impl->link = std::make_unique<session::Link>(session::Link::Role::kViewer, impl->transport.get(),
                                                  std::move(lo), std::move(h));
     session::Link* link = impl->link.get();
+    link->SetAudio(audio);
+#if RDACCEL_HAVE_AUDIO
+    if (receiver) {
+      impl->transport->SetDatagramReceiver(
+          [receiver](std::span<const uint8_t> b) { receiver->OnPacket(b, capture::MonotonicMicros()); });
+    }
+#endif
     if (secure) {
       secure->SetErrorHandler([link](ConnectionError e, const std::string& msg) {
         log::Warn("viewer: " + msg);
@@ -143,6 +173,34 @@ void Viewer::FeedRecording(std::span<const uint8_t> bytes) {
 
 std::string Viewer::decoder_name() const { return impl_->session->decoder_name(); }  // follows a codec change
 
-ViewerStats Viewer::stats() const { return impl_->session->stats(); }
+ViewerStats Viewer::stats() const {
+  ViewerStats st = impl_->session->stats();
+#if RDACCEL_HAVE_AUDIO
+  if (impl_->audio) {
+    const auto a = impl_->audio->stats();
+    st.audio_packets = a.packets;
+    st.audio_bytes = a.bytes;
+    st.audio_lost = a.lost;
+    st.audio_late = a.late;
+    st.audio_underruns = a.underruns;
+    st.audio_buffer_ms = a.buffer_ms;
+    st.audio_target_ms = a.target_ms;
+    st.audio_drift_ppm = a.drift_ppm;
+    st.av_offset_ms = a.av_offset_ms;
+    st.bytes_received += a.bytes;
+  }
+#endif
+  return st;
+}
+
+size_t Viewer::ReadAudio(float* out, size_t frames, uint64_t play_time_us) {
+#if RDACCEL_HAVE_AUDIO
+  if (impl_->audio) return impl_->audio->Read(out, frames, play_time_us, capture::MonotonicMicros());
+#else
+  (void)play_time_us;
+#endif
+  std::memset(out, 0, frames * 2 * sizeof(float));
+  return 0;
+}
 
 }  // namespace rdacore

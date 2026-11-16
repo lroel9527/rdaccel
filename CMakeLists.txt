@@ -36,6 +36,11 @@ option(RDACCEL_INSTALL_TOOLS "Install the example command-line tools" OFF)
 option(RDACCEL_BUILD_FUZZERS "Build libFuzzer targets" OFF)
 # Linux: Wayland screen capture through xdg-desktop-portal + PipeWire (needs
 # libpipewire-0.3 and gio-2.0). AUTO = when both are found.
+# Sound (1.13): Opus, fetched at configure time (the first dependency of the
+# library itself that is downloaded; set FETCHCONTENT_SOURCE_DIR_OPUS to a
+# copy of the sources to build offline). OFF: the sound functions return
+# RDA_ERR_UNSUPPORTED.
+option(RDACCEL_AUDIO "Sound (Opus)" ON)
 set(RDACCEL_PIPEWIRE AUTO CACHE STRING "Wayland (PipeWire) screen capture: AUTO, ON or OFF")
 set_property(CACHE RDACCEL_PIPEWIRE PROPERTY STRINGS AUTO ON OFF)
 set(RDACCEL_HAVE_PIPEWIRE OFF)
@@ -123,6 +128,16 @@ set(RDACCEL_SOURCES
   core/io/stream_file.cpp
   core/log/log.cpp
 )
+if(RDACCEL_AUDIO)
+  list(APPEND RDACCEL_SOURCES
+    core/audio/audio_packet.cpp
+    core/audio/sender.cpp
+    core/audio/receiver.cpp
+    core/audio/resampler.cpp
+    core/audio/test_signal.cpp
+  )
+  list(APPEND RDACCEL_SOURCES core/audio/system_source_none.cpp)
+endif()
 if(APPLE)
   list(APPEND RDACCEL_SOURCES
     platform/mac/platform_mac.mm
@@ -184,6 +199,39 @@ find_package(Threads REQUIRED)
 find_package(ZLIB REQUIRED)
 target_link_libraries(rdaccel PRIVATE Threads::Threads ZLIB::ZLIB)
 
+if(RDACCEL_AUDIO)
+  # Opus (BSD licence, NOTICE), static, inside the library: a shared
+  # librdaccel exports none of its symbols (cmake/rdaccel.exp, .map); a
+  # static one installs libopus.a next to itself.
+  # Intrinsics off: Opus's CMake picks the SSE or NEON files for the one CPU
+  # it configures for, so a universal build (arm64 and x86_64 in one
+  # configure) would compile one architecture's intrinsics into the other.
+  # Plain C is fast enough (encoding runs at over 50 times real time; see
+  # tests/test_audio_codec.cpp).
+  include(FetchContent)
+  set(OPUS_BUILD_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
+  set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+  set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+  set(OPUS_INSTALL_PKG_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+  set(OPUS_INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+  set(OPUS_DISABLE_INTRINSICS ON CACHE BOOL "" FORCE)
+  FetchContent_Declare(opus
+    URL https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz
+    URL_HASH SHA256=6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+  # Opus as a static library even where rdaccel is shared.
+  set(RDA_SAVED_BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS})
+  set(BUILD_SHARED_LIBS OFF)
+  FetchContent_MakeAvailable(opus)
+  set(BUILD_SHARED_LIBS ${RDA_SAVED_BUILD_SHARED_LIBS})
+  set_target_properties(opus PROPERTIES POSITION_INDEPENDENT_CODE ON C_VISIBILITY_PRESET hidden)
+  target_compile_options(opus PRIVATE -w)  # its own warnings are not ours
+  target_link_libraries(rdaccel PRIVATE $<BUILD_INTERFACE:opus>)
+  target_compile_definitions(rdaccel PRIVATE RDACCEL_HAVE_AUDIO=1)
+else()
+  target_compile_definitions(rdaccel PRIVATE RDACCEL_HAVE_AUDIO=0)
+endif()
+
 if(APPLE)
   target_compile_options(rdaccel PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
   target_link_libraries(rdaccel PRIVATE
@@ -226,6 +274,14 @@ target_link_libraries(rdaccel_internal INTERFACE rdaccel Threads::Threads)
 target_include_directories(rdaccel_internal INTERFACE
   ${CMAKE_CURRENT_SOURCE_DIR}/core ${CMAKE_CURRENT_SOURCE_DIR}/platform
   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/monocypher)
+if(RDACCEL_AUDIO)
+  # The tests call Opus themselves (the codec test), and build against the
+  # internal headers, which the RDACCEL_HAVE_AUDIO switch shapes.
+  target_link_libraries(rdaccel_internal INTERFACE opus)
+  target_compile_definitions(rdaccel_internal INTERFACE RDACCEL_HAVE_AUDIO=1)
+else()
+  target_compile_definitions(rdaccel_internal INTERFACE RDACCEL_HAVE_AUDIO=0)
+endif()
 
 # ---------------------------------------------------------------------------
 # install + find_package(rdaccel)
@@ -272,10 +328,15 @@ if(RDACCEL_INSTALL)
   # Private dependencies are listed as plain flags (not Requires.private) so
   # `pkg-config --static` does not expand FFmpeg's own static dependencies:
   # rdaccel links the shared FFmpeg/X11 libraries, as the CMake package does.
-  if(APPLE)
-    set(RDA_PC_LIBS_PRIVATE "-lz -lc++ -framework Foundation -framework AppKit -framework Carbon -framework CoreGraphics -framework CoreMedia -framework CoreVideo -framework VideoToolbox -framework ScreenCaptureKit -framework IOSurface -framework IOKit")
+  if(RDACCEL_AUDIO)
+    set(RDA_PC_OPUS "-lopus ")
   else()
-    string(JOIN " " RDA_PC_LIBS_PRIVATE ${FFMPEG_LDFLAGS} ${X11_LDFLAGS} ${PIPEWIRE_LDFLAGS} -lz -lstdc++ -lm -pthread)
+    set(RDA_PC_OPUS "")
+  endif()
+  if(APPLE)
+    set(RDA_PC_LIBS_PRIVATE "${RDA_PC_OPUS}-lz -lc++ -framework Foundation -framework AppKit -framework Carbon -framework CoreGraphics -framework CoreMedia -framework CoreVideo -framework VideoToolbox -framework ScreenCaptureKit -framework IOSurface -framework IOKit")
+  else()
+    string(JOIN " " RDA_PC_LIBS_PRIVATE ${RDA_PC_OPUS} ${FFMPEG_LDFLAGS} ${X11_LDFLAGS} ${PIPEWIRE_LDFLAGS} -lz -lstdc++ -lm -pthread)
   endif()
   configure_file(cmake/rdaccel.pc.in ${CMAKE_CURRENT_BINARY_DIR}/rdaccel.pc @ONLY)
   install(FILES ${CMAKE_CURRENT_BINARY_DIR}/rdaccel.pc DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
@@ -357,9 +418,19 @@ if(RDACCEL_BUILD_TESTS)
     tests/test_keycodes.cpp
     tests/test_secure_transport.cpp
   )
+  if(RDACCEL_AUDIO)
+    target_sources(rdaccel_tests PRIVATE
+      tests/test_audio_packet.cpp
+      tests/test_audio_gate.cpp
+      tests/test_audio_codec.cpp
+      tests/test_audio_resampler.cpp
+      tests/test_audio_jitter.cpp)
+  endif()
   target_link_libraries(rdaccel_tests PRIVATE rdaccel_internal GTest::gtest_main)
   include(GoogleTest)
-  gtest_discover_tests(rdaccel_tests)
+  # Every test runs with the sound player's null device forced on: nothing
+  # a test does can open a real output device (docs/integration.md, sound).
+  gtest_discover_tests(rdaccel_tests PROPERTIES ENVIRONMENT "RDACCEL_AUDIO_NULL_OUTPUT=1")
 
   # Platform codec round trip: encode synthetic frames with the platform
   # encoder and decode them with the platform decoder.
@@ -377,13 +448,13 @@ if(RDACCEL_BUILD_TESTS)
     endif()
   endif()
   gtest_discover_tests(rdaccel_platform_tests DISCOVERY_TIMEOUT 30
-    PROPERTIES ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan.supp")
+    PROPERTIES ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan.supp;RDACCEL_AUDIO_NULL_OUTPUT=1")
 
   # The plain C example doubles as a test of the C ABI from C.
   if(RDACCEL_BUILD_EXAMPLES)
     add_test(NAME minimal_c COMMAND rdaccel_minimal_c)
     set_tests_properties(minimal_c PROPERTIES
-      ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan.supp")
+      ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan.supp;RDACCEL_AUDIO_NULL_OUTPUT=1")
   endif()
 endif()
 
@@ -398,7 +469,11 @@ if(RDACCEL_BUILD_TOOLS)
 endif()
 
 if(RDACCEL_BUILD_FUZZERS)
-  foreach(name messages lossless viewer link secure reliable hevc recording)
+  set(RDA_FUZZERS messages lossless viewer link secure reliable hevc recording)
+  if(RDACCEL_AUDIO)
+    list(APPEND RDA_FUZZERS audio)
+  endif()
+  foreach(name ${RDA_FUZZERS})
     add_executable(fuzz_${name} fuzz/fuzz_${name}.cpp)
     target_link_libraries(fuzz_${name} PRIVATE rdaccel_internal)
     target_link_options(fuzz_${name} PRIVATE -fsanitize=fuzzer)

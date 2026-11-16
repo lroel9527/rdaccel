@@ -185,6 +185,49 @@ struct HostStats {
   uint64_t cursor_bytes = 0;
   uint64_t encode_us_total = 0;    // video encoder
   uint64_t lossless_us_total = 0;  // palette extraction + deflate
+  // Sound (1.13), cumulative over viewers. audio_bytes (whole packets,
+  // headers included) is also in bytes_sent.
+  uint64_t audio_packets = 0;
+  uint64_t audio_bytes = 0;
+  uint64_t audio_frames = 0;        // encoded
+  uint64_t audio_frames_gated = 0;  // not sent: silence
+  uint64_t audio_red_bytes = 0;     // of audio_bytes, copies of the previous frame
+  uint64_t audio_dropped_stale = 0;  // waited too long in the transport
+};
+
+// The host's sound (1.13; core/audio/).
+struct AudioConfig {
+  enum class Source : int32_t { kApp = 0, kSystem = 1, kTest = 2 };
+  // kSystem: everything this computer plays (macOS 14.2 Process Tap).
+  // kTest: a computed test signal, touching no device. kApp: SubmitAudio.
+  Source source = Source::kSystem;
+  int32_t profile = 0;  // 0 full (10 ms, 160 kbps), 1 data saver (20 ms, 96 kbps)
+  // The computer stays silent while its sound is captured and sent (only
+  // once the capture is known to have the permission).
+  bool mute_local = false;
+  // Applications not to capture (bundle identifiers), besides this process.
+  std::vector<std::string> exclude_bundle_ids;
+};
+
+enum class AudioState : int32_t {
+  kOff = 0,
+  kWaitingPeer = 1,  // no viewer, or one that takes no sound
+  kStarting = 2,
+  kRunning = 3,
+  kPaused = 4,
+  kNoPermission = 5,
+  kFailed = 6,  // retried every 2 s; see message
+};
+
+struct AudioStatus {
+  AudioState state = AudioState::kOff;
+  int32_t profile = 0;
+  bool silent = true;  // running, and nothing is sent: the computer is silent
+  int32_t bitrate_bps = 0;
+  int32_t frame_ms = 0;
+  int32_t channels = 0;  // coded: 1 or 2
+  bool muted_local = false;  // the capture mutes this computer right now
+  std::string message;       // for kFailed and kNoPermission
 };
 
 class Host {
@@ -257,6 +300,20 @@ class Host {
   // colours. Thread-safe.
   void SetTextMode(bool on);
   bool text_mode() const;
+
+  // Sound (1.13). Capture (kSystem, kTest) starts when a viewer that takes
+  // sound is connected and stops when it leaves; nothing is captured or sent
+  // for one that does not (an older viewer, one that did not ask, TCP).
+  // False (with `error`) where the source does not exist (kSystem on Linux)
+  // or the library was built without sound.
+  bool StartAudio(const AudioConfig& config, std::string* error = nullptr);
+  void StopAudio();
+  // AudioConfig::Source::kApp: 48 kHz stereo interleaved float. Calls must
+  // not overlap. False when no sound is being sent.
+  bool SubmitAudio(const float* interleaved, size_t frames, uint64_t capture_time_us);
+  void SetAudioProfile(int32_t profile);
+  void SetAudioPaused(bool paused);
+  AudioStatus audio_status() const;
 
   // Empty until the first frame has been encoded.
   std::string encoder_name() const;

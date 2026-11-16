@@ -873,3 +873,227 @@ TEST(CApi, KeyboardInputSources) {
 #endif
   EXPECT_EQ(rda_injector_select_input_source(nullptr, "x"), RDA_ERR_INVALID_ARG);
 }
+
+// ---- sound (1.13) -----------------------------------------------------------
+
+namespace {
+
+// A host and a viewer over a simulated network (10 ms each way), both
+// connected; the viewer takes sound unless told not to.
+struct SoundPair {
+  rda_host* host = nullptr;
+  rda_viewer* viewer = nullptr;
+  std::atomic<int> host_state{-1}, viewer_state{-1};
+  explicit SoundPair(int viewer_audio = 1, uint32_t viewer_struct_size = sizeof(rda_viewer_config),
+                     int32_t source = RDA_AUDIO_SOURCE_APP) {
+    rda_network_conditions c;
+    rda_network_conditions_default(&c);
+    c.delay_ms = 10;
+    rda_transport *h = nullptr, *v = nullptr;
+    EXPECT_EQ(rda_simulated_network_create(&c, &c, 1, &h, &v), RDA_OK);
+    rda_host_config hc;
+    rda_host_config_default(&hc);
+    hc.user = this;
+    hc.on_state = [](void* u, rda_state st, rda_status) { static_cast<SoundPair*>(u)->host_state = st; };
+    EXPECT_EQ(rda_host_create(h, &hc, &host), RDA_OK) << rda_last_error();
+    rda_audio_config ac;
+    rda_audio_config_default(&ac);
+    ac.source = source;
+    EXPECT_EQ(rda_host_start_audio(host, &ac), RDA_OK) << rda_last_error();
+    rda_viewer_config vc;
+    rda_viewer_config_default(&vc);
+    vc.user = this;
+    vc.on_state = [](void* u, rda_state st, rda_status) { static_cast<SoundPair*>(u)->viewer_state = st; };
+    vc.audio = viewer_audio;
+    vc.struct_size = viewer_struct_size;
+    EXPECT_EQ(rda_viewer_create(v, &vc, &viewer), RDA_OK) << rda_last_error();
+    EXPECT_TRUE(WaitUntil([&] { return host_state == RDA_STATE_CONNECTED && viewer_state == RDA_STATE_CONNECTED; }));
+  }
+  ~SoundPair() {
+    rda_viewer_destroy(viewer);
+    rda_host_destroy(host);
+  }
+  rda_audio_status Status() {
+    rda_audio_status s{};
+    s.struct_size = sizeof(s);
+    EXPECT_EQ(rda_host_get_audio_status(host, &s), RDA_OK);
+    return s;
+  }
+};
+
+double Rms(const float* p, size_t frames, int ch) {
+  double e = 0;
+  for (size_t i = 0; i < frames; ++i) e += static_cast<double>(p[2 * i + ch]) * p[2 * i + ch];
+  return std::sqrt(e / static_cast<double>(frames));
+}
+
+}  // namespace
+
+TEST(CApi, SoundGoesFromSubmitToRead) {
+  SoundPair p;
+  EXPECT_TRUE(WaitUntil([&] { return p.Status().state == RDA_AUDIO_STATE_RUNNING; }));
+  // A reader, as an audio device would call it: 5 ms every 5 ms.
+  std::atomic<bool> stop{false};
+  std::vector<float> heard;
+  std::vector<uint64_t> heard_at;  // when each 5 ms block was read
+  std::thread reader([&] {
+    std::vector<float> buf(240 * 2);
+    auto next = std::chrono::steady_clock::now();
+    while (!stop) {
+      rda_viewer_read_audio(p.viewer, buf.data(), 240, 0);
+      heard.insert(heard.end(), buf.begin(), buf.end());
+      heard_at.push_back(rda_now_us());
+      next += std::chrono::milliseconds(5);
+      std::this_thread::sleep_until(next);
+    }
+  });
+  // Half a second of silence, 1.5 s of 1 kHz left and 1.5 kHz right at
+  // -20 dBFS, half a second of silence, 10 ms at a time in real time.
+  std::vector<float> chunk(480 * 2);
+  uint64_t onset_us = 0;
+  auto next = std::chrono::steady_clock::now();
+  for (int k = 0; k < 250; ++k) {
+    const bool sound = k >= 50 && k < 200;
+    for (int i = 0; i < 480; ++i) {
+      const double t = (k * 480 + i) / 48000.0;
+      chunk[2 * i] = sound ? static_cast<float>(0.1 * std::sin(2 * M_PI * 1000 * t)) : 0.0f;
+      chunk[2 * i + 1] = sound ? static_cast<float>(0.1 * std::sin(2 * M_PI * 1500 * t)) : 0.0f;
+    }
+    const uint64_t now = rda_now_us();
+    if (k == 50) onset_us = now;
+    EXPECT_EQ(rda_host_submit_audio(p.host, chunk.data(), 480, now), RDA_OK) << rda_last_error();
+    next += std::chrono::milliseconds(10);
+    std::this_thread::sleep_until(next);
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  stop = true;
+  reader.join();
+  // When the sound came out, against when it went in.
+  size_t first = 0;
+  for (size_t i = 0; i < heard.size() / 2; ++i) {
+    if (std::abs(heard[2 * i]) > 0.01) {
+      first = i;
+      break;
+    }
+  }
+  ASSERT_GT(first, 0u) << "no sound came out";
+  const uint64_t out_us = heard_at[first / 240] - 5'000 + (first % 240) * 1'000'000 / 48'000;
+  const double latency_ms = (static_cast<double>(out_us) - static_cast<double>(onset_us)) / 1000.0;
+  // The level of each channel, over a second of steady sound.
+  const float* steady = heard.data() + 2 * (first + 9'600);
+  const double l = Rms(steady, 48'000, 0), r = Rms(steady, 48'000, 1);
+  const double want = 0.1 / std::sqrt(2.0);
+  std::printf("sound: latency %.0f ms, level %+.2f / %+.2f dB\n", latency_ms, 20 * std::log10(l / want),
+              20 * std::log10(r / want));
+  EXPECT_GT(latency_ms, 25);
+  EXPECT_LT(latency_ms, 120);
+  EXPECT_LT(std::abs(20 * std::log10(l / want)), 1.0);
+  EXPECT_LT(std::abs(20 * std::log10(r / want)), 1.0);
+
+  rda_host_stats hs{};
+  hs.struct_size = sizeof(hs);
+  ASSERT_EQ(rda_host_get_stats(p.host, &hs), RDA_OK);
+  rda_viewer_stats vs{};
+  vs.struct_size = sizeof(vs);
+  ASSERT_EQ(rda_viewer_get_stats(p.viewer, &vs), RDA_OK);
+  // 150 frames of sound and its 200 ms tail; no packet lost on this path.
+  EXPECT_EQ(hs.audio_packets, 170u);
+  EXPECT_EQ(hs.audio_frames, 170u);
+  EXPECT_EQ(hs.audio_frames_gated, 80u);
+  EXPECT_EQ(vs.audio_packets, hs.audio_packets);
+  EXPECT_EQ(vs.audio_bytes, hs.audio_bytes);
+  EXPECT_GE(hs.bytes_sent, hs.audio_bytes);  // the sound is in the total
+  EXPECT_GE(vs.bytes_received, vs.audio_bytes);
+  EXPECT_EQ(vs.audio_underruns, 0u);
+  EXPECT_EQ(vs.audio_lost, 0u);
+  EXPECT_GT(vs.audio_target_ms, 0);
+  const rda_audio_status st = p.Status();
+  EXPECT_EQ(st.frame_ms, 10);
+  EXPECT_EQ(st.channels, 2);
+  EXPECT_EQ(st.bitrate_bps, 160'000);
+  EXPECT_EQ(st.silent, 1);  // the gate closed after the last frame
+}
+
+TEST(CApi, NoSoundForAViewerThatDidNotAsk) {
+  SoundPair p(/*viewer_audio=*/0);
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  EXPECT_EQ(p.Status().state, RDA_AUDIO_STATE_WAITING_PEER);
+  std::vector<float> chunk(480 * 2, 0.1f);
+  EXPECT_EQ(rda_host_submit_audio(p.host, chunk.data(), 480, rda_now_us()), RDA_ERR_BUSY);
+  rda_host_stats hs{};
+  hs.struct_size = sizeof(hs);
+  ASSERT_EQ(rda_host_get_stats(p.host, &hs), RDA_OK);
+  EXPECT_EQ(hs.audio_packets, 0u);
+  // And reading gives silence.
+  std::vector<float> out(240 * 2, 1.0f);
+  EXPECT_EQ(rda_viewer_read_audio(p.viewer, out.data(), 240, 0), 0u);
+  for (float f : out) ASSERT_EQ(f, 0.0f);
+}
+
+TEST(CApi, AnOlderViewerConfigNeverReadsAudio) {
+  // A caller built against 1.12: its struct_size ends at the padding before
+  // `audio`, and whatever lies after it is not read.
+  SoundPair p(/*viewer_audio=*/1, static_cast<uint32_t>(offsetof(rda_viewer_config, audio)));
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  EXPECT_EQ(p.Status().state, RDA_AUDIO_STATE_WAITING_PEER);
+}
+
+TEST(CApi, TheTestSourceSendsWithoutAnyDevice) {
+  SoundPair p(1, sizeof(rda_viewer_config), RDA_AUDIO_SOURCE_TEST);
+  // The test loop starts with 0.3 s of a tone.
+  ASSERT_TRUE(WaitUntil([&] {
+    rda_host_stats hs{};
+    hs.struct_size = sizeof(hs);
+    rda_host_get_stats(p.host, &hs);
+    return hs.audio_packets > 10;
+  }));
+  EXPECT_EQ(p.Status().state, RDA_AUDIO_STATE_RUNNING);
+  // Data saver from the next frame; paused sends nothing.
+  rda_host_set_audio_profile(p.host, RDA_AUDIO_PROFILE_SAVER);
+  EXPECT_TRUE(WaitUntil([&] { return p.Status().frame_ms == 20; }, 5000));
+  rda_host_set_audio_paused(p.host, 1);
+  EXPECT_EQ(p.Status().state, RDA_AUDIO_STATE_PAUSED);
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  rda_host_stats a{}, b{};
+  a.struct_size = b.struct_size = sizeof(a);
+  rda_host_get_stats(p.host, &a);
+  std::this_thread::sleep_for(std::chrono::milliseconds(4500));  // a whole loop
+  rda_host_get_stats(p.host, &b);
+  EXPECT_EQ(a.audio_packets, b.audio_packets);
+  rda_host_stop_audio(p.host);
+  EXPECT_EQ(p.Status().state, RDA_AUDIO_STATE_OFF);
+}
+
+TEST(CApi, SoundArguments) {
+  rda_transport *a = nullptr, *b = nullptr;
+  ASSERT_EQ(rda_pipe_create(&a, &b), RDA_OK);
+  rda_transport_destroy(b);
+  rda_host* h = nullptr;
+  ASSERT_EQ(rda_host_create(a, nullptr, &h), RDA_OK);
+  EXPECT_EQ(rda_host_start_audio(nullptr, nullptr), RDA_ERR_INVALID_ARG);
+  rda_audio_config c;
+  rda_audio_config_default(&c);
+  EXPECT_EQ(c.source, RDA_AUDIO_SOURCE_SYSTEM);
+  EXPECT_EQ(c.profile, RDA_AUDIO_PROFILE_FULL);
+  EXPECT_EQ(c.mute_local, 0);
+  c.source = 7;
+  EXPECT_EQ(rda_host_start_audio(h, &c), RDA_ERR_INVALID_ARG);
+  rda_audio_config_default(&c);
+  c.profile = 2;
+  EXPECT_EQ(rda_host_start_audio(h, &c), RDA_ERR_INVALID_ARG);
+  rda_audio_config_default(&c);
+  c.exclude_bundle_id_count = 1;
+  EXPECT_EQ(rda_host_start_audio(h, &c), RDA_ERR_INVALID_ARG);
+  rda_audio_status s{};
+  s.struct_size = sizeof(s);
+  ASSERT_EQ(rda_host_get_audio_status(h, &s), RDA_OK);
+  EXPECT_EQ(s.state, RDA_AUDIO_STATE_OFF);
+  EXPECT_EQ(rda_host_get_audio_status(h, nullptr), RDA_ERR_INVALID_ARG);
+  EXPECT_EQ(rda_host_submit_audio(h, nullptr, 10, 0), RDA_ERR_INVALID_ARG);
+  float f[2] = {};
+  EXPECT_EQ(rda_viewer_read_audio(nullptr, f, 1, 0), 0u);
+  rda_host_stop_audio(nullptr);
+  rda_host_set_audio_paused(nullptr, 1);
+  rda_host_set_audio_profile(nullptr, 1);
+  rda_host_destroy(h);
+}

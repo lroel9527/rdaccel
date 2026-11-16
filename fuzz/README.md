@@ -13,6 +13,7 @@ UBSan (see below); a crash leaves its reproducer in the working directory.
 | `fuzz_secure` | the encrypted transport's receive side: peer hello, record framing, alerts, bad tags |
 | `fuzz_reliable` | the UDP reliability layer's datagram parser |
 | `fuzz_hevc` | the HEVC Annex B / access unit helpers |
+| `fuzz_audio` | the sound receiver (1.13): any datagram as a sound packet, then reads as a player makes them, through the Opus decoder, the jitter buffer and the resampler |
 | `fuzz_recording` | `.rdstream` playback (what `rdaccel_play` and `rda_viewer_feed_recording()` read), through the platform's real HEVC decoder; seeded with real recordings |
 
 Seed inputs live in `fuzz/corpus/<target>/` (for `recording`: synthetic

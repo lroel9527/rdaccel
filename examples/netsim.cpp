@@ -12,6 +12,10 @@
 //                  [--warmup=3]   seconds left out of the steady-state numbers
 //                  [--cursor=1]   also move the mouse pointer (cursor channel) and
 //                                 report how long positions take to arrive
+//                  [--audio=1]    also send sound (the computed test loop, no
+//                                 device) and report its bitrate, delay and
+//                                 losses; --audio-profile=1 for data saver.
+//                                 --scenario=audio: the idle screen with sound
 //
 // Each run also reports its pauses (the screen not changing for half a
 // second or more, after the warm-up): how much of the picture is pixel-exact
@@ -28,6 +32,7 @@
 #include <rdaccel/rdaccel.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -45,7 +50,10 @@ int main(int argc, char** argv) {
   rdaccel::examples::Args args(argc, argv);
   const int fps = static_cast<int>(args.num("fps", 30));
   const double seconds = args.real("seconds", 10);
-  const std::string which = args.str("scenario", "video");
+  std::string which = args.str("scenario", "video");
+  // Sound: with any scenario, or the idle screen with sound.
+  const bool with_audio = args.num("audio", 0) != 0 || which == "audio";
+  if (which == "audio") which = "idle";
 
   Image bg;
   int w = 1920, h = 1080;
@@ -219,7 +227,9 @@ int main(int argc, char** argv) {
     }
   };
   std::string err;
-  auto viewer = rdaccel::Viewer::Create(std::move(viewer_end), std::move(handlers), &err);
+  rdaccel::ViewerOptions vopts;
+  vopts.audio = with_audio;
+  auto viewer = rdaccel::Viewer::Create(std::move(viewer_end), std::move(handlers), vopts, &err);
   if (!viewer) {
     std::fprintf(stderr, "%s\n", err.c_str());
     return 1;
@@ -236,6 +246,28 @@ int main(int argc, char** argv) {
   cfg.progressive = args.num("progressive", 1) != 0;
   cfg.text_mode = args.num("text", 0) != 0;
   rdaccel::Host host(std::move(host_end), cfg);
+  // Sound: the test loop on the host, and a reader on the viewer that takes
+  // 5 ms every 5 ms, as an output device would, and throws it away.
+  std::atomic<bool> audio_stop{false};
+  std::thread audio_reader;
+  if (with_audio) {
+    rdaccel::AudioConfig ac;
+    ac.source = rdaccel::AudioConfig::Source::kTest;
+    ac.profile = static_cast<int32_t>(args.num("audio-profile", 0));
+    if (!host.StartAudio(ac, &err)) {
+      std::fprintf(stderr, "sound: %s\n", err.c_str());
+      return 1;
+    }
+    audio_reader = std::thread([&] {
+      std::vector<float> buf(240 * 2);
+      auto next = std::chrono::steady_clock::now();
+      while (!audio_stop) {
+        viewer->ReadAudio(buf.data(), 240);
+        next += std::chrono::milliseconds(5);
+        std::this_thread::sleep_until(next);
+      }
+    });
+  }
 
   const auto frames = static_cast<uint64_t>(seconds * fps);
   const uint64_t t0 = rdaccel::NowMicros();
@@ -318,6 +350,10 @@ int main(int argc, char** argv) {
   // Let the last frames arrive.
   std::this_thread::sleep_for(std::chrono::milliseconds(1500));
   const auto hs = host.stats();
+  if (audio_reader.joinable()) {
+    audio_stop = true;
+    audio_reader.join();
+  }
 
   std::lock_guard<std::mutex> lock(mu);
   if (!trace_path.empty()) {
@@ -361,6 +397,23 @@ int main(int argc, char** argv) {
       hs.packets_sent ? 100.0 * static_cast<double>(hs.packets_spurious) / static_cast<double>(hs.packets_sent) : 0.0,
       hs.packets_sent ? 100.0 * static_cast<double>(hs.fec_parity_sent) / static_cast<double>(hs.packets_sent) : 0.0,
       static_cast<unsigned long long>(hs.fec_recovered));
+  if (with_audio) {
+    // Stats as the overlay counts (the packets the host hands the transport)
+    // and on the wire (with the transport's ~56 bytes a packet: its header,
+    // the encryption a real connection adds, UDP and IPv4).
+    const auto vs = viewer->stats();
+    const double secs = seconds + 1.5;
+    const double kbps = static_cast<double>(hs.audio_bytes) * 8 / 1000 / secs;
+    const double wire = static_cast<double>(hs.audio_bytes + 56 * hs.audio_packets) * 8 / 1000 / secs;
+    std::printf("       sound: %5.1f kbps (%5.1f on the wire), %llu packets (%llu frames silent), %.1f%% with a copy; "
+                "delay ~%3.0f ms (path %u + buffer %d), target %d ms, concealed %llu, late %llu, underruns %llu\n",
+                kbps, wire, static_cast<unsigned long long>(hs.audio_packets),
+                static_cast<unsigned long long>(hs.audio_frames_gated),
+                hs.audio_bytes ? 100.0 * static_cast<double>(hs.audio_red_bytes) / static_cast<double>(hs.audio_bytes) : 0.0,
+                hs.rtt_us / 2000.0 + vs.audio_buffer_ms, hs.rtt_us / 2000, vs.audio_buffer_ms, vs.audio_target_ms,
+                static_cast<unsigned long long>(vs.audio_lost), static_cast<unsigned long long>(vs.audio_late),
+                static_cast<unsigned long long>(vs.audio_underruns));
+  }
   if (args.has("verbose")) {
     std::printf("       PSNR samples:");
     for (double v : psnr) std::printf(" %.0f", v);

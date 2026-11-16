@@ -7,6 +7,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -15,6 +16,10 @@
 
 #include "capture/capturer.h"
 #include "codec/codec_choice.h"
+#if RDACCEL_HAVE_AUDIO
+#include "audio/audio_source.h"
+#include "audio/sender.h"
+#endif
 #include "log/log.h"
 #include "platform.h"
 #include "session/cursor_channel.h"
@@ -176,6 +181,7 @@ struct Host::Impl {
   void IdleLoop() {
     std::unique_lock<std::mutex> lock(idle_mu);
     while (!idle_cv.wait_for(lock, std::chrono::milliseconds(25), [&] { return idle_stop; })) {
+      AudioPathTick(capture::MonotonicMicros());
       if (failed) continue;
       const uint64_t now = capture::MonotonicMicros();
       if (now - last_frame_us.load() < kIdleResubmitUs) continue;
@@ -361,6 +367,9 @@ struct Host::Impl {
           s.SendHello();
           s.RequestKeyframe();
         });
+        impl->AudioPeerJoined();
+      } else if (st == ConnectionState::kDisconnected) {
+        impl->AudioPeerLeft();
       }
       impl->NotifyState(st, e);
       // After the application has heard of it: then wait for the next one.
@@ -395,6 +404,7 @@ struct Host::Impl {
     session::LinkOptions lo;
     lo.peer_timeout_ms = config.peer_timeout_ms;
     auto l = std::make_shared<session::Link>(session::Link::Role::kHost, t.get(), lo, LinkHandlers());
+    l->SetAudio(audio_on);  // offered in the Welcome
     if (secure) {
       secure->SetErrorHandler([lp = l.get()](ConnectionError e, const std::string& msg) {
         log::Warn("host: " + msg);
@@ -489,6 +499,160 @@ struct Host::Impl {
       f.capture_time_us = capture::MonotonicMicros();
       OnFrameLocked(f, nullptr);
     }
+  }
+
+  // ---- sound (1.13) ------------------------------------------------------
+  // audio_ctl_mu serializes starting and stopping (the source's start and
+  // stop run under it, never its callbacks); audio_mu guards the fields,
+  // briefly, and is all the callbacks take.
+  std::mutex audio_ctl_mu;
+  mutable std::mutex audio_mu;
+  std::atomic<bool> audio_on{false};
+  AudioConfig audio_config;  // under audio_mu
+  AudioState audio_state = AudioState::kOff;
+  std::string audio_message;
+  std::atomic<int32_t> audio_profile{0};
+  std::atomic<bool> audio_paused{false};
+#if RDACCEL_HAVE_AUDIO
+  std::shared_ptr<audio::Sender> sender;       // for the viewer there, when it takes sound
+  std::unique_ptr<audio::Source> audio_source;  // under audio_ctl_mu (and audio_mu to read)
+  audio::SenderStats audio_done;                // of the senders of earlier viewers
+  uint64_t audio_dropped_done = 0;
+  // Loss over the last 5 s, for the sender (IdleLoop's thread).
+  struct PathSample {
+    uint64_t time, sent, lost;
+  };
+  std::deque<PathSample> audio_path;
+  uint64_t audio_path_time = 0;
+#endif
+
+  void AudioPeerJoined() {
+#if RDACCEL_HAVE_AUDIO
+    std::lock_guard<std::mutex> ctl(audio_ctl_mu);
+    if (!audio_on) return;
+    const auto link = CurrentLink();
+    AudioConfig cfg;
+    {
+      std::lock_guard<std::mutex> l(audio_mu);
+      if (sender) return;
+      if (!(link->peer_caps() & proto::kCapAudio) || !gate->CarriesDatagrams()) {
+        audio_state = AudioState::kWaitingPeer;
+        return;
+      }
+      cfg = audio_config;
+    }
+    auto s = std::make_shared<audio::Sender>(
+        [g = gate.get()](std::span<const uint8_t> b) { return g->SendDatagram(b); }, audio_profile.load());
+    s->SetPaused(audio_paused);
+    std::unique_ptr<audio::Source> src;
+    if (cfg.source == AudioConfig::Source::kTest) src = audio::CreateTestSource();
+    if (cfg.source == AudioConfig::Source::kSystem) src = audio::CreateSystemSource();
+    {
+      std::lock_guard<std::mutex> l(audio_mu);
+      sender = s;
+      audio_message.clear();
+      if (cfg.source == AudioConfig::Source::kApp) {
+        audio_state = AudioState::kRunning;
+        return;
+      }
+      if (!src) {
+        audio_state = AudioState::kFailed;
+        audio_message = "this platform has no system sound capture";
+        return;
+      }
+      audio_state = AudioState::kStarting;
+    }
+    log::Info("sound: the viewer takes it; capture starts");
+    audio::SourceConfig sc;
+    sc.mute_local = cfg.mute_local;
+    sc.exclude_bundle_ids = cfg.exclude_bundle_ids;
+    src->Start(
+        sc, [s](const float* pcm, size_t frames, uint64_t t) { s->Push(pcm, frames, t); },
+        [this](audio::SourceState st, const std::string& msg) { OnSourceState(st, msg); });
+    std::lock_guard<std::mutex> l(audio_mu);
+    audio_source = std::move(src);
+#endif
+  }
+
+#if RDACCEL_HAVE_AUDIO
+  void OnSourceState(audio::SourceState st, const std::string& msg) {
+    std::lock_guard<std::mutex> l(audio_mu);
+    AudioState next = AudioState::kStarting;
+    switch (st) {
+      case audio::SourceState::kStarting: next = AudioState::kStarting; break;
+      case audio::SourceState::kRunning: next = AudioState::kRunning; break;
+      case audio::SourceState::kNoPermission: next = AudioState::kNoPermission; break;
+      case audio::SourceState::kFailed: next = AudioState::kFailed; break;
+    }
+    if (next != audio_state) {
+      // Once per change, not per retry.
+      if (next == AudioState::kFailed || next == AudioState::kNoPermission) {
+        log::Warn("sound: " + msg);
+      } else if (next == AudioState::kRunning) {
+        log::Info("sound: capturing");
+      }
+    }
+    audio_state = next;
+    audio_message = msg;
+  }
+#endif
+
+  void AudioPeerLeft() {
+#if RDACCEL_HAVE_AUDIO
+    std::lock_guard<std::mutex> ctl(audio_ctl_mu);
+    std::unique_ptr<audio::Source> src;
+    std::shared_ptr<audio::Sender> s;
+    {
+      std::lock_guard<std::mutex> l(audio_mu);
+      src = std::move(audio_source);
+      s = std::move(sender);
+    }
+    if (src) src->Stop();  // no callback after this; the computer's own sound is back
+    if (!s) {
+      std::lock_guard<std::mutex> l(audio_mu);
+      if (audio_on) audio_state = AudioState::kWaitingPeer;
+      return;
+    }
+    TransportStats st;
+    const bool have_st = gate->GetStats(&st);
+    const auto ss = s->stats();
+    std::lock_guard<std::mutex> l(audio_mu);
+    audio_done.packets += ss.packets;
+    audio_done.bytes += ss.bytes;
+    audio_done.frames += ss.frames;
+    audio_done.frames_gated += ss.frames_gated;
+    audio_done.red_bytes += ss.red_bytes;
+    if (have_st) audio_dropped_done += st.datagrams_dropped;
+    audio_state = audio_on ? AudioState::kWaitingPeer : AudioState::kOff;
+    audio_message.clear();
+#endif
+  }
+
+  void AudioPathTick(uint64_t now) {
+#if RDACCEL_HAVE_AUDIO
+    if (now - audio_path_time < 1'000'000) return;
+    audio_path_time = now;
+    std::shared_ptr<audio::Sender> s;
+    {
+      std::lock_guard<std::mutex> l(audio_mu);
+      s = sender;
+    }
+    if (!s) {
+      audio_path.clear();
+      return;
+    }
+    TransportStats st;
+    if (!gate->GetStats(&st)) return;  // no path measured (TCP, a pipe)
+    const uint64_t lost = st.packets_lost - std::min(st.packets_lost, st.packets_spurious);
+    audio_path.push_back({now, st.packets_sent, lost});
+    while (audio_path.size() > 1 && now - audio_path.front().time > 5'000'000) audio_path.pop_front();
+    const auto& first = audio_path.front();
+    const double sent = static_cast<double>(st.packets_sent - std::min(st.packets_sent, first.sent));
+    const double loss = sent > 0 ? static_cast<double>(lost - std::min(lost, first.lost)) / sent : 0;
+    s->SetPath(loss, st.bandwidth_settled ? st.bandwidth_bps : 0);
+#else
+    (void)now;
+#endif
   }
 
   bool OnFrame(const capture::CapturedFrame& f, std::string* error) {
@@ -712,6 +876,7 @@ Host::Host(std::unique_ptr<Transport> transport, HostConfig config)
 }
 
 Host::~Host() {
+  StopAudio();  // the computer's own sound comes back first
   if (impl_->serve_thread.joinable()) {
     {
       std::lock_guard<std::mutex> lock(impl_->serve_mu);
@@ -875,7 +1040,129 @@ HostStats Host::stats() const {
   st.cursor_images = cs.images;
   st.cursor_bytes = cs.bytes;
   st.bytes_sent += cs.bytes;
+#if RDACCEL_HAVE_AUDIO
+  {
+    std::shared_ptr<audio::Sender> s;
+    audio::SenderStats a;
+    uint64_t dropped = 0;
+    {
+      std::lock_guard<std::mutex> l(impl_->audio_mu);
+      s = impl_->sender;
+      a = impl_->audio_done;
+      dropped = impl_->audio_dropped_done;
+    }
+    if (s) {
+      const auto c = s->stats();
+      a.packets += c.packets;
+      a.bytes += c.bytes;
+      a.frames += c.frames;
+      a.frames_gated += c.frames_gated;
+      a.red_bytes += c.red_bytes;
+      TransportStats ts;
+      if (impl_->gate->GetStats(&ts)) dropped += ts.datagrams_dropped;
+    }
+    st.audio_packets = a.packets;
+    st.audio_bytes = a.bytes;
+    st.audio_frames = a.frames;
+    st.audio_frames_gated = a.frames_gated;
+    st.audio_red_bytes = a.red_bytes;
+    st.audio_dropped_stale = dropped;
+    st.bytes_sent += a.bytes;
+  }
+#endif
   return st;
+}
+
+bool Host::StartAudio(const AudioConfig& config, std::string* error) {
+#if RDACCEL_HAVE_AUDIO
+  if (config.source == AudioConfig::Source::kSystem && !audio::CreateSystemSource()) {
+    if (error) *error = "this platform has no system sound capture";
+    return false;
+  }
+  StopAudio();
+  {
+    std::lock_guard<std::mutex> ctl(impl_->audio_ctl_mu);
+    std::lock_guard<std::mutex> l(impl_->audio_mu);
+    impl_->audio_config = config;
+    impl_->audio_profile = config.profile == 1 ? 1 : 0;
+    impl_->audio_state = AudioState::kWaitingPeer;
+    impl_->audio_message.clear();
+    impl_->audio_on = true;
+  }
+  const auto link = impl_->CurrentLink();
+  link->SetAudio(true);
+  // A viewer may be there already.
+  if (link->state() == ConnectionState::kConnected) impl_->AudioPeerJoined();
+  return true;
+#else
+  (void)config;
+  if (error) *error = "this library was built without sound (RDACCEL_AUDIO=OFF)";
+  return false;
+#endif
+}
+
+void Host::StopAudio() {
+  if (!impl_->audio_on.exchange(false)) return;
+  impl_->CurrentLink()->SetAudio(false);
+  impl_->AudioPeerLeft();
+  std::lock_guard<std::mutex> l(impl_->audio_mu);
+  impl_->audio_state = AudioState::kOff;
+  impl_->audio_message.clear();
+}
+
+bool Host::SubmitAudio(const float* interleaved, size_t frames, uint64_t capture_time_us) {
+#if RDACCEL_HAVE_AUDIO
+  std::shared_ptr<audio::Sender> s;
+  {
+    std::lock_guard<std::mutex> l(impl_->audio_mu);
+    if (!impl_->audio_on || impl_->audio_config.source != AudioConfig::Source::kApp) return false;
+    s = impl_->sender;
+  }
+  if (!s) return false;
+  s->Push(interleaved, frames, capture_time_us);
+  return true;
+#else
+  (void)interleaved;
+  (void)frames;
+  (void)capture_time_us;
+  return false;
+#endif
+}
+
+void Host::SetAudioProfile(int32_t profile) {
+  impl_->audio_profile = profile == 1 ? 1 : 0;
+#if RDACCEL_HAVE_AUDIO
+  std::lock_guard<std::mutex> l(impl_->audio_mu);
+  if (impl_->sender) impl_->sender->SetProfile(impl_->audio_profile);
+#endif
+}
+
+void Host::SetAudioPaused(bool paused) {
+  impl_->audio_paused = paused;
+#if RDACCEL_HAVE_AUDIO
+  std::lock_guard<std::mutex> l(impl_->audio_mu);
+  if (impl_->sender) impl_->sender->SetPaused(paused);
+#endif
+}
+
+AudioStatus Host::audio_status() const {
+  AudioStatus a;
+  std::lock_guard<std::mutex> l(impl_->audio_mu);
+  a.state = impl_->audio_state;
+  a.message = impl_->audio_message;
+  a.profile = impl_->audio_profile;
+#if RDACCEL_HAVE_AUDIO
+  if (impl_->sender) {
+    const auto ss = impl_->sender->status();
+    a.silent = ss.silent;
+    a.bitrate_bps = ss.bitrate_bps;
+    a.frame_ms = ss.frame_ms;
+    a.channels = ss.channels;
+    if (a.state == AudioState::kRunning && impl_->audio_paused) a.state = AudioState::kPaused;
+  }
+  if (impl_->audio_source) a.muted_local = impl_->audio_source->muting_local();
+#endif
+  return a;
 }
 
 }  // namespace rdacore

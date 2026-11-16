@@ -30,6 +30,16 @@ struct ViewerStats {
   uint64_t bytes_received = 0;
   uint64_t decode_us_total = 0;
   uint64_t keyframe_requests = 0;  // sent to the host after decode errors
+  // Sound (1.13). audio_bytes is also in bytes_received.
+  uint64_t audio_packets = 0;
+  uint64_t audio_bytes = 0;
+  uint64_t audio_lost = 0;  // frames filled in by loss concealment
+  uint64_t audio_late = 0;
+  uint64_t audio_underruns = 0;
+  int32_t audio_buffer_ms = 0;
+  int32_t audio_target_ms = 0;
+  int32_t audio_drift_ppm = 0;
+  int32_t av_offset_ms = 0;  // sound delay less picture delay; > 0: the sound is later
 };
 
 struct ViewerHandlers {
@@ -67,6 +77,9 @@ struct ViewerOptions {
   std::vector<uint8_t> auth_token;
   // 32 bytes, the host's key. Empty = plaintext.
   std::vector<uint8_t> encryption_key;
+  // Take the host's sound (1.13): only where the transport carries
+  // datagrams; read it with ReadAudio().
+  bool audio = false;
 };
 
 class Viewer {
@@ -106,6 +119,14 @@ class Viewer {
 
   // Decodes a recording (see recording.h) synchronously on this thread.
   void FeedRecording(std::span<const uint8_t> bytes);
+
+  // The host's sound (ViewerOptions::audio): fills `out` with exactly
+  // `frames` frames, 48 kHz stereo interleaved float, silence where there is
+  // none; returns how many were sound. For an audio render thread: never
+  // blocks, allocates or logs. play_time_us: when the first frame reaches the
+  // speaker (capture::MonotonicMicros' clock, as rda_now_us), 0 = now. One
+  // caller.
+  size_t ReadAudio(float* out, size_t frames, uint64_t play_time_us = 0);
 
   std::string decoder_name() const;
   ViewerStats stats() const;

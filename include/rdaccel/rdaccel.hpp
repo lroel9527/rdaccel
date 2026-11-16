@@ -662,6 +662,37 @@ struct HostStats {
   uint64_t packets_spurious = 0;  // of packets_lost, acknowledged after all
   uint64_t fec_parity_sent = 0;   // forward error correction packets sent
   uint64_t fec_recovered = 0;     // lost packets the viewer rebuilt from them
+  // Sound (1.13); audio_bytes is also in bytes_sent.
+  uint64_t audio_packets = 0;
+  uint64_t audio_bytes = 0;
+  uint64_t audio_frames = 0;
+  uint64_t audio_frames_gated = 0;  // not sent: silence
+  uint64_t audio_red_bytes = 0;
+  uint64_t audio_dropped_stale = 0;
+};
+
+// Sound (1.13; rda_host_start_audio).
+struct AudioConfig {
+  enum class Source : int32_t {
+    kApp = RDA_AUDIO_SOURCE_APP,        // Host::SubmitAudio
+    kSystem = RDA_AUDIO_SOURCE_SYSTEM,  // macOS 14.2: everything this computer plays
+    kTest = RDA_AUDIO_SOURCE_TEST,      // a computed test signal; touches no device
+  };
+  Source source = Source::kSystem;
+  int32_t profile = RDA_AUDIO_PROFILE_FULL;
+  bool mute_local = false;  // this computer stays silent while its sound is captured
+  std::vector<std::string> exclude_bundle_ids;
+};
+
+struct AudioStatus {
+  int32_t state = RDA_AUDIO_STATE_OFF;  // RDA_AUDIO_STATE_*
+  int32_t profile = 0;
+  bool silent = true;
+  int32_t bitrate_bps = 0;
+  int32_t frame_ms = 0;
+  int32_t channels = 0;
+  bool muted_local = false;
+  std::string message;
 };
 
 class Host {
@@ -850,6 +881,38 @@ class Host {
     if (h_) rda_host_request_keyframe(h_);
   }
 
+  // Sound (rda_host_start_audio and the rest).
+  bool StartAudio(const AudioConfig& config, std::string* error = nullptr) {
+    std::vector<const char*> ids;
+    for (const auto& id : config.exclude_bundle_ids) ids.push_back(id.c_str());
+    rda_audio_config c;
+    rda_audio_config_default(&c);
+    c.source = static_cast<int32_t>(config.source);
+    c.profile = config.profile;
+    c.mute_local = config.mute_local ? 1 : 0;
+    c.exclude_bundle_ids = ids.empty() ? nullptr : ids.data();
+    c.exclude_bundle_id_count = ids.size();
+    return (h_ && rda_host_start_audio(h_, &c) == RDA_OK) || detail::SetError(error);
+  }
+  void StopAudio() {
+    if (h_) rda_host_stop_audio(h_);
+  }
+  bool SubmitAudio(const float* interleaved, size_t frames, uint64_t capture_time_us) {
+    return h_ && rda_host_submit_audio(h_, interleaved, frames, capture_time_us) == RDA_OK;
+  }
+  void SetAudioProfile(int32_t profile) {
+    if (h_) rda_host_set_audio_profile(h_, profile);
+  }
+  void SetAudioPaused(bool paused) {
+    if (h_) rda_host_set_audio_paused(h_, paused ? 1 : 0);
+  }
+  AudioStatus audio_status() const {
+    rda_audio_status s{};
+    s.struct_size = sizeof(s);
+    if (!h_ || rda_host_get_audio_status(h_, &s) != RDA_OK) return {};
+    return {s.state, s.profile, s.silent != 0, s.bitrate_bps, s.frame_ms, s.channels, s.muted_local != 0, s.message};
+  }
+
   std::string encoder_name() const {
     if (!h_) return {};
     char buf[64];
@@ -899,6 +962,12 @@ class Host {
     o.packets_spurious = s.packets_spurious;
     o.fec_parity_sent = s.fec_parity_sent;
     o.fec_recovered = s.fec_recovered;
+    o.audio_packets = s.audio_packets;
+    o.audio_bytes = s.audio_bytes;
+    o.audio_frames = s.audio_frames;
+    o.audio_frames_gated = s.audio_frames_gated;
+    o.audio_red_bytes = s.audio_red_bytes;
+    o.audio_dropped_stale = s.audio_dropped_stale;
     return o;
   }
 
@@ -938,6 +1007,16 @@ struct ViewerStats {
   uint64_t bytes_received = 0;
   uint64_t decode_us_total = 0;
   uint64_t keyframe_requests = 0;
+  // Sound (1.13); audio_bytes is also in bytes_received.
+  uint64_t audio_packets = 0;
+  uint64_t audio_bytes = 0;
+  uint64_t audio_lost = 0;
+  uint64_t audio_late = 0;
+  uint64_t audio_underruns = 0;
+  int32_t audio_buffer_ms = 0;
+  int32_t audio_target_ms = 0;
+  int32_t audio_drift_ppm = 0;
+  int32_t av_offset_ms = 0;
 };
 
 // Handlers run on the transport thread, one at a time (on_state may also
@@ -956,6 +1035,7 @@ struct ViewerOptions {
   std::vector<uint8_t> auth_token;   // for the host's auth hook, at most 4096 bytes
   std::vector<uint8_t> encryption_key;  // 32 bytes, the host's; empty = none
   bool allow_plaintext = false;         // needed for TCP / UDP without a key
+  bool audio = false;  // take the host's sound (1.13): ReadAudio()
 };
 
 class Viewer {
@@ -982,6 +1062,7 @@ class Viewer {
     }
     c.encryption_key = options.encryption_key.empty() ? nullptr : options.encryption_key.data();
     c.allow_plaintext = options.allow_plaintext;
+    c.audio = options.audio ? 1 : 0;
     if (v->state_->h.on_state) {
       c.on_state = [](void* u, rda_state st, rda_status reason) {
         static_cast<State*>(u)->h.on_state(static_cast<ConnectionState>(st), reason);
@@ -1082,7 +1163,15 @@ class Viewer {
     rda_viewer_stats s{};
     s.struct_size = sizeof(s);
     if (rda_viewer_get_stats(v_, &s) != RDA_OK) return {};
-    return {s.frames_decoded, s.decode_errors, s.bytes_received, s.decode_us_total, s.keyframe_requests};
+    return {s.frames_decoded,  s.decode_errors,   s.bytes_received,  s.decode_us_total, s.keyframe_requests,
+            s.audio_packets,   s.audio_bytes,     s.audio_lost,      s.audio_late,      s.audio_underruns,
+            s.audio_buffer_ms, s.audio_target_ms, s.audio_drift_ppm, s.av_offset_ms};
+  }
+
+  // The host's sound (rda_viewer_read_audio): exactly `frames` stereo
+  // frames into `out`; returns how many were sound.
+  size_t ReadAudio(float* out, size_t frames, uint64_t play_time_us = 0) {
+    return rda_viewer_read_audio(v_, out, frames, play_time_us);
   }
 
   rda_viewer* handle() const { return v_; }

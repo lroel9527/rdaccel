@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
@@ -177,6 +178,20 @@ static_assert(RDA_CHANNEL_COUNT + 1 == rdacore::kChannelCount);
 static_assert(RDA_MSG_CLIPBOARD_TEXT == rdacore::kClipboardTextMessage &&
               RDA_MSG_USER_FIRST == rdacore::kFirstUserMessage);
 static_assert(RDA_KEYCODE_NONE == rdacore::kNoKeyCode);
+// rda_viewer_config.audio comes after the 4 bytes that were 1.12's tail
+// padding (reserved0), so an older caller's struct_size ends before it.
+static_assert(offsetof(rda_viewer_config, reserved0) == offsetof(rda_viewer_config, allow_plaintext) + sizeof(int32_t));
+static_assert(offsetof(rda_viewer_config, audio) == offsetof(rda_viewer_config, reserved0) + sizeof(int32_t));
+static_assert(RDA_AUDIO_STATE_OFF == static_cast<int>(rdacore::AudioState::kOff) &&
+              RDA_AUDIO_STATE_WAITING_PEER == static_cast<int>(rdacore::AudioState::kWaitingPeer) &&
+              RDA_AUDIO_STATE_STARTING == static_cast<int>(rdacore::AudioState::kStarting) &&
+              RDA_AUDIO_STATE_RUNNING == static_cast<int>(rdacore::AudioState::kRunning) &&
+              RDA_AUDIO_STATE_PAUSED == static_cast<int>(rdacore::AudioState::kPaused) &&
+              RDA_AUDIO_STATE_NO_PERMISSION == static_cast<int>(rdacore::AudioState::kNoPermission) &&
+              RDA_AUDIO_STATE_FAILED == static_cast<int>(rdacore::AudioState::kFailed));
+static_assert(RDA_AUDIO_SOURCE_APP == static_cast<int>(rdacore::AudioConfig::Source::kApp) &&
+              RDA_AUDIO_SOURCE_SYSTEM == static_cast<int>(rdacore::AudioConfig::Source::kSystem) &&
+              RDA_AUDIO_SOURCE_TEST == static_cast<int>(rdacore::AudioConfig::Source::kTest));
 
 rda_state ToC(rdacore::ConnectionState s) { return static_cast<rda_state>(s); }
 
@@ -1007,6 +1022,99 @@ rda_status rda_host_get_stats(const rda_host* h, rda_host_stats* out) {
   c.packets_spurious = s.packets_spurious;
   c.fec_parity_sent = s.fec_parity_sent;
   c.fec_recovered = s.fec_recovered;
+  c.audio_packets = s.audio_packets;
+  c.audio_bytes = s.audio_bytes;
+  c.audio_frames = s.audio_frames;
+  c.audio_frames_gated = s.audio_frames_gated;
+  c.audio_red_bytes = s.audio_red_bytes;
+  c.audio_dropped_stale = s.audio_dropped_stale;
+  if (!WriteStruct(c, out)) return Fail(RDA_ERR_INVALID_ARG, "out needs struct_size");
+  return RDA_OK;
+  RDA_GUARD_END
+}
+
+// ---- sound ------------------------------------------------------------------
+
+void rda_audio_config_default(rda_audio_config* c) {
+  if (!c) return;
+  *c = rda_audio_config{};
+  c->struct_size = sizeof(*c);
+  c->source = RDA_AUDIO_SOURCE_SYSTEM;
+  c->profile = RDA_AUDIO_PROFILE_FULL;
+  c->mute_local = 0;
+}
+
+rda_status rda_host_start_audio(rda_host* h, const rda_audio_config* config) {
+  RDA_GUARD_BEGIN
+  if (!h) return Fail(RDA_ERR_INVALID_ARG, "host is required");
+  rda_audio_config c;
+  rda_audio_config_default(&c);
+  if (config && !ReadStruct(config, c)) return Fail(RDA_ERR_INVALID_ARG, "config needs struct_size");
+  if (c.source < RDA_AUDIO_SOURCE_APP || c.source > RDA_AUDIO_SOURCE_TEST) {
+    return Fail(RDA_ERR_INVALID_ARG, "source must be RDA_AUDIO_SOURCE_APP, _SYSTEM or _TEST");
+  }
+  if (c.profile != RDA_AUDIO_PROFILE_FULL && c.profile != RDA_AUDIO_PROFILE_SAVER) {
+    return Fail(RDA_ERR_INVALID_ARG, "profile must be RDA_AUDIO_PROFILE_FULL or _SAVER");
+  }
+  if (!c.exclude_bundle_ids && c.exclude_bundle_id_count) {
+    return Fail(RDA_ERR_INVALID_ARG, "exclude_bundle_ids is null but its count is not 0");
+  }
+  rdacore::AudioConfig ac;
+  ac.source = static_cast<rdacore::AudioConfig::Source>(c.source);
+  ac.profile = c.profile;
+  ac.mute_local = c.mute_local != 0;
+  for (size_t i = 0; i < c.exclude_bundle_id_count; ++i) {
+    if (c.exclude_bundle_ids[i]) ac.exclude_bundle_ids.emplace_back(c.exclude_bundle_ids[i]);
+  }
+  std::string err;
+  if (!h->host->StartAudio(ac, &err)) return Fail(RDA_ERR_UNSUPPORTED, err);
+  return RDA_OK;
+  RDA_GUARD_END
+}
+
+void rda_host_stop_audio(rda_host* h) {
+  RDA_GUARD_BEGIN
+  if (h) h->host->StopAudio();
+  RDA_GUARD_END_VOID
+}
+
+rda_status rda_host_submit_audio(rda_host* h, const float* interleaved, size_t frames, uint64_t capture_time_us) {
+  RDA_GUARD_BEGIN
+  if (!h || (!interleaved && frames)) return Fail(RDA_ERR_INVALID_ARG, "host and samples are required");
+  if (frames == 0) return RDA_OK;
+  if (!h->host->SubmitAudio(interleaved, frames, capture_time_us)) {
+    return Fail(RDA_ERR_BUSY, "no viewer takes sound now (or the source is not RDA_AUDIO_SOURCE_APP)");
+  }
+  return RDA_OK;
+  RDA_GUARD_END
+}
+
+void rda_host_set_audio_profile(rda_host* h, int profile) {
+  RDA_GUARD_BEGIN
+  if (h) h->host->SetAudioProfile(profile == RDA_AUDIO_PROFILE_SAVER ? 1 : 0);
+  RDA_GUARD_END_VOID
+}
+
+void rda_host_set_audio_paused(rda_host* h, int paused) {
+  RDA_GUARD_BEGIN
+  if (h) h->host->SetAudioPaused(paused != 0);
+  RDA_GUARD_END_VOID
+}
+
+rda_status rda_host_get_audio_status(const rda_host* h, rda_audio_status* out) {
+  RDA_GUARD_BEGIN
+  if (!h || !out) return Fail(RDA_ERR_INVALID_ARG, "host and out are required");
+  const rdacore::AudioStatus a = h->host->audio_status();
+  rda_audio_status c{};
+  c.struct_size = sizeof(c);
+  c.state = static_cast<int32_t>(a.state);
+  c.profile = a.profile;
+  c.silent = a.silent ? 1 : 0;
+  c.bitrate_bps = a.bitrate_bps;
+  c.frame_ms = a.frame_ms;
+  c.channels = a.channels;
+  c.muted_local = a.muted_local ? 1 : 0;
+  CopyName(a.message, c.message, sizeof(c.message));
   if (!WriteStruct(c, out)) return Fail(RDA_ERR_INVALID_ARG, "out needs struct_size");
   return RDA_OK;
   RDA_GUARD_END
@@ -1058,6 +1166,7 @@ rda_status rda_viewer_create(rda_transport* transport, const rda_viewer_config* 
   }
   rdacore::ViewerOptions opts;
   opts.peer_timeout_ms = c.peer_timeout_ms;
+  opts.audio = c.audio != 0;  // 0 for a caller whose struct ends before it
   if (auto err = TakeKey(c.encryption_key, c.allow_plaintext, owned.get(), opts.encryption_key); !err.empty()) {
     return Fail(RDA_ERR_INVALID_ARG, err);
   }
@@ -1205,9 +1314,28 @@ rda_status rda_viewer_get_stats(const rda_viewer* v, rda_viewer_stats* out) {
   c.bytes_received = s.bytes_received;
   c.decode_us_total = s.decode_us_total;
   c.keyframe_requests = s.keyframe_requests;
+  c.audio_packets = s.audio_packets;
+  c.audio_bytes = s.audio_bytes;
+  c.audio_lost = s.audio_lost;
+  c.audio_late = s.audio_late;
+  c.audio_underruns = s.audio_underruns;
+  c.audio_buffer_ms = s.audio_buffer_ms;
+  c.audio_target_ms = s.audio_target_ms;
+  c.audio_drift_ppm = s.audio_drift_ppm;
+  c.av_offset_ms = s.av_offset_ms;
   if (!WriteStruct(c, out)) return Fail(RDA_ERR_INVALID_ARG, "out needs struct_size");
   return RDA_OK;
   RDA_GUARD_END
+}
+
+size_t rda_viewer_read_audio(rda_viewer* v, float* out, size_t frames, uint64_t play_time_us) {
+  if (!out) return 0;
+  if (!v) {
+    std::memset(out, 0, frames * 2 * sizeof(float));
+    return 0;
+  }
+  // No exceptions here: Read neither allocates nor throws.
+  return v->viewer->ReadAudio(out, frames, play_time_us);
 }
 
 size_t rda_viewer_decoder_name(const rda_viewer* v, char* buf, size_t buf_size) {

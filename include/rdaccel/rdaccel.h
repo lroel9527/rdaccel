@@ -578,6 +578,15 @@ typedef struct rda_host_stats {
    * for a resend. */
   uint64_t fec_parity_sent;
   uint64_t fec_recovered;
+  /* 1.13: sound (rda_host_start_audio), cumulative. audio_bytes are the
+   * whole packets the host handed the transport and are also in bytes_sent
+   * (as the picture's bytes are: no UDP/IP or encryption headers). */
+  uint64_t audio_packets;
+  uint64_t audio_bytes;
+  uint64_t audio_frames;        /* encoded */
+  uint64_t audio_frames_gated;  /* not sent: the computer was silent */
+  uint64_t audio_red_bytes;     /* of audio_bytes: copies of the previous frame (on loss) */
+  uint64_t audio_dropped_stale; /* waited too long in the transport (no peer yet) */
 } rda_host_stats;
 
 RDA_API void rda_host_config_default(rda_host_config* c);
@@ -685,6 +694,15 @@ typedef struct rda_viewer_config {
   /* Encryption, as for the host: the same 32-byte key, or NULL. */
   const uint8_t* encryption_key;
   int32_t allow_plaintext; /* 0 */
+
+  /* Never read. Up to 1.12 these 4 bytes were the struct's unnamed tail
+   * padding, included in an older caller's struct_size (as
+   * rda_host_config.reserved0). */
+  int32_t reserved0;
+  /* 1.13. 1: take the host's sound, over a transport that carries datagrams
+   * (UDP, simulated networks, pipes; not TCP or a custom transport). Read it
+   * with rda_viewer_read_audio(). */
+  int32_t audio; /* 0 */
 } rda_viewer_config;
 
 typedef struct rda_viewer_stats {
@@ -694,6 +712,16 @@ typedef struct rda_viewer_stats {
   uint64_t bytes_received;
   uint64_t decode_us_total;
   uint64_t keyframe_requests;
+  /* 1.13: sound. audio_bytes is also in bytes_received. */
+  uint64_t audio_packets;
+  uint64_t audio_bytes;
+  uint64_t audio_lost;      /* frames filled in by loss concealment */
+  uint64_t audio_late;      /* frames that came after their time, or twice */
+  uint64_t audio_underruns; /* ran dry in the middle of a sound */
+  int32_t audio_buffer_ms;  /* waiting to be played now */
+  int32_t audio_target_ms;  /* what the jitter buffer aims for */
+  int32_t audio_drift_ppm;  /* playing faster (> 0) or slower to follow the host's clock */
+  int32_t av_offset_ms;     /* how much later the sound plays than the picture (< 0: earlier) */
 } rda_viewer_stats;
 
 RDA_API void rda_viewer_config_default(rda_viewer_config* c);
@@ -724,6 +752,80 @@ RDA_API void rda_viewer_request_keyframe(rda_viewer* v);
 RDA_API rda_status rda_viewer_feed_recording(rda_viewer* v, const uint8_t* bytes, size_t n);
 RDA_API rda_status rda_viewer_get_stats(const rda_viewer* v, rda_viewer_stats* out);
 RDA_API size_t rda_viewer_decoder_name(const rda_viewer* v, char* buf, size_t buf_size);
+
+/* ---- sound (1.13) -------------------------------------------------------- */
+
+/* The host's sound to its viewer: 48 kHz stereo, Opus (CELT, low delay),
+ * in datagrams of the transport (not resent, ahead of the picture, within
+ * the congestion control, encrypted like the rest). Nothing is sent while
+ * the computer is silent, nor to a viewer that did not ask for sound or
+ * whose transport carries no datagrams (TCP, custom transports). See
+ * docs/integration.md. */
+#define RDA_AUDIO_SAMPLE_RATE 48000
+#define RDA_AUDIO_CHANNELS 2
+#define RDA_AUDIO_PROFILE_FULL 0  /* 10 ms frames, 160 kbps stereo */
+#define RDA_AUDIO_PROFILE_SAVER 1 /* 20 ms frames, 96 kbps stereo */
+#define RDA_AUDIO_SOURCE_APP 0    /* rda_host_submit_audio() */
+#define RDA_AUDIO_SOURCE_SYSTEM 1 /* macOS 14.2: everything this computer plays */
+#define RDA_AUDIO_SOURCE_TEST 2   /* a computed test signal; touches no device */
+#define RDA_AUDIO_STATE_OFF 0
+#define RDA_AUDIO_STATE_WAITING_PEER 1 /* no viewer, or one that takes no sound */
+#define RDA_AUDIO_STATE_STARTING 2
+#define RDA_AUDIO_STATE_RUNNING 3
+#define RDA_AUDIO_STATE_PAUSED 4
+#define RDA_AUDIO_STATE_NO_PERMISSION 5 /* macOS: System Audio Recording */
+#define RDA_AUDIO_STATE_FAILED 6        /* retried every 2 s; see message */
+
+typedef struct rda_audio_config {
+  uint32_t struct_size;
+  int32_t source;     /* RDA_AUDIO_SOURCE_SYSTEM */
+  int32_t profile;    /* RDA_AUDIO_PROFILE_FULL */
+  int32_t mute_local; /* 0; 1: this computer stays silent while its sound is captured
+                         (only once the capture is known to have the permission) */
+  const char* const* exclude_bundle_ids; /* NULL; applications not to capture (copied) */
+  size_t exclude_bundle_id_count;
+} rda_audio_config;
+
+typedef struct rda_audio_status {
+  uint32_t struct_size;
+  int32_t state;       /* RDA_AUDIO_STATE_* */
+  int32_t profile;
+  int32_t silent;      /* running, and nothing is being sent: the computer is silent */
+  int32_t bitrate_bps; /* the encoder's target now */
+  int32_t frame_ms;    /* 10 or 20 */
+  int32_t channels;    /* coded: 1 or 2 */
+  int32_t muted_local; /* the capture mutes this computer right now */
+  char message[160];   /* why, for FAILED and NO_PERMISSION */
+} rda_audio_status;
+
+RDA_API void rda_audio_config_default(rda_audio_config* c);
+/* Sound for the host's viewer. Capture starts when a viewer that takes sound
+ * is connected and stops when it leaves (with keep_serving, again for the
+ * next one). RDA_ERR_UNSUPPORTED where the source does not exist (SYSTEM on
+ * Linux) or the library was built without sound. Calling it again replaces
+ * the configuration. */
+RDA_API rda_status rda_host_start_audio(rda_host* h, const rda_audio_config* config);
+RDA_API void rda_host_stop_audio(rda_host* h);
+/* RDA_AUDIO_SOURCE_APP: 48 kHz, stereo, interleaved float, any number of
+ * frames per call; capture_time_us on rda_now_us's clock. Calls must not
+ * overlap. RDA_ERR_BUSY while no viewer takes sound (the frames are
+ * dropped). */
+RDA_API rda_status rda_host_submit_audio(rda_host* h, const float* interleaved, size_t frames,
+                                         uint64_t capture_time_us);
+/* RDA_AUDIO_PROFILE_*, from the next frame. Thread-safe. */
+RDA_API void rda_host_set_audio_profile(rda_host* h, int profile);
+/* 1: send nothing (the viewer cannot hear it); capture goes on. Thread-safe. */
+RDA_API void rda_host_set_audio_paused(rda_host* h, int paused);
+/* Set out->struct_size first. */
+RDA_API rda_status rda_host_get_audio_status(const rda_host* h, rda_audio_status* out);
+
+/* Viewer: fills `out` with exactly `frames` frames (48 kHz, stereo,
+ * interleaved float), silence where there is none; returns how many were
+ * sound. For an audio render thread: never blocks, allocates or logs.
+ * play_time_us: when the first frame reaches the speaker (rda_now_us
+ * clock), 0 = now. One caller at a time. A viewer without
+ * rda_viewer_config.audio gets silence. */
+RDA_API size_t rda_viewer_read_audio(rda_viewer* v, float* out, size_t frames, uint64_t play_time_us);
 
 /* ---- recordings ---------------------------------------------------------- */
 
