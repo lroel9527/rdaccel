@@ -113,6 +113,16 @@ using rdacore::capture::StoppedFn;
 @end
 
 namespace rdacore::platform {
+namespace {
+
+// How long to wait for ScreenCaptureKit's answers.
+constexpr int64_t kSystemAnswerLimit = 5 * NSEC_PER_SEC;
+// A display missing from the shareable content: asked again this many
+// times, this far apart (2 s in all).
+constexpr int kDisplayListTries = 10;
+constexpr useconds_t kDisplayListPauseUs = 200 * 1000;
+
+}  // namespace
 
 struct SckCapturer::Impl {
   SCStream* stream = nil;
@@ -130,34 +140,46 @@ bool SckCapturer::Start(const capture::CaptureConfig& cfg, capture::FrameFn on_f
     return false;
   }
 
-  // Shareable content is delivered asynchronously; wait for it.
-  __block SCShareableContent* content = nil;
-  __block NSError* content_error = nil;
+  // Shareable content is delivered asynchronously; wait for it, but not
+  // forever: a system that never answers (seen on macOS 12 while the
+  // displays are being rearranged) must not hang the caller. A display
+  // that was just added or rearranged may be missing from it for a moment
+  // (macOS 12 is slow to update it): ask again for a little while.
   dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-  [SCShareableContent getShareableContentWithCompletionHandler:^(SCShareableContent* c, NSError* e) {
-    content = c;
-    content_error = e;
-    dispatch_semaphore_signal(sem);
-  }];
-  dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
-  if (!content || content.displays.count == 0) {
-    error_ = "no display available";
-    if (content_error) {
-      error_ += std::string(": ") + content_error.localizedDescription.UTF8String +
-                " (grant Screen Recording permission to this app/terminal)";
-    }
-    return false;
-  }
-
-  CGDirectDisplayID want = 0;
-  if (!MacDisplayId(cfg.display_index, want, &error_)) return false;
+  SCShareableContent* content = nil;
   SCDisplay* display = nil;
-  for (SCDisplay* d in content.displays) {
-    if (d.displayID == want) display = d;
-  }
-  if (!display) {
-    error_ = "display " + std::to_string(cfg.display_index) + " is not available for capture";
-    return false;
+  CGDirectDisplayID want = 0;
+  for (int attempt = 0;; ++attempt) {
+    __block SCShareableContent* got = nil;
+    __block NSError* content_error = nil;
+    [SCShareableContent getShareableContentWithCompletionHandler:^(SCShareableContent* c, NSError* e) {
+      got = c;
+      content_error = e;
+      dispatch_semaphore_signal(sem);
+    }];
+    if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, kSystemAnswerLimit)) != 0) {
+      error_ = "the system did not list the displays for capture in time";
+      return false;
+    }
+    content = got;
+    if (!content || content.displays.count == 0) {
+      error_ = "no display available";
+      if (content_error) {
+        error_ += std::string(": ") + content_error.localizedDescription.UTF8String +
+                  " (grant Screen Recording permission to this app/terminal)";
+      }
+      return false;
+    }
+    if (!MacDisplayId(cfg.display_index, want, &error_)) return false;
+    for (SCDisplay* d in content.displays) {
+      if (d.displayID == want) display = d;
+    }
+    if (display) break;
+    if (attempt >= kDisplayListTries) {
+      error_ = "display " + std::to_string(cfg.display_index) + " is not available for capture";
+      return false;
+    }
+    usleep(kDisplayListPauseUs);
   }
   NSMutableArray<SCRunningApplication*>* excluded = [NSMutableArray array];
   if (exclude_self_ && !cfg.include_own_windows) {
@@ -204,7 +226,14 @@ bool SckCapturer::Start(const capture::CaptureConfig& cfg, capture::FrameFn on_f
     start_error = e;
     dispatch_semaphore_signal(sem);
   }];
-  dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+  if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, kSystemAnswerLimit)) != 0) {
+    error_ = "startCapture: the system did not start the capture in time";
+    [impl_->output ignoreStops];
+    [impl_->stream stopCaptureWithCompletionHandler:^(NSError*){
+    }];
+    impl_->stream = nil;
+    return false;
+  }
   if (start_error) {
     error_ = std::string("startCapture: ") + start_error.localizedDescription.UTF8String +
              " (grant Screen Recording permission to this app/terminal)";
