@@ -2,7 +2,7 @@
 //
 //   rdaccel::Host       capture or receive screen frames, encode, send
 //   rdaccel::Viewer     receive, decode, hand pictures to the application
-//   rdaccel::Transport  in-process pipe, TCP, UDP, or your own subclass
+//   rdaccel::Transport  in-process pipe, UDP, or your own subclass
 //
 // Everything here is inline and calls only rda_* functions, so the binary
 // interface between your program and the library is the C one: you can build
@@ -188,8 +188,6 @@ inline constexpr uint32_t kModCaps = RDA_MOD_CAPS;
 inline constexpr uint32_t kNoKeyCode = RDA_KEYCODE_NONE;
 inline uint32_t KeyCodeFromMac(uint32_t mac_keycode) { return rda_keycode_from_mac(mac_keycode); }
 inline uint32_t KeyCodeToMac(uint32_t hid_usage) { return rda_keycode_to_mac(hid_usage); }
-inline uint32_t KeyCodeFromEvdev(uint32_t evdev_code) { return rda_keycode_from_evdev(evdev_code); }
-inline uint32_t KeyCodeToEvdev(uint32_t hid_usage) { return rda_keycode_to_evdev(hid_usage); }
 
 // ---- connection -------------------------------------------------------------
 
@@ -274,7 +272,7 @@ struct InjectorConfig {
   int32_t source_height = 0;
 };
 
-// Plays InputEvents into the host OS (XTest on Linux; CGEvent on macOS, with
+// Plays InputEvents into the host OS (CGEvent, with
 // the Accessibility permission). Typically called from Host's input handler.
 class Injector {
  public:
@@ -475,17 +473,6 @@ inline detail::TransportPair CreateLocalPipe() {
   return {std::make_unique<detail::NativeTransport>(a), std::make_unique<detail::NativeTransport>(b)};
 }
 
-// TCP, fixed bitrate. Returns at once; the first viewer to connect becomes
-// the peer (see Host::SetStateHandler).
-inline std::unique_ptr<Transport> BindTcp(uint16_t port, std::string* error = nullptr) {
-  rda_transport* t = nullptr;
-  return detail::Native(rda_tcp_bind(port, &t), &t, error);
-}
-inline std::unique_ptr<Transport> ConnectTcp(const std::string& host, uint16_t port, std::string* error = nullptr) {
-  rda_transport* t = nullptr;
-  return detail::Native(rda_tcp_connect(host.c_str(), port, &t), &t, error);
-}
-
 // UDP with loss recovery and congestion control (adaptive bitrate).
 inline std::unique_ptr<Transport> ConnectUdp(const std::string& host, uint16_t port, std::string* error = nullptr) {
   rda_transport* t = nullptr;
@@ -606,20 +593,11 @@ struct HostConfig {
   bool capture_own_windows = false;
   // Text mode (rda_host_config.text_mode): sharp text on very slow links.
   bool text_mode = false;
-  // Which video codec to send (rda_host_config.video_codec): HEVC unless
-  // this machine's HEVC encoder is missing or too slow and the viewer
-  // decodes H.264 (kAuto), or always one of them.
-  enum class VideoCodec : int32_t {
-    kAuto = RDA_VIDEO_CODEC_AUTO,
-    kHevc = RDA_VIDEO_CODEC_HEVC,
-    kH264 = RDA_VIDEO_CODEC_H264,
-  };
-  VideoCodec video_codec = VideoCodec::kAuto;
   // Whether a viewer may connect, from its auth token (transport thread).
   // Empty = everyone may.
   std::function<bool(std::span<const uint8_t> token)> auth;
   // 32 bytes shared with the viewer (see rda_host_config). Empty = none,
-  // which TCP / UDP refuse unless allow_plaintext.
+  // which UDP refuses unless allow_plaintext.
   std::vector<uint8_t> encryption_key;
   bool allow_plaintext = false;
 };
@@ -737,7 +715,6 @@ class Host {
     c.keep_serving = config.keep_serving ? 1 : 0;
     c.capture_own_windows = config.capture_own_windows ? 1 : 0;
     c.text_mode = config.text_mode ? 1 : 0;
-    c.video_codec = static_cast<int32_t>(config.video_codec);
     if (!config.encryption_key.empty() && config.encryption_key.size() != 32) {
       create_error_ = "encryption_key must be 32 bytes";
       return;
@@ -1034,7 +1011,7 @@ struct ViewerOptions {
   int32_t peer_timeout_ms = 10'000;  // 0 = never time out
   std::vector<uint8_t> auth_token;   // for the host's auth hook, at most 4096 bytes
   std::vector<uint8_t> encryption_key;  // 32 bytes, the host's; empty = none
-  bool allow_plaintext = false;         // needed for TCP / UDP without a key
+  bool allow_plaintext = false;         // needed for UDP without a key
   bool audio = false;  // take the host's sound (1.13): ReadAudio() or an AudioPlayer
 };
 

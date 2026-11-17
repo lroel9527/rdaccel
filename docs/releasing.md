@@ -1,5 +1,7 @@
 # 发版
 
+> **2.0.0 起**：rdaccel 只支持 macOS、只走 UDP（没有 TCP 传输）、只用 HEVC（没有 H.264）。下文里提到 Linux、TCP、H.264 的地方是 1.x 的情况，留作记录，没有逐段改写。
+
 版本号只有一个来源：`CMakeLists.txt` 的 `project(rdaccel VERSION x.y.z)` 和 `include/rdaccel/rdaccel.h`
 的 `RDA_VERSION_*` 必须一致，不一致时 CMake 配置直接报错。
 

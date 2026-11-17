@@ -1,9 +1,7 @@
 #include "transport/secure_transport.h"
 
 #include <unistd.h>
-#if defined(__APPLE__)
 #include <sys/random.h>
-#endif
 
 #include <algorithm>
 #include <cstring>

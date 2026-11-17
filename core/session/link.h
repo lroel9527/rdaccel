@@ -38,7 +38,7 @@ struct LinkOptions {
   // Viewer: sent in ViewerHello for the host's auth hook.
   std::vector<uint8_t> auth_token;
   // Viewer: capability bits beyond proto::kCapsAll that depend on this
-  // machine (proto::kCapH264 where the platform decodes H.264).
+  // machine (proto::kCapAudio where the transport carries sound).
   uint64_t extra_caps = 0;
 };
 
@@ -79,7 +79,7 @@ class Link {
   // than 1.10).
   bool SendBulkMessage(uint32_t type, std::span<const uint8_t> payload, std::string* error);
   // Bytes of bulk messages accepted but not yet sent; -1 when not known
-  // (the transport has no queue of its own, as TCP, or the peer has no bulk
+  // (the transport has no queue of its own, or the peer has no bulk
   // channel and they went on the message channel).
   int64_t BulkQueuedBytes() const;
 

@@ -17,12 +17,6 @@ std::unique_ptr<codec::IHevcEncoder> CreateVideoEncoder(const codec::EncoderConf
   return CreateVtEncoder(cfg, error);
 }
 
-std::unique_ptr<codec::IHevcDecoder> CreateVideoDecoder(codec::VideoCodec codec, std::string* error) {
-  return CreateVtDecoder(codec, error);
-}
-
-// VideoToolbox decodes both on every supported macOS (in software where the
-// GPU cannot).
-bool CanDecode(codec::VideoCodec) { return true; }
+std::unique_ptr<codec::IHevcDecoder> CreateVideoDecoder(std::string* error) { return CreateVtDecoder(error); }
 
 }  // namespace rdacore::platform

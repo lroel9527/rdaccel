@@ -21,7 +21,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   auto dec = platform::CreateHevcDecoder(nullptr);
   if (!dec) return 0;
   session::ViewerSession v(nullptr, std::move(dec));
-  v.SetDecoderFactory([](codec::VideoCodec c) { return platform::CreateVideoDecoder(c, nullptr); });
+  v.SetDecoderFactory([] { return platform::CreateVideoDecoder(nullptr); });
   v.SetFrameHandler([](const tile::ImageView& img, const std::vector<Rect>&, uint64_t, uint64_t) {
     volatile uint8_t sink = img.data[0];
     (void)sink;

@@ -58,7 +58,7 @@ std::unique_ptr<Viewer> Viewer::Create(std::unique_ptr<Transport> transport,
   const bool audio = false;
 #endif
   impl->session = std::make_unique<session::ViewerSession>(nullptr, std::move(dec));
-  impl->session->SetDecoderFactory([](codec::VideoCodec c) { return platform::CreateVideoDecoder(c, nullptr); });
+  impl->session->SetDecoderFactory([] { return platform::CreateVideoDecoder(nullptr); });
   if (handlers.on_stream_info) {
     impl->session->SetHelloHandler([fn = std::move(handlers.on_stream_info)](const proto::Hello& h) {
       fn(static_cast<int32_t>(h.width), static_cast<int32_t>(h.height));
@@ -103,8 +103,6 @@ std::unique_ptr<Viewer> Viewer::Create(std::unique_ptr<Transport> transport,
     session::LinkOptions lo;
     lo.peer_timeout_ms = options.peer_timeout_ms;
     lo.auth_token = std::move(options.auth_token);
-    // H.264 is only sent to viewers that say they decode it.
-    if (platform::CanDecode(codec::VideoCodec::kH264)) lo.extra_caps |= proto::kCapH264;
     impl->link = std::make_unique<session::Link>(session::Link::Role::kViewer, impl->transport.get(),
                                                  std::move(lo), std::move(h));
     session::Link* link = impl->link.get();

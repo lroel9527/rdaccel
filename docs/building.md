@@ -1,5 +1,7 @@
 # 构建与测试
 
+> **2.0.0 起**：rdaccel 只支持 macOS、只走 UDP（没有 TCP 传输）、只用 HEVC（没有 H.264）。下文里提到 Linux、TCP、H.264 的地方是 1.x 的情况，留作记录，没有逐段改写。
+
 ## macOS
 
 需要 macOS 14.2+（Apple Silicon 或 Intel）、Xcode 命令行工具和 CMake（`brew install cmake`）。默认部署目标是 14.2（声音采集用的 Process Tap 从 14.2 起才有），在新系统上构建的产物也能在 14.2 上运行；用到更新系统才有的接口时必须加 `@available` 分支，否则编译报错（`-Werror=unguarded-availability-new`）。
@@ -23,41 +25,6 @@ open build/bin/rdaccel_loopback.app --args --fps=60 --bitrate=8000000
 第一次采集屏幕时 macOS 会要求“屏幕录制”权限：系统设置 → 隐私与安全性 → 屏幕与系统录音，给程序（或运行命令的终端）打开后重启程序。输入注入（`rdaccel_serve --inject`）还需要“辅助功能”权限。采集系统声音（`RDA_AUDIO_SOURCE_SYSTEM`，`rdaccel_serve --audio`）要同一页里的“仅系统音频录制”，它和屏幕录制是两项：应用的 Info.plist 必须有 `NSAudioCaptureUsageDescription`，否则系统直接拒绝、不弹询问；询问在第一次开始读声音时出现，建 tap 本身不问；没有权限时读到的全是零。
 
 **测试不出声**：CTest 给每个测试设 `RDACCEL_AUDIO_NULL_OUTPUT=1`，这时播放器不打开任何输出设备；测试信号都是算出来的，没有测试放声音或改音量。读系统声音的测试默认跳过，`RDACCEL_TEST_AUDIO_TAP=1` 才跑，它建的 tap 不让本机静音（`CATapUnmuted`），读到的样本只数个数、看时间戳，不保存。
-
-## Linux
-
-```bash
-sudo apt-get install cmake g++ libavcodec-dev libavutil-dev libswscale-dev \
-    libx11-dev libxext-dev libxfixes-dev libxrandr-dev libxtst-dev zlib1g-dev \
-    libpipewire-0.3-dev libglib2.0-dev
-cmake -S . -B build && cmake --build build -j
-ctest --test-dir build
-```
-
-`libpipewire-0.3-dev libglib2.0-dev` 用于 Wayland 抓屏，找到就自动编进去（`-DRDACCEL_PIPEWIRE=ON` 强制要求，`OFF` 关掉）。
-
-编码器按 NVENC、x265 的顺序自动选择；`encoder = "hevc_vaapi"` 可以用 Intel / AMD 显卡（实验性，设备用 `RDACCEL_VAAPI_DEVICE` 指定）。没有显示器时可以用 Xvfb：
-
-```bash
-Xvfb :99 -screen 0 1280x720x24 &
-DISPLAY=:99 ./build/bin/rdaccel_record --source=screen --out=x.rdstream
-```
-
-### Wayland
-
-Wayland 桌面（GNOME、KDE、sway、Hyprland 等）只能通过 xdg-desktop-portal 的 ScreenCast 接口抓屏，画面走 PipeWire。
-`XDG_SESSION_TYPE=wayland`（或者有 `WAYLAND_DISPLAY`、没有 `DISPLAY`）时自动走这条路；`RDACCEL_CAPTURE=x11` / `=pipewire` 可以强制指定。
-
-- 共享哪块屏由系统弹窗决定，`display_index` 只能是 0；`rda_list_displays()` 在 Wayland 下只返回一项，共享过一次之后才有尺寸。
-- 多数桌面第一次会弹窗让用户确认。同一进程里再次开始采集不再弹窗；设置 `RDACCEL_PORTAL_TOKEN_FILE=<文件>` 后，授权跨进程保留（portal 版本 4 起）。
-  `RDACCEL_PORTAL_TIMEOUT_S` 是等用户确认的秒数，默认 120。
-- 屏幕有变化才有新帧，带合成器给的脏区；静止画面由库自己补发关键帧，和 macOS 一样。
-- 光标：portal 支持“光标元数据”（GNOME、KDE）时走光标通道；不支持时（wlroots 系）直接画进画面。
-- 输入注入在 Wayland 下还不支持（XTest 只能注入到 XWayland 窗口）。
-
-无头测试环境：`tools/wayland_headless.sh 命令…` 起一个 sway（软件渲染）+ PipeWire + xdg-desktop-portal-wlr 的桌面再运行命令，
-需要 `sway pipewire wireplumber xdg-desktop-portal xdg-desktop-portal-wlr dbus-daemon`。Ubuntu 24.04 的 xdg-desktop-portal-wlr
-在没有显卡时不肯共享屏幕，`tools/build_test_xdpw.sh` 编一个去掉这条限制的版本，用 `RDA_WL_XDPW=<路径>` 指定。
 
 ## 示例和工具
 
@@ -101,10 +68,6 @@ KEY=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')    # 32 字节密钥，两边
 ./build/bin/rdaccel_record --out=mac.rdstream --frames=300 --size=1920x1080     # 合成画面，各机器结果一致
 ./build/bin/rdaccel_play mac.rdstream --check-synthetic
 ```
-
-## Mac 与 Linux 码流互解
-
-改了编解码相关代码后，确认 Linux 上 x265 录的码流 macOS 上 VideoToolbox 能解，反过来也一样：在一端用 `rdaccel_record` 生成 `.rdstream`，拷到另一端运行 `rdaccel_play FILE --check-synthetic`，结果为 `OK` 且 PSNR 高于 30 dB 即互通。
 
 ## 其他检查
 

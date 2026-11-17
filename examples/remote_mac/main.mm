@@ -4,7 +4,7 @@
 // scroll wheel and keyboard back. Uses only the public API
 // (rdaccel/rdaccel.hpp).
 //
-//   rdaccel_remote HOST [--udp=PORT | --tcp=PORT] (--key=<64 hex digits> | --plaintext)
+//   rdaccel_remote HOST [--udp=PORT] (--key=<64 hex digits> | --plaintext)
 //
 // Over the picture the pointer is this Mac's own, drawn by the system the
 // moment the mouse moves, in the remote cursor's shape: waiting for the
@@ -258,7 +258,7 @@ NSString* Summary(std::vector<double>& v) {
   rdaccel::examples::Args& args = *g_args;
   const std::string host = args.positional();
   if (host.empty()) {
-    std::fprintf(stderr, "usage: rdaccel_remote HOST [--udp=PORT | --tcp=PORT] (--key=<64 hex> | --plaintext)\n");
+    std::fprintf(stderr, "usage: rdaccel_remote HOST [--udp=PORT] (--key=<64 hex> | --plaintext)\n");
     [NSApp terminate:nil];
     return;
   }
@@ -273,8 +273,7 @@ NSString* Summary(std::vector<double>& v) {
     [NSApp terminate:nil];
     return;
   }
-  const bool tcp = args.has("tcp");
-  const auto port = static_cast<uint16_t>(args.num(tcp ? "tcp" : "udp", 7300));
+  const auto port = static_cast<uint16_t>(args.num("udp", 7300));
 
   _window = [[NSWindow alloc] initWithContentRect:NSMakeRect(80, 80, 1280, 800)
                                         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
@@ -314,7 +313,7 @@ NSString* Summary(std::vector<double>& v) {
                                    }];
 
   std::string err;
-  auto transport = tcp ? rdaccel::ConnectTcp(host, port, &err) : rdaccel::ConnectUdp(host, port, &err);
+  auto transport = rdaccel::ConnectUdp(host, port, &err);
   if (!transport) {
     [self fail:[NSString stringWithUTF8String:err.c_str()]];
     return;

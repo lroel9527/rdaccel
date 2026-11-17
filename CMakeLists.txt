@@ -5,13 +5,12 @@ cmake_minimum_required(VERSION 3.24)
 # later set(... CACHE ...) no longer changes it. -DCMAKE_OSX_DEPLOYMENT_TARGET
 # of 14.2 or later, or the MACOSX_DEPLOYMENT_TARGET environment variable,
 # still win; anything lower (a build directory configured when the default
-# was 12.3 or 14.0 keeps that in its cache) is raised to 14.2. Ignored on
-# other systems.
+# was 12.3 or 14.0 keeps that in its cache) is raised to 14.2.
 if(NOT DEFINED ENV{MACOSX_DEPLOYMENT_TARGET} AND
    (NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET OR CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS 14.2))
   set(CMAKE_OSX_DEPLOYMENT_TARGET "14.2" CACHE STRING "Minimum macOS version" FORCE)
 endif()
-project(rdaccel VERSION 1.13.0 LANGUAGES C CXX)
+project(rdaccel VERSION 2.0.0 LANGUAGES C CXX)
 # Pre-release label ("rc1"), empty for a release. The full version, as the
 # library, the packages and the tag (v1.0.0-rc1) show it, is
 # PROJECT_VERSION[-RDACCEL_PRERELEASE].
@@ -34,16 +33,11 @@ option(RDACCEL_INSTALL_TOOLS "Install the example command-line tools" OFF)
 # with CMAKE_C_FLAGS/CMAKE_CXX_FLAGS="-fsanitize=fuzzer-no-link,address,undefined";
 # see fuzz/README.md.
 option(RDACCEL_BUILD_FUZZERS "Build libFuzzer targets" OFF)
-# Linux: Wayland screen capture through xdg-desktop-portal + PipeWire (needs
-# libpipewire-0.3 and gio-2.0). AUTO = when both are found.
 # Sound (1.13): Opus, fetched at configure time (the first dependency of the
 # library itself that is downloaded; set FETCHCONTENT_SOURCE_DIR_OPUS to a
 # copy of the sources to build offline). OFF: the sound functions return
 # RDA_ERR_UNSUPPORTED.
 option(RDACCEL_AUDIO "Sound (Opus)" ON)
-set(RDACCEL_PIPEWIRE AUTO CACHE STRING "Wayland (PipeWire) screen capture: AUTO, ON or OFF")
-set_property(CACHE RDACCEL_PIPEWIRE PROPERTY STRINGS AUTO ON OFF)
-set(RDACCEL_HAVE_PIPEWIRE OFF)
 
 include(GNUInstallDirs)
 
@@ -69,21 +63,17 @@ if(PROJECT_IS_TOP_LEVEL)
   set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)
 endif()
 
-if(APPLE)
-  enable_language(OBJCXX)
-  set(CMAKE_OBJCXX_STANDARD 20)
+# macOS only since 2.0 (Linux support was removed).
+if(NOT APPLE)
+  message(FATAL_ERROR "rdaccel supports macOS only")
 endif()
+enable_language(OBJCXX)
+set(CMAKE_OBJCXX_STANDARD 20)
 
-if(MSVC)
-  add_compile_options(/W4)
-else()
-  add_compile_options(-Wall -Wextra)
-endif()
-if(APPLE)
-  # An API newer than CMAKE_OSX_DEPLOYMENT_TARGET must sit behind
-  # @available / __builtin_available, or it crashes on older macOS.
-  add_compile_options(-Werror=unguarded-availability-new)
-endif()
+add_compile_options(-Wall -Wextra)
+# An API newer than CMAKE_OSX_DEPLOYMENT_TARGET must sit behind
+# @available / __builtin_available, or it crashes on older macOS.
+add_compile_options(-Werror=unguarded-availability-new)
 
 # ---------------------------------------------------------------------------
 # The library: one target, rdaccel::rdaccel.
@@ -92,7 +82,7 @@ endif()
 #   src/capi/  the C ABI, on top of the internal C++ API
 #   src/       internal C++ API (Host, Viewer, transports) in namespace rdacore
 #   core/      platform-independent internals
-#   platform/  capture + HEVC codecs, one implementation per OS
+#   platform/  capture, input and the HEVC codec on macOS
 # ---------------------------------------------------------------------------
 set(RDACCEL_SOURCES
   src/capi/capi.cpp
@@ -108,12 +98,10 @@ set(RDACCEL_SOURCES
   core/tile/tile_cache.cpp
   core/tile/video_region.cpp
   core/codec/hevc_bitstream.cpp
-  core/codec/codec_choice.cpp
   core/codec/lossless.cpp
   core/codec/context_tiles.cpp
   core/capture/synthetic_capturer.cpp
   core/transport/local_pipe.cpp
-  core/transport/tcp_transport.cpp
   core/transport/secure_transport.cpp
   third_party/monocypher/monocypher.c
   core/net/sim_link.cpp
@@ -137,33 +125,16 @@ if(RDACCEL_AUDIO)
     core/audio/test_signal.cpp
     core/audio/player.cpp
   )
-  if(APPLE)
-    list(APPEND RDACCEL_SOURCES platform/mac/audio_tap.mm platform/mac/audio_player.mm)
-  else()
-    list(APPEND RDACCEL_SOURCES core/audio/no_platform_audio.cpp)
-  endif()
+  list(APPEND RDACCEL_SOURCES platform/mac/audio_tap.mm platform/mac/audio_player.mm)
 endif()
-if(APPLE)
-  list(APPEND RDACCEL_SOURCES
-    platform/mac/platform_mac.mm
-    platform/mac/capture_sck.mm
-    platform/mac/displays_mac.mm
-    platform/mac/cursor_mac.mm
-    platform/mac/inject_mac.mm
-    platform/mac/video_vt.mm
-  )
-elseif(UNIX)
-  list(APPEND RDACCEL_SOURCES
-    platform/linux/platform_linux.cpp
-    platform/linux/capture_x11.cpp
-    platform/linux/cursor_xfixes.cpp
-    platform/linux/displays_x11.cpp
-    platform/linux/inject_xtest.cpp
-    platform/linux/video_ffmpeg.cpp
-  )
-else()
-  message(FATAL_ERROR "rdaccel supports macOS and Linux only")
-endif()
+list(APPEND RDACCEL_SOURCES
+  platform/mac/platform_mac.mm
+  platform/mac/capture_sck.mm
+  platform/mac/displays_mac.mm
+  platform/mac/cursor_mac.mm
+  platform/mac/inject_mac.mm
+  platform/mac/video_vt.mm
+)
 
 # Before 1.0 a minor version may change the ABI, so it is part of the soname.
 if(PROJECT_VERSION_MAJOR EQUAL 0)
@@ -185,11 +156,7 @@ set_target_properties(rdaccel PROPERTIES
 target_compile_features(rdaccel PUBLIC cxx_std_20)
 get_target_property(RDACCEL_TYPE rdaccel TYPE)
 if(RDACCEL_TYPE STREQUAL "SHARED_LIBRARY")
-  if(APPLE)
-    target_link_options(rdaccel PRIVATE "LINKER:-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/cmake/rdaccel.exp")
-  else()
-    target_link_options(rdaccel PRIVATE "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/cmake/rdaccel.map")
-  endif()
+  target_link_options(rdaccel PRIVATE "LINKER:-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/cmake/rdaccel.exp")
 endif()
 target_include_directories(rdaccel
   PUBLIC
@@ -206,7 +173,7 @@ target_link_libraries(rdaccel PRIVATE Threads::Threads ZLIB::ZLIB)
 
 if(RDACCEL_AUDIO)
   # Opus (BSD licence, NOTICE), static, inside the library: a shared
-  # librdaccel exports none of its symbols (cmake/rdaccel.exp, .map); a
+  # librdaccel exports none of its symbols (cmake/rdaccel.exp); a
   # static one installs libopus.a next to itself.
   # Intrinsics off: Opus's CMake picks the SSE or NEON files for the one CPU
   # it configures for, so a universal build (arm64 and x86_64 in one
@@ -237,42 +204,21 @@ else()
   target_compile_definitions(rdaccel PRIVATE RDACCEL_HAVE_AUDIO=0)
 endif()
 
-if(APPLE)
-  target_compile_options(rdaccel PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
-  target_link_libraries(rdaccel PRIVATE
-    "-framework Foundation"
-    "-framework AppKit"
-    "-framework Carbon"
-    "-framework CoreGraphics"
-    "-framework CoreMedia"
-    "-framework CoreVideo"
-    "-framework VideoToolbox"
-    "-framework ScreenCaptureKit"
-    "-framework IOSurface"
-    "-framework IOKit"
-    "-framework CoreAudio"
-    "-framework AudioToolbox"
-  )
-else()
-  find_package(PkgConfig REQUIRED)
-  pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale)
-  pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11 xext xfixes xrandr xtst)
-  target_link_libraries(rdaccel PRIVATE PkgConfig::FFMPEG PkgConfig::X11)
-  if(NOT RDACCEL_PIPEWIRE STREQUAL "OFF")
-    if(RDACCEL_PIPEWIRE STREQUAL "ON")
-      pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3 gio-2.0 gio-unix-2.0)
-    else()
-      pkg_check_modules(PIPEWIRE IMPORTED_TARGET libpipewire-0.3 gio-2.0 gio-unix-2.0)
-    endif()
-    if(PIPEWIRE_FOUND)
-      set(RDACCEL_HAVE_PIPEWIRE ON)
-      target_sources(rdaccel PRIVATE platform/linux/capture_pipewire.cpp)
-      target_compile_definitions(rdaccel PRIVATE RDACCEL_HAVE_PIPEWIRE=1)
-      target_link_libraries(rdaccel PRIVATE PkgConfig::PIPEWIRE)
-    endif()
-  endif()
-  message(STATUS "rdaccel: Wayland (PipeWire) capture: ${RDACCEL_HAVE_PIPEWIRE}")
-endif()
+target_compile_options(rdaccel PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+target_link_libraries(rdaccel PRIVATE
+  "-framework Foundation"
+  "-framework AppKit"
+  "-framework Carbon"
+  "-framework CoreGraphics"
+  "-framework CoreMedia"
+  "-framework CoreVideo"
+  "-framework VideoToolbox"
+  "-framework ScreenCaptureKit"
+  "-framework IOSurface"
+  "-framework IOKit"
+  "-framework CoreAudio"
+  "-framework AudioToolbox"
+)
 
 # Internal headers, for the library's own unit tests only. Not installed;
 # applications use include/rdaccel/ alone.
@@ -332,19 +278,12 @@ if(RDACCEL_INSTALL)
   else()
     set(RDA_PC_INCLUDEDIR "\${prefix}/${CMAKE_INSTALL_INCLUDEDIR}")
   endif()
-  # Private dependencies are listed as plain flags (not Requires.private) so
-  # `pkg-config --static` does not expand FFmpeg's own static dependencies:
-  # rdaccel links the shared FFmpeg/X11 libraries, as the CMake package does.
   if(RDACCEL_AUDIO)
     set(RDA_PC_OPUS "-lopus ")
   else()
     set(RDA_PC_OPUS "")
   endif()
-  if(APPLE)
-    set(RDA_PC_LIBS_PRIVATE "${RDA_PC_OPUS}-lz -lc++ -framework Foundation -framework AppKit -framework Carbon -framework CoreGraphics -framework CoreMedia -framework CoreVideo -framework VideoToolbox -framework ScreenCaptureKit -framework IOSurface -framework IOKit -framework CoreAudio -framework AudioToolbox")
-  else()
-    string(JOIN " " RDA_PC_LIBS_PRIVATE ${RDA_PC_OPUS} ${FFMPEG_LDFLAGS} ${X11_LDFLAGS} ${PIPEWIRE_LDFLAGS} -lz -lstdc++ -lm -pthread)
-  endif()
+  set(RDA_PC_LIBS_PRIVATE "${RDA_PC_OPUS}-lz -lc++ -framework Foundation -framework AppKit -framework Carbon -framework CoreGraphics -framework CoreMedia -framework CoreVideo -framework VideoToolbox -framework ScreenCaptureKit -framework IOSurface -framework IOKit -framework CoreAudio -framework AudioToolbox")
   configure_file(cmake/rdaccel.pc.in ${CMAKE_CURRENT_BINARY_DIR}/rdaccel.pc @ONLY)
   install(FILES ${CMAKE_CURRENT_BINARY_DIR}/rdaccel.pc DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
   install(FILES LICENSE NOTICE README.md CHANGELOG.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
@@ -354,7 +293,7 @@ if(RDACCEL_INSTALL)
   # build for both arm64 and x86_64 is "universal".
   string(TOLOWER "${CMAKE_SYSTEM_NAME}" RDA_OS)
   set(RDA_ARCH "${CMAKE_SYSTEM_PROCESSOR}")
-  if(APPLE AND CMAKE_OSX_ARCHITECTURES)
+  if(CMAKE_OSX_ARCHITECTURES)
     list(LENGTH CMAKE_OSX_ARCHITECTURES RDA_ARCH_COUNT)
     if(RDA_ARCH_COUNT GREATER 1)
       set(RDA_ARCH universal)
@@ -413,10 +352,8 @@ if(RDACCEL_BUILD_TESTS)
     tests/test_tile_cache.cpp
     tests/test_video_region.cpp
     tests/test_hevc_bitstream.cpp
-    tests/test_codec_choice.cpp
     tests/test_lossless.cpp
     tests/test_local_pipe.cpp
-    tests/test_tcp_transport.cpp
     tests/test_reliable_transport.cpp
     tests/test_fec.cpp
     tests/test_session.cpp
@@ -446,27 +383,19 @@ if(RDACCEL_BUILD_TESTS)
   add_executable(rdaccel_platform_tests tests/test_platform_codec.cpp tests/test_api.cpp
     tests/test_capi.cpp)
   target_link_libraries(rdaccel_platform_tests PRIVATE rdaccel_internal GTest::gtest_main)
-  if(APPLE AND RDACCEL_AUDIO)
+  if(RDACCEL_AUDIO)
     target_sources(rdaccel_platform_tests PRIVATE tests/test_platform_audio_mac.mm)
     target_compile_options(rdaccel_platform_tests PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
     target_link_libraries(rdaccel_platform_tests PRIVATE "-framework CoreAudio")
   endif()
-  if(NOT APPLE)
-    target_sources(rdaccel_platform_tests PRIVATE tests/test_platform_x11.cpp)
-    target_link_libraries(rdaccel_platform_tests PRIVATE PkgConfig::X11)
-    if(RDACCEL_HAVE_PIPEWIRE)
-      target_sources(rdaccel_platform_tests PRIVATE tests/test_platform_pipewire.cpp)
-      target_link_libraries(rdaccel_platform_tests PRIVATE PkgConfig::PIPEWIRE)
-    endif()
-  endif()
   gtest_discover_tests(rdaccel_platform_tests DISCOVERY_TIMEOUT 30
-    PROPERTIES ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan.supp;RDACCEL_AUDIO_NULL_OUTPUT=1")
+    PROPERTIES ENVIRONMENT "RDACCEL_AUDIO_NULL_OUTPUT=1")
 
   # The plain C example doubles as a test of the C ABI from C.
   if(RDACCEL_BUILD_EXAMPLES)
     add_test(NAME minimal_c COMMAND rdaccel_minimal_c)
     set_tests_properties(minimal_c PROPERTIES
-      ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan.supp;RDACCEL_AUDIO_NULL_OUTPUT=1")
+      ENVIRONMENT "RDACCEL_AUDIO_NULL_OUTPUT=1")
   endif()
 endif()
 

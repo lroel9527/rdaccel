@@ -27,18 +27,8 @@ struct HostConfig {
   // for under 1 dB; 0 lets the encoder decide.
   int32_t min_qp = 24;
   // HEVC encoder backend to try first. Empty picks automatically. macOS always
-  // uses VideoToolbox; Linux accepts "hevc_nvenc", "libx265" or
-  // "hevc_vaapi" (experimental, never picked automatically).
+  // uses VideoToolbox (the name is ignored since 2.0).
   std::string encoder;
-  // Which video codec to send (rda_host_config.video_codec). kAuto: HEVC,
-  // unless the viewer decodes H.264 and this machine's hardware HEVC encoder
-  // is missing or below 30 fps at the screen's size while hardware H.264 is
-  // faster (measured once per size, a fraction of a second). kHevc: always
-  // HEVC, nothing measured. kH264: H.264 for viewers that decode it, HEVC
-  // (with a warning) for those that do not. Viewers older than 1.11 always
-  // get HEVC.
-  enum class VideoCodecPreference : int32_t { kAuto = 0, kHevc = 1, kH264 = 2 };
-  VideoCodecPreference video_codec = VideoCodecPreference::kAuto;
 
   // Only used by StartScreenCapture(). 0 = native resolution. Otherwise the
   // screen is captured scaled to this size (even numbers), and the cursor
@@ -121,7 +111,7 @@ struct HostConfig {
   // When the viewer goes (leaves, times out, is refused, has the wrong
   // key), wait for the next one on the same port: the state goes from
   // kDisconnected back to kConnecting. Screen capture keeps running. Works
-  // with BindUdp, BindTcp and unconnected UdpFromFd sockets; with other
+  // with BindUdp and unconnected UdpFromFd sockets; with other
   // transports the first disconnect stays final. false = always final.
   bool keep_serving = true;
   // StartScreenCapture(): also capture this process's own windows (macOS
@@ -263,7 +253,7 @@ class Host {
   // The same on the bulk channel: after the video, in what the path has to
   // spare (large transfers); on the message channel with a viewer older than
   // 1.10. BulkQueuedBytes: what of it waits to be sent, -1 when not known
-  // (TCP, or no bulk channel); a sender keeps it short to stay responsive.
+  // (a custom transport, or no bulk channel); a sender keeps it short to stay responsive.
   bool SendBulkMessage(uint32_t type, std::span<const uint8_t> payload, std::string* error = nullptr);
   int64_t BulkQueuedBytes() const;
 
@@ -303,7 +293,7 @@ class Host {
 
   // Sound (1.13). Capture (kSystem, kTest) starts when a viewer that takes
   // sound is connected and stops when it leaves; nothing is captured or sent
-  // for one that does not (an older viewer, one that did not ask, TCP).
+  // for one that does not (an older viewer, one that did not ask, a custom transport).
   // False (with `error`) where the source does not exist (kSystem on Linux)
   // or the library was built without sound.
   bool StartAudio(const AudioConfig& config, std::string* error = nullptr);

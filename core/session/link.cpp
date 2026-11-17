@@ -10,7 +10,7 @@ namespace rdacore::session {
 namespace {
 
 // AppMessages go out in pieces so one large message does not need one large
-// transport write (TCP and custom transports may cap those).
+// transport write (custom transports may cap those).
 constexpr size_t kMessageChunk = 256 * 1024;
 
 uint64_t Now() { return capture::MonotonicMicros(); }

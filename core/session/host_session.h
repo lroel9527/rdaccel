@@ -125,9 +125,6 @@ struct HostOptions {
   bool hello_on_video = false;
   // Frame ids continue across sessions of one host.
   uint64_t first_frame_id = 1;
-  // What the encoder produces, named in the Hello; video area encoders are
-  // created for the same codec (the viewer decodes them by the Hello).
-  codec::VideoCodec codec = codec::VideoCodec::kHevc;
 };
 
 class HostSession {

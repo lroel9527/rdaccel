@@ -3,6 +3,26 @@
 版本号遵循语义化版本。从 1.0 起，同一主版本内 C ABI 只加不改（新函数、结构体末尾加字段），
 `find_package(rdaccel 1.0)` 接受任何 1.x。1.0 之前次版本号（0.x）变化时 C ABI 可能有不兼容改动。
 
+## 2.0.0
+
+只给 Mac ↔ Mac 用（rdmachine 6.0.0 的范围收口）：把没有使用者的部分删掉。**C ABI 和 C++ 接口有不兼容的改动**，所以是新的主版本；码流和线上格式没有变，HEVC 的编码路径没有动。
+
+### 删掉的
+
+- **Linux 支持**：`platform/linux/`（X11 和 Wayland/PipeWire 采集、XTest 注入、FFmpeg 编解码）、相关测试和脚本、CMake 里的分支。非 macOS 上配置时直接报错。
+- **TCP 传输**：`rda_tcp_bind`、`rda_tcp_connect`（C++：`BindTcp`、`ConnectTcp`）和 `core/transport/tcp_transport`。自带的传输只剩 UDP 和进程内管道；应用自己的传输（`rda_transport_vtable`）不变。示例工具的 `--tcp` 选项也去掉了。
+- **H.264**：`rda_host_config.video_codec`（连同它前面的 `reserved0`）、`RDA_VIDEO_CODEC_*`、自动选择编码器的测速（`codec_choice`）、VideoToolbox 的 H.264 编解码路径、码流里 H.264 的 NAL 处理。host 永远发 HEVC；viewer 不再声明 `kCapH264`（这一位保留不再使用）。
+
+### 和 1.x 互连
+
+- 线上协议版本不变（4）。2.0 的 viewer 连 1.11–1.13 的 host：不声明能解 H.264，所以对方发 HEVC。2.0 的 host 连 1.x 的 viewer：发 HEVC，和以前的默认一样。
+- Hello 里的编码字节固定是 2（HEVC）；收到 1（H.264）的 Hello 按坏数据处理。
+- 1.x 的程序不能直接换上 2.0 的动态库（`rda_host_config` 变短了，少了两个函数），要重新编译。
+
+### 测试
+
+- 去掉了 TCP、H.264、Linux 的用例；加了“Hello 只认 HEVC”。其余用例不变，全部通过（这台 Mac，没有跑会移动鼠标指针的 `CApi.InjectorCreateAndArguments`）。
+
 ## 1.13.0
 
 新功能：声音。C ABI 只加不改（新函数；`rda_viewer_config`、`rda_host_stats`、`rda_viewer_stats` 末尾加字段），线上格式多了一个能力位和一种传输包，和旧版本互通（旧的一端没有声音）。最低系统改为 macOS 14.2。

@@ -75,7 +75,7 @@ struct Received {
 }  // namespace
 
 TEST(PublicApi, VersionAndPlatform) {
-  EXPECT_STREQ(rdaccel::Version(), "1.13.0");
+  EXPECT_STREQ(rdaccel::Version(), "2.0.0");
   EXPECT_NE(std::string(rdaccel::PlatformName()), "");
   const auto a = rdaccel::NowMicros();
   EXPECT_GE(rdaccel::NowMicros(), a);
@@ -108,38 +108,6 @@ TEST(PublicApi, HostToViewerOverLocalPipe) {
   EXPECT_GT(got.min_psnr, 30.0);
   EXPECT_EQ(viewer->stats().decode_errors, 0u);
   EXPECT_EQ(host.stats().frames_encoded, static_cast<uint64_t>(kFrames));
-}
-
-// 1.11: a host told to send H.264 does so to a viewer that decodes it (on
-// macOS; a Linux viewer does not claim it, and gets HEVC).
-TEST(PublicApi, H264WhenAskedForAndTheViewerDecodesIt) {
-  auto [host_end, viewer_end] = rdaccel::CreateLocalPipe();
-  Received got;
-  std::string err;
-  auto viewer = rdaccel::Viewer::Create(std::move(viewer_end), got.Handlers(), &err);
-  ASSERT_TRUE(viewer) << err;
-  rdaccel::HostConfig cfg;
-  cfg.fps = 30;
-  cfg.bitrate_bps = 4'000'000;
-  cfg.video_codec = rdaccel::HostConfig::VideoCodec::kH264;
-  rdaccel::Host host(std::move(host_end), cfg);
-  ASSERT_TRUE(host.ok());
-  for (int i = 0; i < 200 && host.state() != rdaccel::ConnectionState::kConnected; ++i) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-  }
-  ASSERT_EQ(host.state(), rdaccel::ConnectionState::kConnected);
-  constexpr int kFrames = 20;
-  std::vector<uint8_t> px;
-  for (int i = 0; i < kFrames; ++i) {
-    const auto dirty = rdaccel::RenderTestPattern(i, kW, kH, px);
-    ASSERT_TRUE(host.SubmitFrame({px.data(), kW, kH, kW * 4}, rdaccel::NowMicros(), dirty, &err)) << err;
-  }
-  ASSERT_TRUE(got.WaitFor(kFrames));
-  const bool mac = std::string(rdaccel::PlatformName()) == "macOS";
-  EXPECT_NE(host.encoder_name().find(mac ? "H.264" : "HEVC"), std::string::npos) << host.encoder_name();
-  std::lock_guard<std::mutex> lock(got.mu);
-  EXPECT_GT(got.min_psnr, 30.0);
-  EXPECT_EQ(viewer->stats().decode_errors, 0u);
 }
 
 // Both handler forms (and clearing it) compile and are accepted: code
@@ -671,32 +639,6 @@ TEST(PublicApi, UdpBindDoesNotBlockAndHoldsFramesUntilTheViewerComes) {
   EXPECT_EQ(viewer->stats().decode_errors, 0u);
 }
 
-TEST(PublicApi, TcpBindDoesNotBlockAndHoldsFramesUntilTheViewerComes) {
-  std::string err;
-  auto host_t = rdaccel::BindTcp(47312, &err);
-  ASSERT_NE(host_t, nullptr) << err;
-  const std::vector<uint8_t> key(32, 0x6b);
-  rdaccel::HostConfig cfg;
-  cfg.encryption_key = key;
-  rdaccel::Host host(std::move(host_t), cfg);
-  ASSERT_TRUE(host.ok());
-  std::vector<uint8_t> px;
-  for (int i = 0; i < 30; ++i) {
-    const auto dirty = rdaccel::RenderTestPattern(static_cast<uint64_t>(i), kW, kH, px);
-    ASSERT_TRUE(host.SubmitFrame({px.data(), kW, kH, kW * 4}, rdaccel::NowMicros(), dirty, &err)) << err;
-  }
-  EXPECT_EQ(host.stats().frames_encoded, 0u);
-  EXPECT_EQ(host.state(), rdaccel::ConnectionState::kConnecting);
-
-  rdaccel::ViewerOptions vo;
-  vo.encryption_key = key;
-  auto viewer = rdaccel::Viewer::Create(rdaccel::ConnectTcp("127.0.0.1", 47312, &err), {}, vo, &err);
-  ASSERT_NE(viewer, nullptr) << err;
-  ASSERT_TRUE(StreamUntil(host, *viewer, 5));
-  EXPECT_EQ(host.state(), rdaccel::ConnectionState::kConnected);
-  EXPECT_EQ(viewer->stats().decode_errors, 0u);
-}
-
 TEST(PublicApi, UdpFromYourOwnSockets) {
   int fds[2];
   ASSERT_EQ(::socketpair(AF_UNIX, SOCK_DGRAM, 0, fds), 0);
@@ -815,29 +757,29 @@ struct StateLog {
   }
 };
 
-std::unique_ptr<rdaccel::Viewer> Connect(bool tcp, uint16_t port, std::vector<uint8_t> key,
+std::unique_ptr<rdaccel::Viewer> Connect(uint16_t port, std::vector<uint8_t> key,
                                          std::vector<uint8_t> token = {}) {
   std::string err;
   rdaccel::ViewerOptions vo;
   vo.allow_plaintext = key.empty();
   vo.encryption_key = std::move(key);
   vo.auth_token = std::move(token);
-  auto t = tcp ? rdaccel::ConnectTcp("127.0.0.1", port, &err) : rdaccel::ConnectUdp("127.0.0.1", port, &err);
+  auto t = rdaccel::ConnectUdp("127.0.0.1", port, &err);
   return rdaccel::Viewer::Create(std::move(t), {}, vo, &err);
 }
 
-void ServesViewersOneAfterAnother(bool tcp, uint16_t port) {
+void ServesViewersOneAfterAnother(uint16_t port) {
   std::string err;
   const std::vector<uint8_t> key(32, 0x3c);
   rdaccel::HostConfig cfg;
   cfg.encryption_key = key;
-  rdaccel::Host host(tcp ? rdaccel::BindTcp(port, &err) : rdaccel::BindUdp(port, &err), cfg);
+  rdaccel::Host host(rdaccel::BindUdp(port, &err), cfg);
   ASSERT_TRUE(host.ok()) << err;
   StateLog log;
   log.Attach(host);
   uint64_t encoded = 0;
   for (int round = 0; round < 3; ++round) {
-    auto viewer = Connect(tcp, port, key);
+    auto viewer = Connect(port, key);
     ASSERT_NE(viewer, nullptr);
     ASSERT_TRUE(StreamUntil(host, *viewer, 5)) << "viewer " << round;
     EXPECT_EQ(host.state(), rdaccel::ConnectionState::kConnected);
@@ -851,8 +793,7 @@ void ServesViewersOneAfterAnother(bool tcp, uint16_t port) {
 
 }  // namespace
 
-TEST(PublicApi, UdpHostServesViewersOneAfterAnother) { ServesViewersOneAfterAnother(false, 47321); }
-TEST(PublicApi, TcpHostServesViewersOneAfterAnother) { ServesViewersOneAfterAnother(true, 47322); }
+TEST(PublicApi, UdpHostServesViewersOneAfterAnother) { ServesViewersOneAfterAnother(47321); }
 
 TEST(PublicApi, WrongKeyOrRefusedViewerDoesNotEndTheHost) {
   std::string err;
@@ -865,17 +806,17 @@ TEST(PublicApi, WrongKeyOrRefusedViewerDoesNotEndTheHost) {
   StateLog log;
   log.Attach(host);
   {
-    auto wrong_key = Connect(false, 47323, std::vector<uint8_t>(32, 0x4e), {'1', '2', '3', '4'});
+    auto wrong_key = Connect(47323, std::vector<uint8_t>(32, 0x4e), {'1', '2', '3', '4'});
     ASSERT_NE(wrong_key, nullptr);
     EXPECT_EQ(log.WaitWaiting(host, 1), RDA_ERR_AUTH);
   }
   {
-    auto refused = Connect(false, 47323, key, {'0', '0', '0', '0'});
+    auto refused = Connect(47323, key, {'0', '0', '0', '0'});
     ASSERT_NE(refused, nullptr);
     EXPECT_EQ(log.WaitWaiting(host, 2), RDA_ERR_AUTH);
     EXPECT_EQ(refused->stats().frames_decoded, 0u);
   }
-  auto good = Connect(false, 47323, key, {'1', '2', '3', '4'});
+  auto good = Connect(47323, key, {'1', '2', '3', '4'});
   ASSERT_NE(good, nullptr);
   ASSERT_TRUE(StreamUntil(host, *good, 5));
   EXPECT_EQ(good->stats().decode_errors, 0u);
@@ -903,7 +844,7 @@ TEST(PublicApi, StraySendersDoNotTakeTheViewersPlace) {
   send_raw({'G', 'E', 'T', ' ', '/'});
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
   {
-    auto viewer = Connect(false, 47324, {});
+    auto viewer = Connect(47324, {});
     ASSERT_NE(viewer, nullptr);
     ASSERT_TRUE(StreamUntil(host, *viewer, 3));
   }
@@ -911,7 +852,7 @@ TEST(PublicApi, StraySendersDoNotTakeTheViewersPlace) {
   // Looks like the protocol but never says hello: dropped after the timeout.
   send_raw({3});
   EXPECT_EQ(log.WaitWaiting(host, 2), RDA_ERR_TIMEOUT);
-  auto viewer = Connect(false, 47324, {});
+  auto viewer = Connect(47324, {});
   ASSERT_NE(viewer, nullptr);
   ASSERT_TRUE(StreamUntil(host, *viewer, 3));
 }
@@ -924,7 +865,7 @@ TEST(PublicApi, WithoutKeepServingTheFirstDisconnectIsFinal) {
   rdaccel::Host host(rdaccel::BindUdp(47325, &err), cfg);
   ASSERT_TRUE(host.ok()) << err;
   {
-    auto viewer = Connect(false, 47325, {});
+    auto viewer = Connect(47325, {});
     ASSERT_NE(viewer, nullptr);
     ASSERT_TRUE(StreamUntil(host, *viewer, 3));
   }

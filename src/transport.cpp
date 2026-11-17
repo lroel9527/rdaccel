@@ -2,21 +2,12 @@
 
 #include "net/reliable_transport.h"
 #include "transport/local_pipe.h"
-#include "transport/tcp_transport.h"
 
 namespace rdacore {
 
 std::pair<std::unique_ptr<Transport>, std::unique_ptr<Transport>> CreateLocalPipe() {
   auto [a, b] = transport::MakeLocalPipe();
   return {std::move(a), std::move(b)};
-}
-
-std::unique_ptr<Transport> BindTcp(uint16_t port, std::string* error) {
-  return transport::TcpTransport::Bind(port, error);
-}
-
-std::unique_ptr<Transport> ConnectTcp(const std::string& host, uint16_t port, std::string* error) {
-  return transport::TcpTransport::Connect(host, port, error);
 }
 
 std::unique_ptr<Transport> BindUdp(uint16_t port, std::string* error) {

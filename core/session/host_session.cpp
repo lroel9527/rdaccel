@@ -67,7 +67,7 @@ HostSession::HostSession(transport::ITransport* transport,
 void HostSession::SendHello() {
   Send(options_.hello_on_video ? transport::Channel::kVideo : transport::Channel::kControl,
        proto::Hello{proto::kProtocolVersion, static_cast<uint32_t>(width_),
-                    static_cast<uint32_t>(height_), options_.codec});
+                    static_cast<uint32_t>(height_)});
 }
 
 void HostSession::SetInputHandler(InputFn fn) {
@@ -1581,7 +1581,6 @@ bool HostSession::EncodeRegions(const capture::CapturedFrame& frame, const std::
       cfg.fps = options_.fps;
       cfg.min_qp = options_.region_min_qp;
       cfg.bitrate_bps = RegionBitrate(reg.rect);
-      cfg.codec = options_.codec;
       std::string err;
       re.enc = options_.region_encoder_factory(cfg, &err);
       if (!re.enc) return false;

@@ -266,7 +266,7 @@ class VtableTransport final : public rdacore::Transport {
 
 struct rda_transport {
   std::unique_ptr<rdacore::Transport> t;
-  bool network = false;  // TCP / UDP: plaintext only when allowed
+  bool network = false;  // UDP: plaintext only when allowed
 };
 
 namespace {
@@ -526,24 +526,6 @@ rda_status rda_pipe_create(rda_transport** a, rda_transport** b) {
   RDA_GUARD_END
 }
 
-rda_status rda_tcp_connect(const char* host, uint16_t port, rda_transport** out) {
-  RDA_GUARD_BEGIN
-  if (!host || !out) return Fail(RDA_ERR_INVALID_ARG, "host and out are required");
-  std::string err;
-  auto t = rdacore::ConnectTcp(host, port, &err);
-  return Wrap(std::move(t), out, err, RDA_ERR_TRANSPORT, /*network=*/true);
-  RDA_GUARD_END
-}
-
-rda_status rda_tcp_bind(uint16_t port, rda_transport** out) {
-  RDA_GUARD_BEGIN
-  if (!out) return Fail(RDA_ERR_INVALID_ARG, "out is required");
-  std::string err;
-  auto t = rdacore::BindTcp(port, &err);
-  return Wrap(std::move(t), out, err, RDA_ERR_TRANSPORT, /*network=*/true);
-  RDA_GUARD_END
-}
-
 rda_status rda_udp_connect(const char* host, uint16_t port, rda_transport** out) {
   RDA_GUARD_BEGIN
   if (!host || !out) return Fail(RDA_ERR_INVALID_ARG, "host and out are required");
@@ -723,9 +705,6 @@ rdacore::HostConfig ToHostConfig(const rda_host_config& c) {
   o.keep_serving = c.keep_serving != 0;
   o.capture_own_windows = c.capture_own_windows != 0;
   o.text_mode = c.text_mode != 0;
-  // The default (auto) for callers whose struct ends before it (ReadStruct;
-  // rda_host_config.reserved0 keeps 1.10's tail padding out of it).
-  o.video_codec = static_cast<rdacore::HostConfig::VideoCodecPreference>(c.video_codec);
   return o;
 }
 
@@ -737,7 +716,7 @@ std::string TakeKey(const uint8_t* key, int32_t allow_plaintext, const rda_trans
     return {};
   }
   if (t && t->network && !allow_plaintext) {
-    return "TCP/UDP without encryption: set encryption_key (32 bytes, the same on both sides) "
+    return "UDP without encryption: set encryption_key (32 bytes, the same on both sides) "
            "or allow_plaintext = 1";
   }
   return {};
@@ -764,9 +743,6 @@ std::string CheckHostConfig(const rda_host_config& c) {
   }
   if (c.peer_timeout_ms < 0) return "peer_timeout_ms must not be negative";
   if (c.display_index < 0) return "display_index must not be negative";
-  if (c.video_codec < RDA_VIDEO_CODEC_AUTO || c.video_codec > RDA_VIDEO_CODEC_H264) {
-    return "video_codec must be RDA_VIDEO_CODEC_AUTO, _HEVC or _H264";
-  }
   return {};
 }
 
@@ -807,7 +783,6 @@ void rda_host_config_default(rda_host_config* c) {
   c->keep_serving = d.keep_serving;
   c->capture_own_windows = d.capture_own_windows;
   c->text_mode = d.text_mode;
-  c->video_codec = static_cast<int32_t>(d.video_codec);
 }
 
 rda_status rda_host_create(rda_transport* transport, const rda_host_config* config, rda_host** out) {
@@ -1438,8 +1413,6 @@ void rda_free(void* p) { std::free(p); }
 
 uint32_t rda_keycode_from_mac(uint32_t mac_keycode) { return rdacore::HidFromMacKeyCode(mac_keycode); }
 uint32_t rda_keycode_to_mac(uint32_t hid_usage) { return rdacore::HidToMacKeyCode(hid_usage); }
-uint32_t rda_keycode_from_evdev(uint32_t evdev_code) { return rdacore::HidFromEvdevKeyCode(evdev_code); }
-uint32_t rda_keycode_to_evdev(uint32_t hid_usage) { return rdacore::HidToEvdevKeyCode(hid_usage); }
 
 rda_status rda_test_pattern_render(uint64_t index, int32_t width, int32_t height, uint8_t* bgra,
                                    int incremental, rda_rect* rects, size_t max_rects, size_t* rect_count) {

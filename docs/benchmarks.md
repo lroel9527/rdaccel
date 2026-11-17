@@ -1,5 +1,7 @@
 # 评测
 
+> **2.0.0 起**：rdaccel 只支持 macOS、只走 UDP（没有 TCP 传输）、只用 HEVC（没有 H.264）。下文里提到 Linux、TCP、H.264 的地方是 1.x 的情况，留作记录，没有逐段改写。
+
 所有数字都可以用 `examples/` 里的工具复现：`rdaccel_bench` 离线跑场景（编码后再解码，与原图逐帧比较），`rdaccel_netsim` 把 Host 和 Viewer 放在同一进程、中间接模拟网络实时跑。构建见 [构建与测试](building.md)。
 
 ## 弱网（0.4，Apple Silicon Mac，VideoToolbox）

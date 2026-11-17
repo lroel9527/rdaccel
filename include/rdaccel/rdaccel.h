@@ -6,7 +6,7 @@
  *
  *   rda_host       capture (or be given) screen frames, encode, send
  *   rda_viewer     receive, decode, hand BGRA pictures to the application
- *   rda_transport  how the two talk: UDP, TCP, an in-process pipe, or yours
+ *   rda_transport  how the two talk: UDP, an in-process pipe, or yours
  *
  * Conventions
  *   - Every function that can fail returns rda_status (RDA_OK = 0, errors < 0).
@@ -42,8 +42,8 @@ extern "C" {
 
 /* ---- version ------------------------------------------------------------ */
 
-#define RDA_VERSION_MAJOR 1
-#define RDA_VERSION_MINOR 13
+#define RDA_VERSION_MAJOR 2
+#define RDA_VERSION_MINOR 0
 #define RDA_VERSION_PATCH 0
 /* "rc1" and so on for a pre-release, "" for a release. rda_version() does
  * not include it; rda_version_string() does ("1.0.0-rc1"). */
@@ -55,7 +55,7 @@ extern "C" {
 /* The library's version as RDA_MAKE_VERSION() and as text ("0.2.0"). */
 RDA_API uint32_t rda_version(void);
 RDA_API const char* rda_version_string(void);
-/* "macOS" or "Linux". */
+/* "macOS". */
 RDA_API const char* rda_platform_name(void);
 /* Monotonic clock in microseconds, the one the library uses. */
 RDA_API uint64_t rda_now_us(void);
@@ -142,7 +142,7 @@ RDA_API void rda_draw_cursor(const rda_cursor_image* c, int32_t x, int32_t y, ui
 typedef struct rda_display_info {
   uint32_t struct_size;
   int32_t index;         /* for rda_host_config.display_index; 0 = primary */
-  int32_t x, y;          /* origin on the desktop: points on macOS, pixels on X11 */
+  int32_t x, y;          /* origin on the desktop, in points */
   int32_t width, height; /* pixels */
   int32_t primary;       /* nonzero for index 0 */
   char name[64];         /* UTF-8, NUL-terminated, may be empty */
@@ -212,15 +212,11 @@ RDA_API void rda_input_event_default(rda_input_event* ev);
 /* macOS virtual key codes (kVK_*, NSEvent.keyCode, CGKeyCode). */
 RDA_API uint32_t rda_keycode_from_mac(uint32_t mac_keycode);
 RDA_API uint32_t rda_keycode_to_mac(uint32_t hid_usage);
-/* Linux evdev codes (KEY_*; an X11 keycode minus 8). */
-RDA_API uint32_t rda_keycode_from_evdev(uint32_t evdev_code);
-RDA_API uint32_t rda_keycode_to_evdev(uint32_t hid_usage);
 
 /* ---- input injection ----------------------------------------------------- */
 
 /* Optional: plays rda_input_event into the host OS, for applications that
- * do not inject input themselves. Linux: the XTest extension of the X
- * server in DISPLAY. macOS: CGEvent, which needs the Accessibility
+ * do not inject input themselves: CGEvent, which needs the Accessibility
  * permission. Typical use: create one next to the host and call
  * rda_injector_inject() from on_input. */
 typedef struct rda_injector rda_injector;
@@ -236,8 +232,7 @@ typedef struct rda_injector_config {
 
 RDA_API void rda_injector_config_default(rda_injector_config* config);
 /* RDA_ERR_PERMISSION without the macOS Accessibility permission,
- * RDA_ERR_UNSUPPORTED without an X server with XTest or for a display
- * that does not exist. config may be NULL for the defaults. */
+ * RDA_ERR_UNSUPPORTED for a display that does not exist. config may be NULL for the defaults. */
 RDA_API rda_status rda_injector_create(const rda_injector_config* config, rda_injector** out);
 RDA_API void rda_injector_destroy(rda_injector* injector); /* releases held keys and buttons */
 /* Thread-safe. Scroll deltas are wheel lines (y > 0 up, x > 0 right).
@@ -360,12 +355,6 @@ RDA_API rda_status rda_transport_custom(const rda_transport_vtable* vtable, void
 /* Two connected in-process endpoints. */
 RDA_API rda_status rda_pipe_create(rda_transport** a, rda_transport** b);
 
-/* TCP, fixed bitrate (no stats). Host side: listens on `port` (IPv4 and
- * IPv6) and returns at once; the first viewer to connect becomes the peer.
- * Create the host right away and watch on_state for RDA_STATE_CONNECTED. */
-RDA_API rda_status rda_tcp_bind(uint16_t port, rda_transport** out);
-RDA_API rda_status rda_tcp_connect(const char* host, uint16_t port, rda_transport** out);
-
 /* UDP with loss recovery and BBR-style congestion control; reports stats, so
  * the host adapts its bitrate. Use on real networks. Host side: binds `port`
  * (IPv4 and IPv6) and returns at once; the first viewer that sends becomes
@@ -397,20 +386,14 @@ RDA_API void rda_transport_destroy(rda_transport* t);
 
 typedef struct rda_host rda_host;
 
-/* 1.11: rda_host_config.video_codec. */
-#define RDA_VIDEO_CODEC_AUTO 0
-#define RDA_VIDEO_CODEC_HEVC 1
-#define RDA_VIDEO_CODEC_H264 2
-
 typedef struct rda_host_config {
   uint32_t struct_size;
 
   int32_t fps;             /* 60 */
   int64_t bitrate_bps;     /* 8 Mbps; the ceiling with adaptive bitrate */
   int32_t min_qp;          /* 24; video quality ceiling, 0 = encoder decides */
-  const char* encoder;     /* NULL = automatic; Linux: "hevc_nvenc", "libx265" or
-                              "hevc_vaapi" (experimental; device from
-                              RDACCEL_VAAPI_DEVICE, default renderD128) */
+  const char* encoder;     /* ignored: VideoToolbox is the only encoder (it
+                              named a backend on Linux before 2.0) */
 
   /* rda_host_start_capture() only */
   int32_t capture_width;   /* 0 = native; otherwise scaled (even numbers) */
@@ -475,7 +458,7 @@ typedef struct rda_host_config {
   /* 32 bytes both sides share (copied): everything is encrypted and
    * authenticated with XChaCha20-Poly1305 under fresh per-connection keys.
    * A peer with another key, or none, disconnects with RDA_ERR_AUTH or
-   * RDA_ERR_PROTOCOL. NULL = plaintext, which TCP and UDP transports refuse
+   * RDA_ERR_PROTOCOL. NULL = plaintext, which UDP transports refuse
    * unless allow_plaintext is set (pipes, recordings, simulated and custom
    * transports never need it). */
   const uint8_t* encryption_key;
@@ -488,7 +471,7 @@ typedef struct rda_host_config {
    * the wrong key), wait for the next one on the same port: on_state reports
    * RDA_STATE_DISCONNECTED with the reason, then RDA_STATE_CONNECTING. Capture
    * keeps running and the next viewer starts from a keyframe; stats keep
-   * counting. Works with rda_udp_bind, rda_tcp_bind and an unconnected
+   * counting. Works with rda_udp_bind and an unconnected
    * rda_udp_from_fd socket; with other transports the first disconnect stays
    * final. 0: the first disconnect is final. */
   int32_t keep_serving; /* 1 */
@@ -496,7 +479,7 @@ typedef struct rda_host_config {
   /* 1.1, rda_host_start_capture() only. 1: also capture this process's own
    * windows (a status menu, a statistics panel: what an application shows
    * on the shared screen). 0: leave them out, so a viewer in the same
-   * process does not film itself. macOS only; Linux captures everything. */
+   * process does not film itself. */
   int32_t capture_own_windows; /* 0 */
 
   /* 1.5. 1: text mode: the same experience with less traffic. Text and UI
@@ -509,24 +492,6 @@ typedef struct rda_host_config {
    * the bitrate are as without text mode (1.9.1); the cursor is sent at
    * most 60 times a second. See rda_host_set_text_mode(). */
   int32_t text_mode; /* 0 */
-
-  /* Never read. Up to 1.10 these 4 bytes were the struct's unnamed tail
-   * padding, included in an older caller's struct_size: video_codec comes
-   * after them so that such a caller's struct_size ends before it. */
-  int32_t reserved0;
-
-  /* 1.11. Which video codec the host sends. RDA_VIDEO_CODEC_AUTO: HEVC,
-   * unless the viewer decodes H.264 and this machine's hardware HEVC encoder
-   * is missing, or encodes the screen's size at under 30 fps while hardware
-   * H.264 is faster (an Intel Mac of 2016: HEVC 15 fps, H.264 52 fps at
-   * 2880 x 1800). Measured once per screen size, in a fraction of a second,
-   * when such a viewer connects; logged. RDA_VIDEO_CODEC_HEVC: always HEVC,
-   * nothing measured (as before 1.11). RDA_VIDEO_CODEC_H264: H.264 for
-   * viewers that decode it; HEVC, with a warning in the log, for those that
-   * do not or when no H.264 encoder can be made. Viewers older than 1.11,
-   * and Linux viewers, always get HEVC. rda_host_encoder_name() tells which
-   * ("VideoToolbox H.264"). */
-  int32_t video_codec; /* RDA_VIDEO_CODEC_AUTO */
 } rda_host_config;
 
 typedef struct rda_host_stats {
@@ -641,7 +606,7 @@ RDA_API rda_status rda_host_send_message(rda_host* h, uint32_t type, const uint8
 RDA_API rda_status rda_host_send_bulk_message(rda_host* h, uint32_t type, const uint8_t* payload,
                                               size_t n);
 /* 1.10: bytes of bulk messages accepted but not yet sent; -1 when not known
- * (over TCP, or the viewer has no bulk channel). A sender keeps this short
+ * (a custom transport, or the viewer has no bulk channel). A sender keeps this short
  * (a fraction of a second at the path's rate) and sends more as it drains. */
 RDA_API int64_t rda_host_bulk_queued_bytes(const rda_host* h);
 
@@ -700,7 +665,7 @@ typedef struct rda_viewer_config {
    * rda_host_config.reserved0). */
   int32_t reserved0;
   /* 1.13. 1: take the host's sound, over a transport that carries datagrams
-   * (UDP, simulated networks, pipes; not TCP or a custom transport). Read it
+   * (UDP, simulated networks, pipes; not a custom transport). Read it
    * with rda_viewer_read_audio() or play it with rda_audio_player_create(). */
   int32_t audio; /* 0 */
 } rda_viewer_config;
@@ -759,7 +724,7 @@ RDA_API size_t rda_viewer_decoder_name(const rda_viewer* v, char* buf, size_t bu
  * in datagrams of the transport (not resent, ahead of the picture, within
  * the congestion control, encrypted like the rest). Nothing is sent while
  * the computer is silent, nor to a viewer that did not ask for sound or
- * whose transport carries no datagrams (TCP, custom transports). See
+ * whose transport carries no datagrams (custom transports). See
  * docs/integration.md. */
 #define RDA_AUDIO_SAMPLE_RATE 48000
 #define RDA_AUDIO_CHANNELS 2

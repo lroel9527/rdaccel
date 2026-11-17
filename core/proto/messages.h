@@ -38,10 +38,8 @@ inline constexpr uint64_t kCapContextTiles = 4;
 inline constexpr uint64_t kCapContextTiles64 = 8;
 // Both: AppMessage on Channel::kBulk too (large transfers below the picture). 1.10.
 inline constexpr uint64_t kCapBulk = 16;
-// Viewer: decodes H.264 (Hello::codec kH264), so a host whose HEVC encoder
-// is missing or too slow may send it. Not in kCapsAll: only a viewer whose
-// platform decoder handles H.264 adds it (LinkOptions::extra_caps). 1.11.
-inline constexpr uint64_t kCapH264 = 32;
+// 32 was kCapH264 (1.11 to 1.13: a viewer that decodes H.264). Never said
+// since 2.0, so a host of those versions sends this viewer HEVC; not reused.
 // Both: takes sound (audio packets, core/audio/audio_packet.h) in
 // transport datagrams. Not in kCapsAll: a viewer adds it when the
 // application asked for sound and its transport carries datagrams; a host
@@ -72,17 +70,14 @@ enum class MsgType : uint8_t {
 // Largest screen side the protocol carries (the public API's frame limit).
 inline constexpr uint32_t kMaxScreenSide = 16384;
 
-// HEVC by default. H.264 (1.11) only to a viewer with kCapH264, and only
-// when the host's HEVC encoder is missing or too slow at the screen's size
-// (or the host is told to); older hosts send HEVC only.
-using VideoCodec = codec::VideoCodec;
+// Hello's codec byte: HEVC, the only one (1 was H.264, 1.11 to 1.13).
+inline constexpr uint8_t kHelloCodecHevc = 2;
 
 // Host -> viewer, first message on the control channel.
 struct Hello {
   uint32_t version = kProtocolVersion;
   uint32_t width = 0;   // physical pixels
   uint32_t height = 0;
-  VideoCodec codec = VideoCodec::kHevc;
   // Since version 4 (absent in older streams: then min_version = version).
   uint32_t min_version = kMinViewerVersion;  // oldest viewer this host serves
   uint64_t caps = kCapsAll;

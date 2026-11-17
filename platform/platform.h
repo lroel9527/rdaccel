@@ -2,7 +2,6 @@
 
 // Factory functions implemented once per platform:
 //   platform/mac/platform_mac.mm      (macOS)
-//   platform/linux/platform_linux.cpp (Linux)
 // Apps and tools only include this header, so they build on both.
 
 #include <memory>
@@ -16,7 +15,7 @@
 
 namespace rdacore::platform {
 
-// Short name of the platform, e.g. "macOS" or "Linux".
+// Short name of the platform: "macOS".
 const char* PlatformName();
 
 // The displays that can be captured, primary first (index 0). False with
@@ -27,29 +26,23 @@ bool ListDisplays(std::vector<capture::DisplayInfo>& out, std::string* error);
 // failure.
 std::unique_ptr<capture::ICapturer> CreateScreenCapturer(std::string* error);
 
-// An encoder for cfg.codec (HEVC, or H.264 where the platform has it: macOS;
-// Linux has HEVC only). `prefer` optionally names a backend to try first
-// (Linux: "hevc_nvenc", "libx265"; ignored on macOS, which always uses
-// VideoToolbox). With cfg.hardware_only, null rather than a software encoder.
+// An HEVC encoder (VideoToolbox). `prefer` is ignored (it named a backend
+// on Linux).
 std::unique_ptr<codec::IHevcEncoder> CreateVideoEncoder(const codec::EncoderConfig& cfg,
                                                         const std::string& prefer,
                                                         std::string* error);
 
-// A decoder for `codec`; null with `error` set where the platform has none.
-std::unique_ptr<codec::IHevcDecoder> CreateVideoDecoder(codec::VideoCodec codec, std::string* error);
+// An HEVC decoder.
+std::unique_ptr<codec::IHevcDecoder> CreateVideoDecoder(std::string* error);
 
-// Whether CreateVideoDecoder() handles `codec` (a viewer then says so to the
-// host: proto::kCapH264).
-bool CanDecode(codec::VideoCodec codec);
-
-// The names from before H.264: CreateHevcEncoder follows cfg.codec as well.
+// The older names.
 inline std::unique_ptr<codec::IHevcEncoder> CreateHevcEncoder(const codec::EncoderConfig& cfg,
                                                               const std::string& prefer,
                                                               std::string* error) {
   return CreateVideoEncoder(cfg, prefer, error);
 }
 inline std::unique_ptr<codec::IHevcDecoder> CreateHevcDecoder(std::string* error) {
-  return CreateVideoDecoder(codec::VideoCodec::kHevc, error);
+  return CreateVideoDecoder(error);
 }
 
 // The system cursor, relative to display `display_index` (invisible while it

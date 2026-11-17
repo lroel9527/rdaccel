@@ -11,37 +11,33 @@ add_executable(rdaccel_bench bench.cpp)
 target_link_libraries(rdaccel_bench PRIVATE rdaccel::rdaccel)
 
 # macOS: host and viewer in one process, showing the decoded screen in a window.
-if(APPLE)
-  add_executable(rdaccel_loopback MACOSX_BUNDLE loopback_mac/main.mm)
-  target_compile_options(rdaccel_loopback PRIVATE -fobjc-arc)
-  target_link_libraries(rdaccel_loopback PRIVATE
-    rdaccel::rdaccel
-    "-framework AppKit"
-    "-framework QuartzCore"
-  )
-  set_target_properties(rdaccel_loopback PROPERTIES
-    MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_SOURCE_DIR}/loopback_mac/Info.plist.in)
+add_executable(rdaccel_loopback MACOSX_BUNDLE loopback_mac/main.mm)
+target_compile_options(rdaccel_loopback PRIVATE -fobjc-arc)
+target_link_libraries(rdaccel_loopback PRIVATE
+  rdaccel::rdaccel
+  "-framework AppKit"
+  "-framework QuartzCore"
+)
+set_target_properties(rdaccel_loopback PROPERTIES
+  MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_SOURCE_DIR}/loopback_mac/Info.plist.in)
 
-  # A windowed viewer that controls another machine running rdaccel_serve.
-  add_executable(rdaccel_remote remote_mac/main.mm)
-  target_compile_options(rdaccel_remote PRIVATE -fobjc-arc)
-  target_link_libraries(rdaccel_remote PRIVATE
-    rdaccel::rdaccel
-    "-framework AppKit"
-    "-framework IOSurface"
-    "-framework QuartzCore"
-  )
-endif()
+# A windowed viewer that controls another machine running rdaccel_serve.
+add_executable(rdaccel_remote remote_mac/main.mm)
+target_compile_options(rdaccel_remote PRIVATE -fobjc-arc)
+target_link_libraries(rdaccel_remote PRIVATE
+  rdaccel::rdaccel
+  "-framework AppKit"
+  "-framework IOSurface"
+  "-framework QuartzCore"
+)
 
 add_executable(rdaccel_netsim netsim.cpp)
 target_link_libraries(rdaccel_netsim PRIVATE rdaccel::rdaccel)
 
-# Host and viewer on two machines, over UDP or TCP.
+# Host and viewer on two machines, over UDP.
 add_executable(rdaccel_serve serve.cpp)
 target_link_libraries(rdaccel_serve PRIVATE rdaccel::rdaccel)
-if(APPLE)
-  target_link_libraries(rdaccel_serve PRIVATE "-framework CoreFoundation")
-endif()
+target_link_libraries(rdaccel_serve PRIVATE "-framework CoreFoundation")
 add_executable(rdaccel_view view.cpp)
 target_link_libraries(rdaccel_view PRIVATE rdaccel::rdaccel)
 
@@ -53,16 +49,9 @@ target_compile_options(rdaccel_minimal_c PRIVATE -pedantic)
 target_link_libraries(rdaccel_minimal_c PRIVATE rdaccel::rdaccel)
 
 if(RDACCEL_INSTALL AND RDACCEL_INSTALL_TOOLS)
-  set(RDA_TOOLS rdaccel_serve rdaccel_view rdaccel_record rdaccel_play rdaccel_bench rdaccel_netsim)
-  if(APPLE)
-    list(APPEND RDA_TOOLS rdaccel_remote)
-  endif()
+  set(RDA_TOOLS rdaccel_serve rdaccel_view rdaccel_record rdaccel_play rdaccel_bench rdaccel_netsim rdaccel_remote)
   # Find a shared librdaccel next to them: <prefix>/bin -> <prefix>/lib.
-  if(APPLE)
-    set(RDA_TOOL_RPATH "@loader_path/../${CMAKE_INSTALL_LIBDIR}")
-  else()
-    set(RDA_TOOL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
-  endif()
+  set(RDA_TOOL_RPATH "@loader_path/../${CMAKE_INSTALL_LIBDIR}")
   set_target_properties(${RDA_TOOLS} PROPERTIES INSTALL_RPATH "${RDA_TOOL_RPATH}")
   install(TARGETS ${RDA_TOOLS} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()

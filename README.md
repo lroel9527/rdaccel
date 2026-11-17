@@ -2,7 +2,7 @@
 
 面向极低带宽的远程桌面加速库。画面按区域分类传输：没变的区域不发，平移的区域只发拷贝指令，以前出现过的内容从接收端缓存贴回，文字和界面走无损调色板层，只有视频类区域交给硬件 HEVC 编码（macOS VideoToolbox，Linux FFmpeg；本机 HEVC 太慢时可回退到 H.264）。
 
-当前版本 1.13.0。[rdmachine](https://github.com/lroel9527/rdmachine)（对标 NoMachine 的 Mac 远程桌面）就建在 rdaccel 之上：画面、光标、输入和传输由 rdaccel 负责，登录、会话和界面由 rdmachine 负责。
+当前版本 2.0.0（只支持 macOS，只走 UDP，只用 HEVC；Linux、TCP 传输和 H.264 在 2.0.0 删掉了）。[rdmachine](https://github.com/lroel9527/rdmachine)（对标 NoMachine 的 Mac 远程桌面）就建在 rdaccel 之上：画面、光标、输入和传输由 rdaccel 负责，登录、会话和界面由 rdmachine 负责。
 
 - 静止桌面几十 kbps，打字约 50 kbps，滚动和拖窗 1 Mbps 以内，文字保持无损（[评测](docs/benchmarks.md)）
 - 文字模式（`text_mode`）：体验和普通模式一样，流量更少。静止和打字省 3–7 倍（文字减色后用专门的编码），滚动和拖窗省三到六成（[架构](docs/architecture.md#文字模式)）
@@ -10,7 +10,7 @@
 - 光标走独立通道，链路占满时指针照样跟手
 - 声音（1.13）：macOS 14.2 的系统声音（Process Tap，可让被控端本机不出声），Opus 低延迟编码，安静时一个包都不发，走不重传的数据报、自适应抖动缓冲和时钟漂移修正；可选的播放器
 - XChaCha20-Poly1305 加密（密钥由应用提供）、连接状态、认证钩子、输入事件和应用消息通道
-- 稳定的 C ABI，加一层只有头文件的 C++ 包装；支持 macOS 14.2+（Apple Silicon 和 Intel）和 Linux（X11、Wayland）
+- 稳定的 C ABI，加一层只有头文件的 C++ 包装；只支持 macOS 14.2+（Apple Silicon 和 Intel）
 
 ## 用法
 
@@ -25,7 +25,7 @@ rdaccel 是给其他程序集成的库，只有一个 CMake 目标 `rdaccel::rda
 | --- | --- |
 | `rdaccel::Host` | 发送端：自己采集主屏（`StartScreenCapture`），或接收应用送来的画面（`SubmitFrame`）；做变化检测、HEVC 编码、发送 |
 | `rdaccel::Viewer` | 接收端：解码，通过回调把 BGRA 画面和变化区域交给应用自己绘制；`SendInput` 回传输入事件 |
-| `rdaccel::Transport` | 传输接口。自带进程内管道、TCP 和带拥塞控制的 UDP，应用可以实现自己的（QUIC、WebRTC、中继服务器等） |
+| `rdaccel::Transport` | 传输接口。自带进程内管道和带拥塞控制的 UDP，应用可以实现自己的（QUIC、WebRTC、中继服务器等） |
 | `CursorImage` / `CursorState` / `DrawCursor` | 光标单独传输，接收端自己画（`ViewerHandlers::on_cursor`） |
 | `CreateRecordingTransport` / `ReadRecording` | 录制和回放码流（`.rdstream`），用于对比码率和跨平台互通测试 |
 | `RenderTestPattern` | 确定性的合成桌面，没有真实屏幕时用来测试集成 |
@@ -53,9 +53,9 @@ host.StartScreenCapture();  // 或者每帧调用 host.SubmitFrame(...)
 # 1) 安装后 find_package（或 pkg-config）
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 cmake --install build --prefix /opt/rdaccel
-# CMake：find_package(rdaccel 1.11 REQUIRED) + target_link_libraries(app PRIVATE rdaccel::rdaccel)
+# CMake：find_package(rdaccel 2.0 REQUIRED) + target_link_libraries(app PRIVATE rdaccel::rdaccel)
 # 其他构建系统：PKG_CONFIG_PATH=/opt/rdaccel/lib/pkgconfig pkg-config --cflags --libs rdaccel
-#   （静态库加 --static，会带上 FFmpeg/X11 等依赖）
+#   （静态库加 --static，会带上系统框架等依赖）
 
 # 2) 作为子目录：add_subdirectory(rdaccel)，此时默认不编译测试和示例
 
@@ -82,7 +82,7 @@ KEY=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')         # 32 字节密钥，�
 | [架构](docs/architecture.md) | 一帧怎么走、分流的四条路、传输和拥塞控制、码率控制、光标、代码布局、配置开关 |
 | [设计背景与范围](docs/design.md) | 目标、为什么分层混合编码、库的边界和接口约定、参考文献 |
 | [评测](docs/benchmarks.md) | 分区编码、视频区域、模拟网络、渐进首帧、光标通道、Mac 弱网的实测数字和复现命令 |
-| [构建与测试](docs/building.md) | macOS / Linux 构建、示例工具、码流互解、sanitizer、fuzz、ABI 检查 |
+| [构建与测试](docs/building.md) | macOS 构建、示例工具、sanitizer、fuzz、ABI 检查 |
 | [Mac 复测](docs/mac_retest.md) | 真机复测清单和静音脚本 |
 | [发版](docs/releasing.md) | 发版步骤和兼容性约定 |
 
@@ -90,9 +90,6 @@ KEY=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')         # 32 字节密钥，�
 
 ```bash
 # macOS 14.2+（Apple Silicon 或 Intel）：Xcode 命令行工具 + CMake
-# Linux：sudo apt-get install cmake g++ libavcodec-dev libavutil-dev libswscale-dev \
-#          libx11-dev libxext-dev libxfixes-dev libxrandr-dev libxtst-dev zlib1g-dev \
-#          libpipewire-0.3-dev libglib2.0-dev   # 后两个用于 Wayland，可省
 cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build -j
 ctest --test-dir build
 ```
@@ -105,7 +102,7 @@ ctest --test-dir build
 include/rdaccel/   公开 API（唯一会被安装的头文件）
 src/               公开 API 的实现
 core/              内部：分块比对、编解码、会话、码率控制、传输
-platform/          内部：mac/（ScreenCaptureKit、VideoToolbox）、linux/（X11、Wayland/PipeWire、FFmpeg）
+platform/          内部：mac/（ScreenCaptureKit、VideoToolbox、Core Audio）
 examples/          只用公开 API 的示例和工具
 docs/              文档
 tests/ fuzz/       单元测试、libFuzzer 目标
@@ -115,4 +112,4 @@ cmake/             find_package 配置、pkg-config 模板、共享库导出列�
 
 ## 许可
 
-[Apache License 2.0](LICENSE)。Linux 版链接 FFmpeg，可能用到 x265（GPL）；带 x265 的二进制需按 GPL 分发，见 [NOTICE](NOTICE)。
+[Apache License 2.0](LICENSE)。第三方组件见 [NOTICE](NOTICE)。

@@ -133,7 +133,7 @@ void ViewerSession::EnsureScreen(int32_t w, int32_t h) {
   if (width_ > 0 && (w != width_ || h != height_)) {
     // A new stream at another size: everything decoded so far is stale.
     if (decoder_factory_) {
-      if (auto dec = decoder_factory_(codec_)) decoder_ = std::move(dec);
+      if (auto dec = decoder_factory_()) decoder_ = std::move(dec);
     }
     region_dec_.clear();
     cache_.clear();
@@ -145,21 +145,6 @@ void ViewerSession::EnsureScreen(int32_t w, int32_t h) {
   height_ = h;
   screen_.assign(static_cast<size_t>(w) * h * 4, 0);
   have_keyframe_ = false;
-}
-
-void ViewerSession::SwitchCodec(codec::VideoCodec c) {
-  if (c == codec_ || !decoder_factory_) return;
-  auto dec = decoder_factory_(c);
-  if (!dec) return;  // keep what there is; its errors ask for keyframes
-  decoder_ = std::move(dec);
-  codec_ = c;
-  {
-    std::lock_guard<std::mutex> l(name_mu_);
-    decoder_name_ = decoder_->name();
-  }
-  // The host started a new session: its video areas start over too (each
-  // with a keyframe, which makes its decoder).
-  region_dec_.clear();
 }
 
 namespace {
@@ -184,7 +169,6 @@ void CopyRegion(const tile::ImageView& src, Rect r, uint8_t* dst, int32_t dst_st
 
 void ViewerSession::Handle(proto::Message&& m) {
   if (auto* hello = std::get_if<proto::Hello>(&m)) {
-    SwitchCodec(hello->codec);
     EnsureScreen(static_cast<int32_t>(hello->width), static_cast<int32_t>(hello->height));
     HelloFn fn;
     {
@@ -298,11 +282,6 @@ void ViewerSession::Handle(proto::Message&& m) {
   }
   const proto::VideoData* video =
       !videos_.empty() && videos_.front().stream == 0 ? &videos_.front() : nullptr;
-  if (ok && video && video->keyframe && !video->parameter_sets.empty()) {
-    // The codec the keyframe really is wins over the last Hello (one that
-    // came late, or not at all).
-    if (auto c = codec::DetectCodec(video->parameter_sets)) SwitchCodec(*c);
-  }
   if (ok && video) {
     // Parameter sets come with keyframes only; decoders keep them as state.
     ok = decoder_->Decode(video->parameter_sets, video->nal_data, capture_time,
@@ -369,7 +348,7 @@ bool ViewerSession::DecodeRegion(const proto::VideoData& v, uint64_t frame_id,
   if (v.keyframe) {
     // A keyframe starts the stream over: the area may have a new size.
     if (!decoder_factory_) return false;
-    auto dec = decoder_factory_(codec::DetectCodec(v.parameter_sets).value_or(codec_));
+    auto dec = decoder_factory_();
     if (!dec) return false;
     if (region_dec_.size() >= kMaxRegionDecoders && it == region_dec_.end()) {
       auto oldest = std::min_element(region_dec_.begin(), region_dec_.end(),

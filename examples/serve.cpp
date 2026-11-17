@@ -2,14 +2,13 @@
 // (rdaccel_view) and streams the screen, or the built-in test pattern, to
 // it. Prints one line of statistics per second.
 //
-//   rdaccel_serve [--udp=PORT | --tcp=PORT] [--source=screen|synthetic] [--seconds=0]
+//   rdaccel_serve [--udp=PORT] [--source=screen|synthetic] [--seconds=0]
 //                 (--key=<64 hex digits> | --plaintext)
 //                 [--size=WxH] [--fps=60] [--bitrate=8000000] [--display=0] [--inject] [--once]
 //                 [--audio[=system|test]] [--mute-local]
 //   rdaccel_serve --list-displays
 //
-// UDP (the default, port 7300) has congestion control and adaptive bitrate;
-// TCP sends at the configured bitrate. When a viewer leaves, the host waits
+// UDP (port 7300) has congestion control and adaptive bitrate. When a viewer leaves, the host waits
 // for the next one on the same port (--once: exit instead). --size is the test pattern's size, or
 // with --source=screen the size the screen is captured at (default: native). --seconds=0 runs until the process is
 // killed (or, with --once, until the viewer disconnects). --inject plays the viewer's mouse and
@@ -32,9 +31,7 @@
 
 #include "args.h"
 
-#ifdef __APPLE__
 #include <CoreFoundation/CoreFoundation.h>
-#endif
 
 namespace {
 
@@ -45,7 +42,6 @@ std::atomic<bool> g_stop{false};
 // input source before typing text). An application with an event loop of its
 // own (AppKit, dispatch_main, CFRunLoopRun) has nothing to do for that.
 void WaitUntil(std::chrono::steady_clock::time_point t) {
-#ifdef __APPLE__
   static CFRunLoopTimerRef keep_alive = [] {
     // A run loop with no source returns at once instead of waiting.
     CFRunLoopTimerRef timer = CFRunLoopTimerCreate(nullptr, CFAbsoluteTimeGetCurrent() + 1e9, 0, 0, 0,
@@ -57,9 +53,6 @@ void WaitUntil(std::chrono::steady_clock::time_point t) {
   for (auto now = std::chrono::steady_clock::now(); now < t; now = std::chrono::steady_clock::now()) {
     CFRunLoopRunInMode(kCFRunLoopDefaultMode, std::chrono::duration<double>(t - now).count(), true);
   }
-#else
-  std::this_thread::sleep_until(t);
-#endif
 }
 
 void PrintLine(const rdaccel::HostStats& now, const rdaccel::HostStats& before, double secs) {
@@ -90,8 +83,7 @@ int main(int argc, char** argv) {
     }
     return 0;
   }
-  const bool tcp = args.has("tcp");
-  const auto port = static_cast<uint16_t>(args.num(tcp ? "tcp" : "udp", 7300));
+  const auto port = static_cast<uint16_t>(args.num("udp", 7300));
   const std::string source = args.str("source", "screen");
   const double seconds = args.real("seconds", 0);
   const int fps = static_cast<int>(args.num("fps", 60));
@@ -100,12 +92,12 @@ int main(int argc, char** argv) {
   std::signal(SIGINT, [](int) { g_stop = true; });
   std::signal(SIGTERM, [](int) { g_stop = true; });
 
-  std::printf("waiting for a viewer on %s port %u ...\n", tcp ? "TCP" : "UDP", port);
+  std::printf("waiting for a viewer on UDP port %u ...\n", port);
   std::fflush(stdout);
   std::string err;
-  // Both return at once; the state handler below reports when the viewer
-  // has connected.
-  auto transport = tcp ? rdaccel::BindTcp(port, &err) : rdaccel::BindUdp(port, &err);
+  // Returns at once; the state handler below reports when the viewer has
+  // connected.
+  auto transport = rdaccel::BindUdp(port, &err);
   if (!transport) {
     std::fprintf(stderr, "%s\n", err.c_str());
     return 1;

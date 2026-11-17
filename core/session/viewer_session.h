@@ -58,14 +58,13 @@ class ViewerSession {
   void SetFrameHandler(FrameFn fn);
   using CursorFn = std::function<void(const CursorState&)>;
   void SetCursorHandler(CursorFn fn);
-  // Creates decoders for `codec`: for video region streams (see
-  // proto::VideoData::stream), and for the main stream when its size or codec
-  // changes (a Hello naming another codec, or a keyframe whose parameter sets
-  // are of another one). Without one, region pictures count as decode errors
-  // and the decoder given to the constructor is kept.
-  using DecoderFactory = std::function<std::unique_ptr<codec::IHevcDecoder>(codec::VideoCodec codec)>;
+  // Creates decoders: for video region streams (see
+  // proto::VideoData::stream), and for the main stream when its size
+  // changes. Without one, region pictures count as decode errors and the
+  // decoder given to the constructor is kept.
+  using DecoderFactory = std::function<std::unique_ptr<codec::IHevcDecoder>()>;
   void SetDecoderFactory(DecoderFactory fn) { decoder_factory_ = std::move(fn); }
-  // The decoder in use now (it changes with the codec). Any thread.
+  // The decoder in use now. Any thread.
   std::string decoder_name() const {
     std::lock_guard<std::mutex> l(name_mu_);
     return decoder_name_;
@@ -82,8 +81,6 @@ class ViewerSession {
  private:
   void Handle(proto::Message&& m);
   void EnsureScreen(int32_t w, int32_t h);
-  // The stream is now of `c`: new decoders (with a factory).
-  void SwitchCodec(codec::VideoCodec c);
   void DecodeLoop();
   void Parse(transport::Channel ch, std::span<const uint8_t> bytes);
 
@@ -99,7 +96,6 @@ class ViewerSession {
   std::unique_ptr<codec::IHevcDecoder> decoder_;
   mutable std::mutex name_mu_;
   std::string decoder_name_;  // decoder_->name(), under name_mu_
-  codec::VideoCodec codec_ = codec::VideoCodec::kHevc;  // what decoder_ decodes
   DecoderFactory decoder_factory_;
   struct RegionDecoder {
     std::unique_ptr<codec::IHevcDecoder> dec;

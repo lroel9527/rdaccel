@@ -1,5 +1,7 @@
 # Mac 复测清单
 
+> **2.0.0 起**：rdaccel 只支持 macOS、只走 UDP（没有 TCP 传输）、只用 HEVC（没有 H.264）。下文里提到 Linux、TCP、H.264 的地方是 1.x 的情况，留作记录，没有逐段改写。
+
 新功能都是在云端（Linux x265 + GitHub 的 macOS CI，VideoToolbox 软件编码）开发和验证的。这份清单列出必须在真实 Mac（Apple Silicon，VideoToolbox 硬件编解码）上再确认的项目：大部分由一键脚本自动跑，少数要人看一眼。
 
 ## 静音

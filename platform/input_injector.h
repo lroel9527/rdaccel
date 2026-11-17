@@ -1,6 +1,6 @@
 #pragma once
 
-// Plays viewer input into the host OS: XTest on Linux, CGEvent on macOS.
+// Plays viewer input into the host OS (CGEvent).
 
 #include <cstdint>
 #include <string>

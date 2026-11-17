@@ -41,7 +41,7 @@ MsgType Write(ByteWriter& w, const Hello& m) {
   w.varint(m.version);
   w.varint(m.width);
   w.varint(m.height);
-  w.u8(static_cast<uint8_t>(m.codec));
+  w.u8(kHelloCodecHevc);
   w.varint(m.min_version);
   w.varint(m.caps);
   return MsgType::kHello;
@@ -176,17 +176,14 @@ std::optional<Message> ReadHello(ByteReader& r) {
   if (!(r.varint32(m.version) && r.varint32(m.width) && r.varint32(m.height) && r.u8(codec))) {
     return std::nullopt;
   }
-  // H.264 (1.11) only goes to viewers that said kCapH264; older viewers
-  // fail here, but are never sent it.
-  if (codec != static_cast<uint8_t>(VideoCodec::kHevc) && codec != static_cast<uint8_t>(VideoCodec::kH264)) {
-    return std::nullopt;
-  }
+  // Only HEVC: a host of 1.11 to 1.13 sends H.264 (1) only to a viewer that
+  // said it decodes it, which this one never does.
+  if (codec != kHelloCodecHevc) return std::nullopt;
   // A screen size a viewer can allocate (also bounds what a hostile host
   // can make it do).
   if (m.width == 0 || m.height == 0 || m.width > kMaxScreenSide || m.height > kMaxScreenSide) {
     return std::nullopt;
   }
-  m.codec = static_cast<VideoCodec>(codec);
   // Version 4 fields; older hosts serve only their own version.
   m.min_version = m.version;
   m.caps = 0;

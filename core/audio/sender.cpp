@@ -188,7 +188,7 @@ void Sender::Push(const float* pcm, size_t frames, uint64_t time_us) {
 void Sender::AdaptToPath() {
   // A slow path: what the sound needs on the wire against a quarter of the
   // estimate (none: as the profile says; it is 0 until the transport trusts
-  // its estimate, and TCP has none). Only on evidence that the path is full
+  // its estimate, and a pipe has none). Only on evidence that the path is full
   // now (a queue at the bottleneck, or loss): while the sound is the only
   // traffic the estimate measures little more than the sound itself (its
   // samples are application limited), and a cap taken from it would never

@@ -3,12 +3,11 @@
 // statistics per second; --dump writes the last picture (with the cursor
 // drawn on it) as a PPM file at the end.
 //
-//   rdaccel_view HOST [--udp=PORT | --tcp=PORT] [--seconds=10] [--dump=last.ppm] [--keyframe-at=S]
+//   rdaccel_view HOST [--udp=PORT] [--seconds=10] [--dump=last.ppm] [--keyframe-at=S]
 //                (--key=<64 hex digits> | --plaintext)   (as on the serving side)
 //                [--audio [--audio-device]]
 //
-// The protocol of both ends must match: --udp with --udp, --tcp with --tcp.
-// --audio takes the host's sound (UDP only) and plays it on a null device:
+// --audio takes the host's sound and plays it on a null device:
 // read in real time and thrown away, so the statistics show what came; only
 // --audio-device plays it on this computer's default output device.
 // Uses only the public API; a GUI application would draw the picture from
@@ -31,8 +30,7 @@
 int main(int argc, char** argv) {
   rdaccel::examples::Args args(argc, argv);
   const std::string host_name = args.positional().empty() ? "127.0.0.1" : args.positional();
-  const bool tcp = args.has("tcp");
-  const auto port = static_cast<uint16_t>(args.num(tcp ? "tcp" : "udp", 7300));
+  const auto port = static_cast<uint16_t>(args.num("udp", 7300));
   const double seconds = args.real("seconds", 10);
   const std::string dump = args.str("dump");
   // Ask the host for a keyframe after this many seconds (0 = never), e.g. to
@@ -48,7 +46,7 @@ int main(int argc, char** argv) {
   }
 
   std::string err;
-  auto transport = tcp ? rdaccel::ConnectTcp(host_name, port, &err) : rdaccel::ConnectUdp(host_name, port, &err);
+  auto transport = rdaccel::ConnectUdp(host_name, port, &err);
   if (!transport) {
     std::fprintf(stderr, "%s\n", err.c_str());
     return 1;

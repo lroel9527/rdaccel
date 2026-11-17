@@ -2,7 +2,7 @@
 
 // How a Host and a Viewer talk to each other.
 //
-// The library ships an in-process pipe (both ends in one process), TCP, and
+// The library ships an in-process pipe (both ends in one process) and
 // UDP with loss recovery and congestion control (the one to use on real
 // networks). Applications can plug in their own (QUIC, WebRTC data channels,
 // a relay server, ...) by implementing Transport. None of them encrypts or
@@ -46,8 +46,7 @@ struct TransportStats {
   uint32_t rtt_us = 0;         // smoothed round-trip time; 0 = unknown
   uint64_t queued_bytes = 0;   // accepted by Send() but not yet on the wire (not counting kBulk)
   // kBulk's share of what is accepted but not on the wire, when the
-  // transport keeps its own queue (UDP); bulk_known is false otherwise (TCP
-  // writes to the socket at once).
+  // transport keeps its own queue (UDP); bulk_known is false otherwise.
   uint64_t bulk_queued_bytes = 0;
   bool bulk_known = false;
   uint64_t bytes_in_flight = 0;
@@ -91,7 +90,7 @@ class Transport {
   virtual void Close() = 0;
 
   // Fills `out` and returns true if this transport measures the path. The
-  // default (and the in-process pipe and TCP) returns false; the Host then
+  // default (and the in-process pipe) returns false; the Host then
   // sends at the configured bitrate.
   // False while a listening transport does not know its peer yet (nothing
   // sent would arrive); the Host then holds frames instead of encoding them.
@@ -130,7 +129,7 @@ class Transport {
   }
 
   // For a host-side transport whose peer is whoever comes first (BindUdp,
-  // BindTcp): once that peer has gone, closes this transport and returns a
+  // UdpFromFd): once that peer has gone, closes this transport and returns a
   // fresh one on the same port that waits for the next peer. The host calls
   // it to serve viewers one after another. Null (with `error`) when the
   // peer is fixed (the default); this transport may be closed even then.
@@ -142,13 +141,6 @@ class Transport {
 
 // Two connected in-process endpoints: what one sends, the other receives.
 std::pair<std::unique_ptr<Transport>, std::unique_ptr<Transport>> CreateLocalPipe();
-
-// TCP. Both return null and set `error` on failure.
-std::unique_ptr<Transport> ConnectTcp(const std::string& host, uint16_t port,
-                                      std::string* error = nullptr);
-// Host side without blocking: listens on `port` (IPv4 and IPv6) and returns
-// at once; the first viewer to connect becomes the peer.
-std::unique_ptr<Transport> BindTcp(uint16_t port, std::string* error = nullptr);
 
 // UDP with its own loss recovery (selective acknowledgements and resends,
 // one ordered stream per channel, so lost video never delays input) and

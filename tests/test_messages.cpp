@@ -35,7 +35,7 @@ std::vector<Message> SampleMessages() {
   area.y = -2;
 
   return {
-      Hello{kProtocolVersion, 3840, 2160, VideoCodec::kHevc},
+      Hello{kProtocolVersion, 3840, 2160},
       area,
       FrameBegin{42, 123456789},
       video,
@@ -138,7 +138,7 @@ TEST(Messages, HandshakeAndSessionMessagesRoundTrip) {
   vh.auth_token = {1, 2, 3};
   AppMessage am{0x10001, std::vector<uint8_t>(100000, 7)};
   const std::vector<Message> in = {vh, Ping{123456}, Goodbye{GoodbyeReason::kIncompatible}, am, Welcome{},
-                                   Hello{kProtocolVersion, 640, 360, VideoCodec::kHevc, 4, kCapsAll}};
+                                   Hello{kProtocolVersion, 640, 360, 4, kCapsAll}};
   std::vector<uint8_t> bytes;
   for (const auto& m : in) EncodeTo(m, bytes);
   StreamParser p;
@@ -175,31 +175,30 @@ TEST(Messages, CursorShapeSizeMustMatch) {
   EXPECT_FALSE(p.error().empty());
 }
 
-TEST(Messages, H264HelloAndCapabilityRoundTrip) {
-  // 1.11: codec 1 is H.264, for viewers that said kCapH264.
-  const Hello h{kProtocolVersion, 2880, 1800, VideoCodec::kH264, kMinViewerVersion, kCapsAll};
+TEST(Messages, HelloSaysHevcAndNothingElseIsTaken) {
+  // The codec byte is 2 (HEVC). 1 was H.264 (1.11 to 1.13): a host of those
+  // versions sends it only to a viewer that said it decodes it, which a
+  // viewer since 2.0 never does.
+  const Hello h{kProtocolVersion, 2880, 1800, kMinViewerVersion, kCapsAll};
   auto bytes = Encode(h);
-  EXPECT_EQ(bytes[7], 1) << "type, length, version, width (2), height (2), then the codec";
-  ViewerHello vh;
-  vh.caps = kCapsAll | kCapH264;
-  EncodeTo(vh, bytes);
+  EXPECT_EQ(bytes[7], 2) << "type, length, version, width (2), height (2), then the codec";
   StreamParser p;
   p.Append(bytes);
   auto got = p.Next();
   ASSERT_TRUE(got.has_value()) << p.error();
   EXPECT_EQ(std::get<Hello>(*got), h);
-  EXPECT_EQ(std::get<Hello>(*got).codec, VideoCodec::kH264);
-  got = p.Next();
-  ASSERT_TRUE(got.has_value()) << p.error();
-  EXPECT_EQ(std::get<ViewerHello>(*got).caps & kCapH264, kCapH264);
-  // Not something every viewer has.
-  EXPECT_EQ(kCapsAll & kCapH264, 0u);
-  EXPECT_EQ(kCapH264 & (kCapMessages | kCapTextInput | kCapContextTiles | kCapContextTiles64 | kCapBulk), 0u);
+  bytes[7] = 1;
+  StreamParser h264;
+  h264.Append(bytes);
+  EXPECT_FALSE(h264.Next().has_value());
+  // The bit that said "decodes H.264" is not given to anything else.
+  EXPECT_EQ(kCapsAll & 32u, 0u);
+  EXPECT_NE(kCapAudio, 32u);
 }
 
 TEST(Messages, UnknownCodecIsRejected) {
   for (uint8_t codec : {0, 3, 255}) {
-    auto bytes = Encode(Hello{kProtocolVersion, 1, 1, VideoCodec::kHevc});
+    auto bytes = Encode(Hello{kProtocolVersion, 1, 1});
     bytes[5] = codec;  // type, length, version, width, height, then the codec
     StreamParser p;
     p.Append(bytes);
@@ -243,7 +242,7 @@ TEST(Messages, HelloScreenSizeIsBounded) {
                           std::tuple{0u, 360u, false}, std::tuple{640u, 0u, false},
                           std::tuple{kMaxScreenSide + 1, 360u, false}, std::tuple{640u, 1u << 30, false}}) {
     StreamParser p;
-    p.Append(Encode(Hello{kProtocolVersion, w, h, VideoCodec::kHevc}));
+    p.Append(Encode(Hello{kProtocolVersion, w, h}));
     EXPECT_EQ(p.Next().has_value(), ok) << w << "x" << h;
   }
 }

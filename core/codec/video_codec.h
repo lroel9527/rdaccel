@@ -1,11 +1,7 @@
 #pragma once
 
-// Platform-neutral video encoder/decoder interfaces (HEVC, and H.264 as the
-// fallback where the platform has it; the Hevc in the names is historical).
-// Implementations:
-//   * macOS: VideoToolbox, HEVC and H.264 (platform/mac/video_vt.mm)
-//   * Linux: FFmpeg, HEVC only: hardware first (NVENC), x265 otherwise
-//     (platform/linux/video_ffmpeg.cpp)
+// HEVC encoder/decoder interfaces. Implementation: VideoToolbox
+// (platform/mac/video_vt.mm); tests plug in fakes.
 
 #include <cstdint>
 #include <functional>
@@ -28,22 +24,14 @@ struct EncoderConfig {
   // Without a floor, low-latency rate control keeps spending its budget
   // sharpening static content far beyond what anyone can see.
   int32_t min_qp = 0;
-  VideoCodec codec = VideoCodec::kHevc;
-  // Only a hardware encoder (for measuring whether hardware HEVC is fast
-  // enough; see codec_choice.h): null rather than a software one.
-  bool hardware_only = false;
 };
 
 class IHevcEncoder {
  public:
   virtual ~IHevcEncoder() = default;
 
-  // Human-readable backend name, e.g. "VideoToolbox HEVC", "VideoToolbox
-  // H.264" or "libx265".
+  // Human-readable backend name, e.g. "VideoToolbox HEVC (low-latency)".
   virtual std::string name() const = 0;
-
-  // What it produces.
-  virtual VideoCodec codec() const { return VideoCodec::kHevc; }
 
   // Encodes one BGRA frame. Low-latency encoders return the picture right
   // away; nullopt means the encoder produced nothing for this input (e.g. it

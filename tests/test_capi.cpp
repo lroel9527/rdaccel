@@ -37,8 +37,8 @@ struct Counter {
 
 TEST(CApi, Version) {
   EXPECT_EQ(rda_version(), RDA_VERSION);
-  EXPECT_EQ(rda_version(), RDA_MAKE_VERSION(1, 13, 0));
-  EXPECT_STREQ(rda_version_string(), "1.13.0");
+  EXPECT_EQ(rda_version(), RDA_MAKE_VERSION(2, 0, 0));
+  EXPECT_STREQ(rda_version_string(), "2.0.0");
   EXPECT_GT(std::strlen(rda_platform_name()), 0u);
   EXPECT_STREQ(rda_status_str(RDA_ERR_TIMEOUT), "RDA_ERR_TIMEOUT");
   EXPECT_STREQ(rda_status_str(static_cast<rda_status>(-999)), "RDA_ERR_UNKNOWN");
@@ -49,7 +49,7 @@ TEST(CApi, RejectsBadArguments) {
   EXPECT_EQ(rda_pipe_create(nullptr, &b), RDA_ERR_INVALID_ARG);
   EXPECT_NE(std::string(rda_last_error()), "");
   EXPECT_EQ(rda_host_create(nullptr, nullptr, nullptr), RDA_ERR_INVALID_ARG);
-  EXPECT_EQ(rda_tcp_connect(nullptr, 1, &a), RDA_ERR_INVALID_ARG);
+  EXPECT_EQ(rda_udp_connect(nullptr, 1, &a), RDA_ERR_INVALID_ARG);
 
   // A bad config: the transport is still taken over (and freed).
   ASSERT_EQ(rda_pipe_create(&a, &b), RDA_OK);
@@ -65,15 +65,6 @@ TEST(CApi, RejectsBadArguments) {
   c.capture_width = 1279;
   c.capture_height = 720;
   EXPECT_EQ(rda_host_create(b, &c, &h), RDA_ERR_INVALID_ARG);
-
-  for (int32_t bad : {-1, 3}) {
-    ASSERT_EQ(rda_pipe_create(&a, &b), RDA_OK);
-    rda_transport_destroy(b);
-    rda_host_config_default(&c);
-    c.video_codec = bad;
-    EXPECT_EQ(rda_host_create(a, &c, &h), RDA_ERR_INVALID_ARG);
-    EXPECT_NE(std::string(rda_last_error()).find("video_codec"), std::string::npos);
-  }
 
   // Null objects are ignored by the void functions.
   rda_host_destroy(nullptr);
@@ -143,17 +134,6 @@ TEST(CApi, OlderShorterStructsAreAccepted) {
   EXPECT_EQ(rda_host_get_text_mode(h), 0);
   rda_host_destroy(h);
 
-  // A 1.10 program: its struct_size (216) covers its tail padding, which is
-  // reserved0 now, and ends before video_codec (1.11), which stays automatic.
-  EXPECT_EQ(full.video_codec, RDA_VIDEO_CODEC_AUTO);
-  EXPECT_EQ(offsetof(rda_host_config, video_codec), offsetof(rda_host_config, reserved0) + sizeof(int32_t));
-  rda_host_config v110 = full;
-  v110.struct_size = offsetof(rda_host_config, video_codec);
-  v110.video_codec = 77;  // beyond its struct: must be ignored (77 would be refused)
-  ASSERT_EQ(rda_pipe_create(&a, &b), RDA_OK);
-  rda_transport_destroy(b);
-  ASSERT_EQ(rda_host_create(a, &v110, &h), RDA_OK);
-  rda_host_destroy(h);
   rda_host_set_text_mode(nullptr, 1);  // no host: nothing happens
   EXPECT_EQ(rda_host_get_text_mode(nullptr), 0);
   full.text_mode = 1;
@@ -740,8 +720,6 @@ TEST(CApi, CallbacksSeeTheHandleCreateReturned) {
 
 TEST(CApi, KeyCodes) {
   EXPECT_EQ(rda_keycode_from_mac(0x00), 0x04u);
-  EXPECT_EQ(rda_keycode_to_evdev(0x04), 30u);
-  EXPECT_EQ(rda_keycode_from_evdev(125), 0xE3u);
   EXPECT_EQ(rda_keycode_to_mac(0xE3), 0x37u);
   EXPECT_EQ(rda_keycode_to_mac(0x46), RDA_KEYCODE_NONE);
 }
@@ -844,7 +822,6 @@ TEST(CApi, ListDisplaysAndPickOne) {
 TEST(CApi, KeyboardInputSources) {
   size_t count = 0;
   const rda_status s = rda_list_input_sources(nullptr, 0, &count);
-#if defined(__APPLE__)
   ASSERT_EQ(s, RDA_OK) << rda_last_error();
   ASSERT_GT(count, 0u);  // every Mac has at least one keyboard layout
   std::vector<rda_input_source_info> all(count);
@@ -868,9 +845,6 @@ TEST(CApi, KeyboardInputSources) {
   ASSERT_EQ(rda_current_input_source(reinterpret_cast<rda_input_source_info*>(&shorter)), RDA_OK);
   EXPECT_STREQ(shorter.id, cur.id);
   EXPECT_EQ(shorter.guard, 0xABCDu);
-#else
-  EXPECT_EQ(s, RDA_ERR_UNSUPPORTED);
-#endif
   EXPECT_EQ(rda_injector_select_input_source(nullptr, "x"), RDA_ERR_INVALID_ARG);
 }
 

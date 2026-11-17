@@ -264,11 +264,11 @@ TEST(AudioGate, ASlowPathLowersTheBitrateAndItComesBackInSteps) {
     if (seen.empty() || seen.back() != b) seen.push_back(b);
   }
   EXPECT_EQ(seen, (std::vector<int>{32'000, 48'000, 64'000, 96'000, 160'000}));
-  // No estimate (TCP, or not yet trusted): as the profile says, nothing changes.
-  Harness tcp;
-  tcp.sender.SetPath(0, 0);
-  tcp.Tone(2.0, -20, 1500);
-  EXPECT_EQ(tcp.sender.status().bitrate_bps, 160'000);
+  // No estimate (a pipe, or not yet trusted): as the profile says, nothing changes.
+  Harness unmeasured;
+  unmeasured.sender.SetPath(0, 0);
+  unmeasured.Tone(2.0, -20, 1500);
+  EXPECT_EQ(unmeasured.sender.status().bitrate_bps, 160'000);
 }
 
 TEST(AudioGate, DataSaverOnASlowPath) {
