@@ -72,4 +72,3 @@ KEY=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')    # 32 字节密钥，两边
 - **Sanitizer**：用 ASan + UBSan 构建并跑全部测试：`cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined" -DCMAKE_C_FLAGS="-fsanitize=address,undefined" -DCMAKE_OBJCXX_FLAGS="-fsanitize=address,undefined"`（`.mm` 文件用的是 `CMAKE_OBJCXX_FLAGS`）。
 - **fuzz**：libFuzzer 目标覆盖所有解析对端数据的代码，用 `-DRDACCEL_BUILD_FUZZERS=ON` 构建（Xcode 自带的 clang 没有 libFuzzer 运行库，要另装 LLVM），见 [fuzz/README.md](../fuzz/README.md)。
 - **ABI**：没有自动检查。1.x 的 `tools/abi_check.sh`（libabigail 的 abidiff，只读 Linux 的 ELF）在 3.0.0 删掉了；改 `include/rdaccel/rdaccel.h` 时自己对照“同一主版本内只加不改”的约定（见 [releasing.md](releasing.md)）。
-- **真机复测**：硬件编解码相关的项目要在真实 Mac 上确认，清单和静音脚本见 [mac_retest.md](mac_retest.md)。

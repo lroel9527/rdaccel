@@ -5,7 +5,6 @@
 .vscode/
 .idea/
 /bench/
-/retest-*/
 /Testing/
 # Test clips and what is made from them show a real screen: they stay where
 # they were recorded (docs/clips.md).
