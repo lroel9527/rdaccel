@@ -1,10 +1,8 @@
 # 构建与测试
 
-> **2.0.0 起**：rdaccel 只支持 macOS、只走 UDP（没有 TCP 传输）、只用 HEVC（没有 H.264）。下文里提到 Linux、TCP、H.264 的地方是 1.x 的情况，留作记录，没有逐段改写。
-
 ## macOS
 
-需要 macOS 14.2+（Apple Silicon 或 Intel）、Xcode 命令行工具和 CMake（`brew install cmake`）。默认部署目标是 14.2（声音采集用的 Process Tap 从 14.2 起才有），在新系统上构建的产物也能在 14.2 上运行；用到更新系统才有的接口时必须加 `@available` 分支，否则编译报错（`-Werror=unguarded-availability-new`）。
+rdaccel 只在 macOS 上构建和运行（Linux 支持在 2.0.0 删除了，别的系统上 CMake 配置时直接报错）。需要 macOS 14.2+（Apple Silicon 或 Intel）、Xcode 命令行工具和 CMake（`brew install cmake`）。默认部署目标是 14.2（声音采集用的 Process Tap 从 14.2 起才有），在新系统上构建的产物也能在 14.2 上运行；用到更新系统才有的接口时必须加 `@available` 分支，否则编译报错（`-Werror=unguarded-availability-new`）。
 
 第一次配置时 CMake 从 `downloads.xiph.org` 下载 Opus 1.6.1（声音的编解码，核对 SHA256 后静态编进库里）。离线构建：`-DFETCHCONTENT_SOURCE_DIR_OPUS=<解开的 opus-1.6.1 目录>`；不要声音：`-DRDACCEL_AUDIO=OFF`。
 
@@ -33,7 +31,7 @@ open build/bin/rdaccel_loopback.app --args --fps=60 --bitrate=8000000
 | 程序 | 作用 |
 | --- | --- |
 | `rdaccel_serve` / `rdaccel_view` | 跨两台机器：被控端采集主屏（`--list-displays`、`--display=N`、`--inject`），控制端解码并打印统计 |
-| `rdaccel_record` / `rdaccel_play` | 录制和回放码流（`.rdstream`），对比码率、跨平台互解 |
+| `rdaccel_record` / `rdaccel_play` | 录制和回放码流（`.rdstream`），对比码率 |
 | `rdaccel_bench` | 离线场景评测（idle、打字、滚动、拖窗、视频、暂停、指针） |
 | `rdaccel_netsim` | Host 和 Viewer 同进程，中间是模拟网络（限速、时延、丢包、带宽骤降） |
 | `rdaccel_loopback` | macOS 窗口程序，本机回环 |
@@ -49,7 +47,7 @@ KEY=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')    # 32 字节密钥，两边
 ./build/bin/rdaccel_view 10.0.0.2 --udp=7300 --key=$KEY --seconds=30 --dump=last.ppm   # 控制端
 ```
 
-要在窗口里看并直接操作对方（控制端是 Mac）：被控机加 `--inject`（macOS 被控机需要“辅助功能”权限），控制端换成
+要在窗口里看并直接操作对方：被控机加 `--inject`（需要“辅助功能”权限），控制端换成
 
 ```bash
 ./build/bin/rdaccel_remote 10.0.0.2 --udp=7300 --key=$KEY
@@ -71,7 +69,7 @@ KEY=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')    # 32 字节密钥，两边
 
 ## 其他检查
 
-- **Sanitizer**：在 Linux 上用 ASan + UBSan 构建并跑全部测试：`cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined" -DCMAKE_C_FLAGS="-fsanitize=address,undefined"`。
-- **fuzz**：libFuzzer 目标覆盖所有解析对端数据的代码，用 `-DRDACCEL_BUILD_FUZZERS=ON` 构建，见 [fuzz/README.md](../fuzz/README.md)。
-- **ABI**：`tools/abi_check.sh` 用 abidiff 对比上一版本的 C ABI，改了公开头文件就跑一次。
+- **Sanitizer**：用 ASan + UBSan 构建并跑全部测试：`cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined" -DCMAKE_C_FLAGS="-fsanitize=address,undefined" -DCMAKE_OBJCXX_FLAGS="-fsanitize=address,undefined"`（`.mm` 文件用的是 `CMAKE_OBJCXX_FLAGS`）。
+- **fuzz**：libFuzzer 目标覆盖所有解析对端数据的代码，用 `-DRDACCEL_BUILD_FUZZERS=ON` 构建（Xcode 自带的 clang 没有 libFuzzer 运行库，要另装 LLVM），见 [fuzz/README.md](../fuzz/README.md)。
+- **ABI**：没有自动检查。1.x 的 `tools/abi_check.sh`（libabigail 的 abidiff，只读 Linux 的 ELF）在 3.0.0 删掉了；改 `include/rdaccel/rdaccel.h` 时自己对照“同一主版本内只加不改”的约定（见 [releasing.md](releasing.md)）。
 - **真机复测**：硬件编解码相关的项目要在真实 Mac 上确认，清单和静音脚本见 [mac_retest.md](mac_retest.md)。

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Runs support_host and support_viewer against each other on this machine
-# (Linux: under an X server, e.g. xvfb-run). Checks that a paired viewer
+# Runs support_host and support_viewer against each other on this machine.
+# Checks that a paired viewer
 # gets pictures, the cursor and the host's session info, that the host
 # serves a second viewer after the first, and that a wrong pairing code is
 # refused.

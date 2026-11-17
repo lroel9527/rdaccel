@@ -16,7 +16,6 @@
 #
 # Everything goes to retest-<date>/ in the repository: one log per step and
 # summary.txt with the numbers to compare against docs/mac_retest.md.
-# Runs on Linux too with RDACCEL_RETEST_ANY_OS=1 (for checking the script).
 
 set -u
 cd "$(dirname "$0")/.."
@@ -33,10 +32,6 @@ for a in "$@"; do
   esac
 done
 
-if [[ "$(uname -s)" != "Darwin" && "${RDACCEL_RETEST_ANY_OS:-0}" != "1" ]]; then
-  echo "This script is for macOS (set RDACCEL_RETEST_ANY_OS=1 to run it elsewhere)." >&2
-  exit 2
-fi
 
 out="retest-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$out"

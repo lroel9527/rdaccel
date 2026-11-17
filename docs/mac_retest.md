@@ -1,8 +1,6 @@
 # Mac 复测清单
 
-> **2.0.0 起**：rdaccel 只支持 macOS、只走 UDP（没有 TCP 传输）、只用 HEVC（没有 H.264）。下文里提到 Linux、TCP、H.264 的地方是 1.x 的情况，留作记录，没有逐段改写。
-
-新功能都是在云端（Linux x265 + GitHub 的 macOS CI，VideoToolbox 软件编码）开发和验证的。这份清单列出必须在真实 Mac（Apple Silicon，VideoToolbox 硬件编解码）上再确认的项目：大部分由一键脚本自动跑，少数要人看一眼。
+这份清单列出必须在真实 Mac（Apple Silicon，VideoToolbox 硬件编解码）上确认的项目：大部分由一键脚本自动跑，少数要人看一眼。
 
 ## 静音
 
@@ -29,7 +27,7 @@ tools/mac_retest.sh --skip-screen   # 不采集真实屏幕（不需要屏幕录
 | `screen_scaled` | 抓屏缩到 1920×1200 时光标跟着缩 | 光标图像比 `screen_native` 小，比例和画面一致 |
 | `screen_static_keyframe` | 屏幕静止时接收端要关键帧（ScreenCaptureKit 这时不出帧） | `frames after the keyframe request:` 至少 1 |
 | `bench_all` | 各场景码率、编码耗时、PSNR，背景是 `screen_scaled` 那张真实截图 | 和 M1 的 Mac 结果同一量级（窗口拖动约 775 kbps / 41.5 dB，滚动约 736 kbps） |
-| `bench_video_regions` / `_noregions` | 视频区域：同时开两路 VideoToolbox 会话 | 开区域时码率和 `enc ms` 都明显更低（Linux 上 4652 → 1764 kbps，16.5 → 6.0 ms），没有报错 |
+| `bench_video_regions` / `_noregions` | 视频区域：同时开两路 VideoToolbox 会话 | 开区域时码率和 `enc ms` 都明显更低（1.x 在 Linux x265 上是 4652 → 1764 kbps，16.5 → 6.0 ms；Linux 支持已在 2.0.0 删除），没有报错 |
 | `bench_pointer` | 光标通道 | 稳态约 20 kbps，视频帧个位数 |
 | `netsim_drop` | 运行中把 VideoToolbox 码率从 4 Mbps 降到 1 Mbps | 延迟 p95 在 150 ms 以内，没有编码错误 |
 | `netsim_progressive_on` / `_off` | 渐进式首帧 | 开时 `first picture` 明显更早；`start:` 一行之后几秒内升到和关时相同的 PSNR |
@@ -41,7 +39,7 @@ tools/mac_retest.sh --skip-screen   # 不采集真实屏幕（不需要屏幕录
 
 1. **回环窗口里的光标**：`open build-retest/bin/rdaccel_loopback.app`。确认窗口里的光标位置对、大小和真实光标一致（Retina），窗口缩放后还对得上。看完关掉窗口。
 2. **多显示器**（如果有外接屏）：现在只按主屏算光标坐标。把鼠标移到副屏，回环窗口里的光标应该消失或停在边上，不能跳到奇怪的位置。
-3. **两台机器**：先生成一个密钥 `KEY=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')`，一台跑 `build-retest/bin/rdaccel_serve --key=$KEY`，另一台（Mac 或 Linux）跑 `rdaccel_view <ip> --seconds=20 --key=$KEY`（两边同一个密钥；不想加密就两边都加 `--plaintext`）。看每秒的 fps 和码率，`errors` 应该是 0。
+3. **两台机器**：先生成一个密钥 `KEY=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')`，一台跑 `build-retest/bin/rdaccel_serve --key=$KEY`，另一台 Mac 跑 `rdaccel_view <ip> --seconds=20 --key=$KEY`（两边同一个密钥；不想加密就两边都加 `--plaintext`）。看每秒的 fps 和码率，`errors` 应该是 0。
 
 ## 记录结果
 

@@ -173,7 +173,7 @@ int Eval(const Args& args) {
 
   auto [host_end, viewer_end] = transport::MakeLocalPipe();
   std::string err;
-  auto decoder = platform::CreateHevcDecoder(&err);
+  auto decoder = platform::CreateVideoDecoder(&err);
   if (!decoder) {
     std::fprintf(stderr, "decoder: %s\n", err.c_str());
     return 1;
@@ -297,7 +297,7 @@ int Eval(const Args& args) {
       H = clip.height();
       first_t = clip.time_us();
       codec::EncoderConfig ec{W, H, 60, bitrate, 24};
-      auto enc = platform::CreateHevcEncoder(ec, "", &err);
+      auto enc = platform::CreateVideoEncoder(ec, &err);
       if (!enc) {
         std::fprintf(stderr, "encoder: %s\n", err.c_str());
         return 1;
@@ -309,7 +309,7 @@ int Eval(const Args& args) {
       o.fps = 60;
       o.bitrate_bps = bitrate;
       o.region_encoder_factory = [](const codec::EncoderConfig& c, std::string* e) {
-        return platform::CreateHevcEncoder(c, "", e);
+        return platform::CreateVideoEncoder(c, e);
       };
       host = std::make_unique<session::HostSession>(host_end.get(), std::move(enc), W, H, o);
     } else if (clip.width() != W || clip.height() != H) {

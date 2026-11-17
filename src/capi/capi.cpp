@@ -667,7 +667,6 @@ class CallbackGate {
 
 struct rda_host {
   rda_host_config config;
-  std::string encoder;  // storage for config.encoder
   CallbackGate ready;   // before `host`, which runs the callbacks
   std::unique_ptr<rdacore::Host> host;
   ~rda_host() { ready.Open(); }  // let a waiting callback finish first
@@ -680,7 +679,6 @@ rdacore::HostConfig ToHostConfig(const rda_host_config& c) {
   o.fps = c.fps;
   o.bitrate_bps = c.bitrate_bps;
   o.min_qp = c.min_qp;
-  o.encoder = c.encoder ? c.encoder : "";
   o.capture_width = c.capture_width;
   o.capture_height = c.capture_height;
   o.capture_cursor = c.capture_cursor != 0;
@@ -758,7 +756,6 @@ void rda_host_config_default(rda_host_config* c) {
   c->fps = d.fps;
   c->bitrate_bps = d.bitrate_bps;
   c->min_qp = d.min_qp;
-  c->encoder = nullptr;
   c->capture_width = d.capture_width;
   c->capture_height = d.capture_height;
   c->capture_cursor = d.capture_cursor;
@@ -793,8 +790,6 @@ rda_status rda_host_create(rda_transport* transport, const rda_host_config* conf
   rda_host_config_default(&h->config);
   if (config && !ReadStruct(config, h->config)) return Fail(RDA_ERR_INVALID_ARG, "config needs struct_size");
   if (auto err = CheckHostConfig(h->config); !err.empty()) return Fail(RDA_ERR_INVALID_ARG, err);
-  if (h->config.encoder) h->encoder = h->config.encoder;
-  h->config.encoder = h->encoder.empty() ? nullptr : h->encoder.c_str();
 
   rda_host* raw = h.get();
   rdacore::HostConfig hc = ToHostConfig(h->config);

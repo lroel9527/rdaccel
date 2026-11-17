@@ -26,24 +26,11 @@ bool ListDisplays(std::vector<capture::DisplayInfo>& out, std::string* error);
 // failure.
 std::unique_ptr<capture::ICapturer> CreateScreenCapturer(std::string* error);
 
-// An HEVC encoder (VideoToolbox). `prefer` is ignored (it named a backend
-// on Linux).
-std::unique_ptr<codec::IHevcEncoder> CreateVideoEncoder(const codec::EncoderConfig& cfg,
-                                                        const std::string& prefer,
-                                                        std::string* error);
+// An HEVC encoder (VideoToolbox).
+std::unique_ptr<codec::IHevcEncoder> CreateVideoEncoder(const codec::EncoderConfig& cfg, std::string* error);
 
 // An HEVC decoder.
 std::unique_ptr<codec::IHevcDecoder> CreateVideoDecoder(std::string* error);
-
-// The older names.
-inline std::unique_ptr<codec::IHevcEncoder> CreateHevcEncoder(const codec::EncoderConfig& cfg,
-                                                              const std::string& prefer,
-                                                              std::string* error) {
-  return CreateVideoEncoder(cfg, prefer, error);
-}
-inline std::unique_ptr<codec::IHevcDecoder> CreateHevcDecoder(std::string* error) {
-  return CreateVideoDecoder(error);
-}
 
 // The system cursor, relative to display `display_index` (invisible while it
 // is on another display). Null with `error` set if it cannot be read (e.g. no

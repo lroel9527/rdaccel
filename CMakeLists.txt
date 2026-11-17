@@ -10,7 +10,7 @@ if(NOT DEFINED ENV{MACOSX_DEPLOYMENT_TARGET} AND
    (NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET OR CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS 14.2))
   set(CMAKE_OSX_DEPLOYMENT_TARGET "14.2" CACHE STRING "Minimum macOS version" FORCE)
 endif()
-project(rdaccel VERSION 2.0.0 LANGUAGES C CXX)
+project(rdaccel VERSION 3.0.0 LANGUAGES C CXX)
 # Pre-release label ("rc1"), empty for a release. The full version, as the
 # library, the packages and the tag (v1.0.0-rc1) show it, is
 # PROJECT_VERSION[-RDACCEL_PRERELEASE].

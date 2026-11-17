@@ -3,6 +3,16 @@
 版本号遵循语义化版本。从 1.0 起，同一主版本内 C ABI 只加不改（新函数、结构体末尾加字段），
 `find_package(rdaccel 1.0)` 接受任何 1.x。1.0 之前次版本号（0.x）变化时 C ABI 可能有不兼容改动。
 
+## 3.0.0
+
+2.0.0 的收尾，没有新功能。因为又去掉了一个公开字段，按“同一主版本内 C ABI 只加不改”的约定升主版本；码流和线上格式仍然没有变。
+
+- **去掉 `rda_host_config.encoder`**（C++：`HostConfig::encoder`）：它用来在 Linux 上指定编码后端，macOS 上一直被忽略。`rdaccel_record` 的 `--encoder` 选项也去掉了。用 2.0.0 编译的程序要重新编译（`rda_host_config` 的布局变了）。
+- **内部**：`platform::CreateVideoEncoder` 不再带后端名字；`CreateHevcEncoder` / `CreateHevcDecoder` 这两个旧名字去掉了。
+- **文档**：`docs/` 按 2.0 之后的样子改写了（只有 macOS、UDP、HEVC），不再只是在开头加一句说明；Linux 上测的评测数字留着，标明是 1.x 的。
+- **去掉 `tools/abi_check.sh`**：它靠 libabigail 的 abidiff，只能读 Linux 的 ELF，在 macOS 上跑不了。现在没有自动的 ABI 检查。
+- **和 1.13.0 的对比**（这台 Mac，Apple M6；补上 2.0.0 没有做的验证）：`rdaccel_bench --scenario=all --frames=300` 的 8 个场景里，码率、稳态码率、视频和无损两层的码率、PSNR、最低 PSNR、逐像素相同的比例，1.13.0 和这一版每一项都相同，各跑两遍结果也相同；`rdaccel_record --source=synthetic --frames=300` 录出的码流两版逐字节相同（651145 字节）。也就是说删掉 Linux、TCP 和 H.264 没有改变 HEVC 这条路径的任何输出。
+
 ## 2.0.0
 
 只给 Mac ↔ Mac 用（rdmachine 6.0.0 的范围收口）：把没有使用者的部分删掉。**C ABI 和 C++ 接口有不兼容的改动**，所以是新的主版本；码流和线上格式没有变，HEVC 的编码路径没有动。

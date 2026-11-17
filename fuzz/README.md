@@ -16,21 +16,33 @@ UBSan (see below); a crash leaves its reproducer in the working directory.
 | `fuzz_audio` | the sound receiver (1.13): any datagram as a sound packet, then reads as a player makes them, through the Opus decoder, the jitter buffer and the resampler |
 | `fuzz_recording` | `.rdstream` playback (what `rdaccel_play` and `rda_viewer_feed_recording()` read), through the platform's real HEVC decoder; seeded with real recordings |
 
-Seed inputs live in `fuzz/corpus/<target>/` (for `recording`: synthetic
-recordings at a few sizes and an Xvfb screen capture with the cursor, made
-with `rdaccel_record`). Pass them as a second, read-only corpus directory.
+Seed inputs live in `fuzz/corpus/<target>/`; the repository carries them
+for `reliable` only. For `recording`, make some with `rdaccel_record`
+(synthetic recordings at a few sizes, and a screen capture with the cursor).
+Pass them as a second, read-only corpus directory.
 
 Multi-channel targets read their input as `[channel][len][bytes]...`
 (`fuzz_input.h`), so the fuzzer can interleave channels.
 
-## Build and run (Linux, clang)
+## Build and run (macOS, LLVM clang)
+
+rdaccel builds on macOS only (2.0). The clang that comes with Xcode and the
+Command Line Tools has no libFuzzer runtime (`-fsanitize=fuzzer` fails at
+link time), so the fuzzers need an LLVM clang that ships it, such as
+Homebrew's. The `.mm` sources are compiled as Objective-C++, which has its
+own compiler and flags variables in CMake.
+
+These commands are the 1.x Linux ones carried over to macOS. They were not
+run when this file was updated for 2.0, so expect to adjust them.
 
 ```sh
-sudo apt-get install clang libclang-rt-18-dev   # libFuzzer runtime
+brew install llvm                               # clang with the libFuzzer runtime
+LLVM="$(brew --prefix llvm)/bin"
 F="-fsanitize=fuzzer-no-link,address,undefined"
-CC=clang CXX=clang++ cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+CC="$LLVM/clang" CXX="$LLVM/clang++" OBJCXX="$LLVM/clang++" \
+  cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DRDACCEL_BUILD_FUZZERS=ON -DRDACCEL_BUILD_TESTS=OFF -DRDACCEL_BUILD_EXAMPLES=OFF \
-  -DCMAKE_C_FLAGS="$F" -DCMAKE_CXX_FLAGS="$F"
+  -DCMAKE_C_FLAGS="$F" -DCMAKE_CXX_FLAGS="$F" -DCMAKE_OBJCXX_FLAGS="$F"
 cmake --build build-fuzz -j
 mkdir -p corpus/viewer && ./build-fuzz/fuzz/fuzz_viewer corpus/viewer -max_total_time=300
 ```

@@ -42,14 +42,14 @@ double Psnr(const tile::ImageView& a, const std::vector<uint8_t>& b) {
 
 }  // namespace
 
-// Encodes and decodes 30 synthetic frames with the encoder CreateVideoEncoder
-// picks for `prefer`; `used` gets its name.
-void RoundTrip(const std::string& prefer, std::string& used) {
+// Encodes and decodes 30 synthetic frames with the platform's encoder and
+// decoder; `used` gets the encoder's name.
+void RoundTrip(std::string& used) {
   constexpr int W = 640, H = 360, kFrames = 30;
   codec::EncoderConfig cfg{W, H, 30, 4'000'000};
   const size_t ps_count = 3;  // VPS, SPS, PPS
   std::string err;
-  auto enc = platform::CreateVideoEncoder(cfg, prefer, &err);
+  auto enc = platform::CreateVideoEncoder(cfg, &err);
   ASSERT_TRUE(enc) << err;
   used = enc->name();
   auto dec = platform::CreateVideoDecoder(&err);
@@ -91,7 +91,7 @@ void RoundTrip(const std::string& prefer, std::string& used) {
 
 TEST(PlatformCodec, EncodeDecodeRoundTrip) {
   std::string used;
-  RoundTrip("", used);
+  RoundTrip(used);
 }
 
 TEST(PlatformCursor, ReadsTheSystemCursor) {

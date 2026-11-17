@@ -18,7 +18,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   }
   data += sizeof(io::kStreamMagic);
   size -= sizeof(io::kStreamMagic);
-  auto dec = platform::CreateHevcDecoder(nullptr);
+  auto dec = platform::CreateVideoDecoder(nullptr);
   if (!dec) return 0;
   session::ViewerSession v(nullptr, std::move(dec));
   v.SetDecoderFactory([] { return platform::CreateVideoDecoder(nullptr); });

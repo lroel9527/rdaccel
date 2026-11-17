@@ -44,7 +44,7 @@ std::unique_ptr<Viewer> Viewer::Create(std::unique_ptr<Transport> transport,
                                        ViewerHandlers handlers, ViewerOptions options,
                                        std::string* error) {
   std::string err;
-  auto dec = platform::CreateHevcDecoder(&err);
+  auto dec = platform::CreateVideoDecoder(&err);
   if (!dec) {
     if (error) *error = err;
     return nullptr;

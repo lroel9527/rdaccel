@@ -37,8 +37,8 @@ struct Counter {
 
 TEST(CApi, Version) {
   EXPECT_EQ(rda_version(), RDA_VERSION);
-  EXPECT_EQ(rda_version(), RDA_MAKE_VERSION(2, 0, 0));
-  EXPECT_STREQ(rda_version_string(), "2.0.0");
+  EXPECT_EQ(rda_version(), RDA_MAKE_VERSION(3, 0, 0));
+  EXPECT_STREQ(rda_version_string(), "3.0.0");
   EXPECT_GT(std::strlen(rda_platform_name()), 0u);
   EXPECT_STREQ(rda_status_str(RDA_ERR_TIMEOUT), "RDA_ERR_TIMEOUT");
   EXPECT_STREQ(rda_status_str(static_cast<rda_status>(-999)), "RDA_ERR_UNKNOWN");
@@ -369,13 +369,12 @@ TEST(CApi, LogSinkGetsLibraryMessages) {
       },
       &sink, RDA_LOG_DEBUG);
 
-  // An encoder that cannot exist produces an error on the host.
+  // A frame encodes, or fails cleanly with a status that reaches on_error.
   rda_transport *a = nullptr, *b = nullptr;
   ASSERT_EQ(rda_pipe_create(&a, &b), RDA_OK);
   rda_transport_destroy(b);
   rda_host_config hc;
   rda_host_config_default(&hc);
-  hc.encoder = "no_such_encoder";
   struct Err {
     std::atomic<int> n{0};
     rda_status last = RDA_OK;
@@ -390,8 +389,6 @@ TEST(CApi, LogSinkGetsLibraryMessages) {
   ASSERT_EQ(rda_host_create(a, &hc, &h), RDA_OK);
   std::vector<uint8_t> px(static_cast<size_t>(kW) * kH * 4, 0);
   const rda_image img{px.data(), kW, kH, kW * 4};
-  // Linux falls back to the other backends, macOS ignores the name: either
-  // way the frame encodes or fails cleanly with a status.
   const rda_status s = rda_host_submit_frame(h, &img, rda_now_us(), nullptr, 0);
   EXPECT_TRUE(s == RDA_OK || s == RDA_ERR_CODEC || s == RDA_ERR_UNSUPPORTED) << rda_status_str(s);
   if (s != RDA_OK) {

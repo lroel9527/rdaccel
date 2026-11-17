@@ -26,9 +26,6 @@ struct HostConfig {
   // finer). The default saves about half the video bitrate on desktop content
   // for under 1 dB; 0 lets the encoder decide.
   int32_t min_qp = 24;
-  // HEVC encoder backend to try first. Empty picks automatically. macOS always
-  // uses VideoToolbox (the name is ignored since 2.0).
-  std::string encoder;
 
   // Only used by StartScreenCapture(). 0 = native resolution. Otherwise the
   // screen is captured scaled to this size (even numbers), and the cursor

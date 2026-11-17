@@ -42,7 +42,7 @@ extern "C" {
 
 /* ---- version ------------------------------------------------------------ */
 
-#define RDA_VERSION_MAJOR 2
+#define RDA_VERSION_MAJOR 3
 #define RDA_VERSION_MINOR 0
 #define RDA_VERSION_PATCH 0
 /* "rc1" and so on for a pre-release, "" for a release. rda_version() does
@@ -392,8 +392,6 @@ typedef struct rda_host_config {
   int32_t fps;             /* 60 */
   int64_t bitrate_bps;     /* 8 Mbps; the ceiling with adaptive bitrate */
   int32_t min_qp;          /* 24; video quality ceiling, 0 = encoder decides */
-  const char* encoder;     /* ignored: VideoToolbox is the only encoder (it
-                              named a backend on Linux before 2.0) */
 
   /* rda_host_start_capture() only */
   int32_t capture_width;   /* 0 = native; otherwise scaled (even numbers) */

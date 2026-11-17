@@ -1,7 +1,5 @@
 # 架构
 
-> **2.0.0 起**：rdaccel 只支持 macOS、只走 UDP（没有 TCP 传输）、只用 HEVC（没有 H.264）。下文里提到 Linux、TCP、H.264 的地方是 1.x 的情况，留作记录，没有逐段改写。
-
 rdaccel 是一个“分层混合编码”的远程桌面库：先判断哪些块根本不用发、哪些只是挪了位置或以前出现过，剩下的文字和界面块走 CPU 上的无损调色板层，只有像视频的区域才交给硬件 HEVC 编码器。为什么这样分层，见 [设计背景](design.md)。
 
 ## 一帧怎么走
@@ -10,7 +8,7 @@ rdaccel 是一个“分层混合编码”的远程桌面库：先判断哪些块
  被控端（Host）                                                控制端（Viewer）
  ┌──────────┐   ┌──────────┐   ┌──────────────────────────┐        ┌──────────────────────┐
  │ 采集     │──▶│ 分块比对 │──▶│ 分流（每个变化块选一条路）│        │ 解码线程             │
- │ SCK/X11  │   │ 64×64 块 │   │  1 平移  → 拷贝指令       │ surface│  拷贝 / 缓存 / 无损块 │
+ │ SCK      │   │ 64×64 块 │   │  1 平移  → 拷贝指令       │ surface│  拷贝 / 缓存 / 无损块 │
  │ 或应用喂 │   │ 哈希     │   │  2 缓存  → 贴回槽位       │──────▶│  → BGRA 画布          │
  └──────────┘   └──────────┘   │  3 少色  → 调色板无损     │        │  HEVC 硬解 → 视频块   │
                                │  4 其余  → HEVC（整屏或   │ video  │  按帧号合成后         │
@@ -20,14 +18,14 @@ rdaccel 是一个“分层混合编码”的远程桌面库：先判断哪些块
  └──────────┘         码率控制 ◀── 传输统计（带宽、RTT、队列）       └──────────────────────┘
 ```
 
-1. **采集**：macOS 用 ScreenCaptureKit（带系统脏区，不采集声音：声音走 Process Tap，见“声音”一节），Linux 用 X11 MIT-SHM，Wayland 下用 xdg-desktop-portal + PipeWire（带合成器脏区）；应用也可以自己调用 `SubmitFrame` 喂 BGRA 画面。光标不画进画面，单独采样。
+1. **采集**：用 ScreenCaptureKit（带系统脏区，不采集声音：声音走 Process Tap，见“声音”一节）；应用也可以自己调用 `SubmitFrame` 喂 BGRA 画面。光标不画进画面，单独采样。
 2. **分块比对**（`core/tile/tile_diff`）：画面切成 64×64 块，逐块算内容哈希，和上一帧比较。没有块变化的帧整帧跳过。
 3. **分流**：变化块按代价从低到高试四条路。
    - **平移**（`core/tile/motion`）：变化块多时，取每块最有细节的一行做滚动哈希，在上一帧里找位置投票出位移，逐块精确比对后发拷贝指令。滚动区和窗口边缘的块按 4 像素宽的条和像素行再拆，只把新露出的像素送去编码。
    - **块缓存**（`core/tile/tile_cache`）：接收端有 1024 个槽，Host 维护一份索引决定存什么、贴什么，接收端只照做，所以两边状态永远一致。即将被盖住的、停留过一阵的块，以及反复出现的块（转圈动画）先存起来，内容再出现时直接贴回。拖窗露出的背景即使只占块的一部分，也按条贴回。
    - **调色板无损层**（`core/codec/lossless`）：颜色少的块（文字、界面）编成调色板 + 索引。所有块共用一条跨帧的 deflate 流，前面发过的字形和工具栏下次大多只是回溯引用。拷贝和缓存指令也走这条流，几乎不占码率。送进硬件编码器的画面里这些块被抹成底色，打字时往往一帧视频都不用编。
-   - **HEVC**：剩下的块交给硬件编码器。macOS 用 VideoToolbox（优先低延迟模式），Linux 用 FFmpeg（NVENC 优先，否则 x265，可选 VAAPI）。默认 HEVC；1.11 起有 H.264 回退，只在接收端能解 H.264（`kCapH264`，目前只有 macOS）而本机硬件 HEVC 编不了或在这个分辨率下不到 30 fps、硬件 H.264 又更快时才用（`core/codec/codec_choice`，每个分辨率测一次），也可以用 `video_codec` 指定。
-4. **视频区域**（`core/tile/video_region`）：相邻多块在大部分帧里都要走视频编码时（播放视频、游戏），这块区域单独开一路码流（和整屏同一种编码），只编裁剪画面，有自己的码率和 QP 下限，整屏编码器在这里不再花码率。视频暂停约 0.5 秒后区域关闭，区域内的块再走一次普通路径，暂停画面会变清晰。
+   - **HEVC**：剩下的块交给硬件编码器 VideoToolbox（优先低延迟模式）。只有 HEVC 一种编码（1.11–1.13 的 H.264 回退已在 2.0.0 删除）。
+4. **视频区域**（`core/tile/video_region`）：相邻多块在大部分帧里都要走视频编码时（播放视频、游戏），这块区域单独开一路码流，只编裁剪画面，有自己的码率和 QP 下限，整屏编码器在这里不再花码率。视频暂停约 0.5 秒后区域关闭，区域内的块再走一次普通路径，暂停画面会变清晰。
 5. **发送**：同一帧的片段带同一个帧号，接收端收齐后一起合成，不会出现撕裂。
 
 接收端维护一张全分辨率 BGRA 画布，按发送端生成的顺序应用拷贝、缓存、无损块和视频块，然后通过 `on_frame` 把画布和本帧变化的矩形交给应用绘制。
@@ -41,7 +39,7 @@ rdaccel 是一个“分层混合编码”的远程桌面库：先判断哪些块
 
 ## 传输
 
-传输是可插拔的（`rda_transport_vtbl` / `rdaccel::Transport`）。库自带进程内管道、TCP 和 UDP，应用也可以接自己的 QUIC、WebRTC 或中继。每条连接分 6 个通道：
+传输是可插拔的（`rda_transport_vtable` / `rdaccel::Transport`）。库自带进程内管道和 UDP（TCP 传输在 2.0.0 删除了），应用也可以接自己的 QUIC、WebRTC 或中继。每条连接分 7 个通道：
 
 | 通道 | 内容 |
 | --- | --- |
@@ -53,7 +51,7 @@ rdaccel 是一个“分层混合编码”的远程桌面库：先判断哪些块
 | message | 应用消息（剪贴板文本或自定义类型），可靠有序 |
 | bulk | 大块传输（文件）的应用消息：可靠有序，排在画面之后，只用路径空出来的部分（1.10） |
 
-另有**数据报**（1.13，`Transport::SendDatagram`）：不重传、不保序，排在所有通道前面，给声音用。UDP 传输（包类型 5）、模拟网络和进程内管道带它，TCP 和应用自己的传输不带（`CarriesDatagrams()`）。
+另有**数据报**（1.13，`Transport::SendDatagram`）：不重传、不保序，排在所有通道前面，给声音用。UDP 传输（包类型 5）、模拟网络和进程内管道带它，应用自己的传输不带（`CarriesDatagrams()`）。
 
 **UDP 可靠传输**（`core/net/reliable_transport`）：
 
@@ -62,7 +60,7 @@ rdaccel 是一个“分层混合编码”的远程桌面库：先判断哪些块
 
 - **数据报**：和数据包共用包号、照常确认，所以算进在途字节、投递速率和 RTT，发包间隔按它的大小往后推（画面让出这部分速率）；但发送时不等拥塞窗口和发包间隔（声音只占百分之几，排队就是抖动），排在所有通道前面，丢了只计数不重发，入队 100 ms 还没发出去的丢弃。带宽采样优先用确认里最新的数据包（数据报不经发包间隔，拿它采样会拖住起步阶段的结束）。画面的码率控制把数据报最近一秒的速率从带宽估计里扣掉。
 
-**加密**（`core/transport/secure_transport`）：TCP 和 UDP 上的数据用应用提供的 32 字节密钥做 XChaCha20-Poly1305（内置 Monocypher）。不加密必须显式 `allow_plaintext`。密钥由应用的配对流程产生，库不做证书和配对。数据报一个个单独封（`[计数器][密文][标签]`，nonce 首字节 0xFE），接收端 128 个位置的重放窗口，验不过的丢弃并计数、不断开连接。
+**加密**（`core/transport/secure_transport`）：UDP 上的数据用应用提供的 32 字节密钥做 XChaCha20-Poly1305（内置 Monocypher）。不加密必须显式 `allow_plaintext`。密钥由应用的配对流程产生，库不做证书和配对。数据报一个个单独封（`[计数器][密文][标签]`，nonce 首字节 0xFE），接收端 128 个位置的重放窗口，验不过的丢弃并计数、不断开连接。
 
 **连接层**（`core/session/link`）：握手和版本协商（能力位）、心跳和断线检测、关闭时通知对方、认证钩子、应用消息。
 
@@ -118,31 +116,30 @@ viewer：数据报 → 无锁环 → rda_viewer_read_audio（渲染线程）：�
 
 ## 输入
 
-Viewer 用 `SendInput` / `SendText` 发输入事件，键码统一用 USB HID 用法码，坐标是被控端像素。能出字的键一律发文字事件，只有不出字的键发按键事件。Host 通过 `on_input` 收到事件，可以交给可选的 `rdaccel::Injector` 注入系统：macOS 用 CGEvent（需要辅助功能权限），Linux 用 XTest。
+Viewer 用 `SendInput` / `SendText` 发输入事件，键码统一用 USB HID 用法码，坐标是被控端像素。能出字的键一律发文字事件，只有不出字的键发按键事件。Host 通过 `on_input` 收到事件，可以交给可选的 `rdaccel::Injector` 注入系统：用 CGEvent（需要辅助功能权限）。
 
 ## 代码布局
 
 ```text
 include/rdaccel/   公开 API：rdaccel.h（C ABI，唯一的二进制接口）、rdaccel.hpp（只有头文件的 C++ 包装）
 src/               公开 API 的实现（src/capi/ 是 C ABI 层）
-core/              平台无关的内部实现（命名空间 rdacore），可在任何机器上跑单元测试
+core/              平台无关的内部实现（命名空间 rdacore），单元测试用假实现，不需要屏幕
   capture/         采集接口、合成画面
   tile/            分块比对、平移检测、块缓存索引、视频区域
-  codec/           调色板无损层、HEVC / H.264 码流格式、编解码器接口、编码选择
+  codec/           调色板无损层、HEVC 码流格式、编解码器接口
   session/         Host / Viewer 会话、连接层、码率控制、光标通道
   audio/           声音：包格式、Opus 发送端（静音门）、接收端（抖动缓冲、漂移）、重采样、测试信号、空设备播放器
   net/             UDP、可靠传输、网络模拟
-  transport/       进程内管道、TCP、加密层
+  transport/       进程内管道、加密层
   proto/ io/ log/  线上消息、录制文件、日志
 platform/mac/      ScreenCaptureKit、VideoToolbox、光标、显示器列表、CGEvent 注入、Process Tap 声音采集、声音播放
-platform/linux/    X11 / XFixes / RandR、Wayland（portal + PipeWire）、FFmpeg（NVENC、x265、VAAPI）、XTest 注入
 third_party/       Monocypher（Opus 在配置时下载，见 building.md）
 examples/          只用公开 API 的示例和工具
 tools/clip/        测试片段：录真实屏幕、按场景自动录、测评、两个版本对比（见 clips.md）
 tests/ fuzz/       GoogleTest 单元测试、libFuzzer 目标
 ```
 
-平台相关代码只在 `platform/` 里，`core/` 只通过抽象接口访问采集、编解码和网络，所以单元测试可以用假实现在没有屏幕的 Linux 上跑。
+平台相关代码只在 `platform/` 里，`core/` 只通过抽象接口访问采集、编解码和网络，所以单元测试可以用假实现跑，不需要屏幕和硬件编码器。
 
 ## 配置开关
 
@@ -164,6 +161,5 @@ tests/ fuzz/       GoogleTest 单元测试、libFuzzer 目标
 | `progressive` | 开 | 渐进式首帧 |
 | `text_mode` | 关 | 文字模式：极慢链路上保文字清晰（见上），可在串流中切换 |
 | `display_index` | 0 | 采集哪块显示器（0 = 主显示器） |
-| `encoder` | 自动 | 指定编码器，比如 `hevc_vaapi` |
 
 完整字段和含义见 [`rdaccel.h`](../include/rdaccel/rdaccel.h) 和 [集成指南](integration.md)。

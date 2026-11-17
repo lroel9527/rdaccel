@@ -1,8 +1,8 @@
 # 评测
 
-> **2.0.0 起**：rdaccel 只支持 macOS、只走 UDP（没有 TCP 传输）、只用 HEVC（没有 H.264）。下文里提到 Linux、TCP、H.264 的地方是 1.x 的情况，留作记录，没有逐段改写。
+数字都是用 `examples/` 里的工具测的：`rdaccel_bench` 离线跑场景（编码后再解码，与原图逐帧比较），`rdaccel_netsim` 把 Host 和 Viewer 放在同一进程、中间接模拟网络实时跑。构建见 [构建与测试](building.md)。
 
-所有数字都可以用 `examples/` 里的工具复现：`rdaccel_bench` 离线跑场景（编码后再解码，与原图逐帧比较），`rdaccel_netsim` 把 Host 和 Viewer 放在同一进程、中间接模拟网络实时跑。构建见 [构建与测试](building.md)。
+标着“1.x，Linux x265”的几节是 1.x 在云端 Linux 上用 x265 测的，留作记录。Linux 支持已在 2.0.0 删除，这些命令现在只能在 Mac 上跑（VideoToolbox），数字会不同。
 
 ## 弱网（0.4，Apple Silicon Mac，VideoToolbox）
 
@@ -43,9 +43,9 @@
     --lossless=0 --moves=0 --refine=0 --cache=0 --min-qp=0              # M0 对照
 ```
 
-## 视频区域（Linux x265 评测）
+## 视频区域（1.x，Linux x265 评测）
 
-云端 Linux 上用 x265（ultrafast + zerolatency）跑 `rdaccel_bench`，背景是 `tools/make_desktop.py` 生成的 1920×1080 仿真桌面（代码编辑器、带图片的网页、图表、照片墙纸），600 帧 60 fps。`video` 场景是右下角 640×360 的视频窗口，`pause` 场景播放 3 秒、暂停 2 秒循环。其余 4 个场景没有触发视频区域，结果与关闭时逐位相同。
+1.x 在云端 Linux 上用 x265（ultrafast + zerolatency）跑 `rdaccel_bench`，背景是 `tools/make_desktop.py` 生成的 1920×1080 仿真桌面（代码编辑器、带图片的网页、图表、照片墙纸），600 帧 60 fps。`video` 场景是右下角 640×360 的视频窗口，`pause` 场景播放 3 秒、暂停 2 秒循环。其余 4 个场景没有触发视频区域，结果与关闭时逐位相同。
 
 | 场景 | 关闭：码率 | 关闭：区域内/外 PSNR | 开启：码率 | 开启：区域内/外 PSNR | 编码耗时 | 主机 CPU |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -60,9 +60,9 @@ python3 tools/make_desktop.py desktop.ppm
 ./build/bin/rdaccel_bench --background=desktop.ppm --frames=600 --regions=0  # 关闭对照
 ```
 
-## 网络传输（Linux x265，模拟网络）
+## 网络传输（1.x，Linux x265，模拟网络）
 
-`rdaccel_netsim` 把 Host 和 Viewer 放在同一进程，中间是模拟网络（限速、单向时延、随机丢包、200 ms 瓶颈缓冲），实时跑 15 秒 `video` 场景（30 fps，配置码率 8 Mbps，背景同上），去掉前 3 秒后统计。"关闭"是固定码率（和现在走 TCP 时一样：编码器不知道网络多快，数据在发送端排队）。
+`rdaccel_netsim` 把 Host 和 Viewer 放在同一进程，中间是模拟网络（限速、单向时延、随机丢包、200 ms 瓶颈缓冲），实时跑 15 秒 `video` 场景（30 fps，配置码率 8 Mbps，背景同上），去掉前 3 秒后统计。"关闭"是固定码率（和 1.x 走 TCP 时一样：编码器不知道网络多快，数据在发送端排队；TCP 传输已在 2.0.0 删除）。
 
 | 网络 | 自适应 | 采集到显示延迟 p50 / p95 | 显示帧比例 | PSNR |
 | --- | --- | --- | --- | --- |
@@ -85,7 +85,7 @@ python3 tools/make_desktop.py desktop.ppm
 ./build/bin/rdaccel_netsim --background=desktop.ppm --seconds=15 --drop-to=1000000 --drop-at=6  # 带宽骤降
 ```
 
-## 渐进式首帧（Linux x265，模拟网络）
+## 渐进式首帧（1.x，Linux x265，模拟网络）
 
 不渐进时第一帧是整屏，大部分走无损层（约 520 kB），1.5 Mbps 上要 3.1 秒才出画面。渐进时第一帧只发视频（约 220 kB），文字随后补成无损。`rdaccel_netsim`，60 fps，配置码率 8 Mbps，10 秒，去掉前 6 秒后算稳态；"出画面"是第一帧从采集到显示的时间，后面几列是那一刻屏幕上画面的 PSNR（"—" = 还没有画面）。
 
@@ -109,7 +109,7 @@ python3 tools/make_desktop.py desktop.ppm
 ./build/bin/rdaccel_netsim --background=desktop.ppm --scenario=idle --seconds=10 --warmup=6 --bandwidth=1500000 --progressive=0
 ```
 
-## 光标通道（Linux x265）
+## 光标通道（1.x，Linux x265）
 
 `rdaccel_bench --scenario=pointer`：桌面静止，只有鼠标指针在全屏来回移动（1080p，60 fps，10 秒，指针在左边三分之一时变成文字光标）。PSNR 按用户实际看到的画面算，含指针。
 

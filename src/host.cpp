@@ -642,7 +642,7 @@ struct Host::Impl {
       codec::EncoderConfig cfg{f.bgra.width, f.bgra.height, config.fps, rate ? rate->encoder_bps() : StartBitrate(),
                                config.min_qp};
       std::string err;
-      auto enc = platform::CreateVideoEncoder(cfg, config.encoder, &err);
+      auto enc = platform::CreateVideoEncoder(cfg, &err);
       if (!enc) {
         failed = true;
         if (error) *error = err;
@@ -673,9 +673,8 @@ struct Host::Impl {
       opts.progressive = config.progressive;
       opts.text_mode = text_applied;
       if (config.video_regions) {
-        const std::string prefer = config.encoder;
-        opts.region_encoder_factory = [prefer](const codec::EncoderConfig& c, std::string* e) {
-          return platform::CreateVideoEncoder(c, prefer, e);
+        opts.region_encoder_factory = [](const codec::EncoderConfig& c, std::string* e) {
+          return platform::CreateVideoEncoder(c, e);
         };
       }
       opts.fps = config.fps;

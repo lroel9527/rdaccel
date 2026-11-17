@@ -1,7 +1,5 @@
 # 集成指南
 
-> **2.0.0 起**：rdaccel 只支持 macOS、只走 UDP（没有 TCP 传输）、只用 HEVC（没有 H.264）。下文里提到 Linux、TCP、H.264 的地方是 1.x 的情况，留作记录，没有逐段改写。
-
 这份文档写给把 rdaccel 嵌进自己程序的人：两端各要做什么、回调在哪个线程、对象怎么销毁、怎么选传输、出错时会发生什么。头文件里的注释是权威说明，这里讲的是它们怎么配合。
 
 ## 0. 两种接口，一个 ABI
@@ -42,7 +40,7 @@ rda_host_destroy(host);
 Host ── 采集或 SubmitFrame ── 变化检测 / 编码 ──┐    ┌── Viewer ── on_frame  画面
      ── 光标（系统光标或 SetCursor） ───────────┼────┼──────────── on_cursor 光标
      <─ SetInputHandler  输入事件 ─────────────┘    └── SendInput  输入
-                       Transport（UDP / TCP / 管道 / 自定义）
+                       Transport（UDP / 管道 / 自定义）
 ```
 
 发送端：
@@ -77,11 +75,11 @@ viewer->SendInput({rdaccel::InputKind::kMouseMove, 100, 200});
 
 ## 1.1 连接状态、应用消息、输入
 
-**连不上怎么办。** `ConnectUdp` 不阻塞，`Viewer` 创建后在 `peer_timeout_ms` 内等不到 Host 的回应就以 `RDA_ERR_TIMEOUT` 断开，这就是连接超时。Host 端用 `BindUdp` / `BindTcp`：马上返回，马上创建 `Host`，用状态回调等对方连上（1.0 起不再有阻塞的 `ListenUdp` / `ListenTcp`）。
+**连不上怎么办。** `ConnectUdp` 不阻塞，`Viewer` 创建后在 `peer_timeout_ms` 内等不到 Host 的回应就以 `RDA_ERR_TIMEOUT` 断开，这就是连接超时。Host 端用 `BindUdp`：马上返回，马上创建 `Host`，用状态回调等对方连上（1.0 起不再有阻塞的 `ListenUdp`）。
 
 **连接状态。** `Viewer` 创建后先发握手（协议版本、能力位、可选的认证令牌），`Host` 检查后回应，两边进入 `kConnected`。之后双方大约每秒互发心跳，`peer_timeout_ms`（默认 10 秒，0 = 不超时）内收不到对方任何数据就判定断开。主动关闭（析构 `Viewer` / `Host`）会给对方发 Goodbye，对方立刻收到断开而不是等超时。`Viewer` 断开是终态，要重连就重建 `Viewer` 和传输。
 
-**一个 Host 依次服务多个接收端。** `keep_serving`（默认开）时，用 `BindUdp` / `BindTcp`（或未连接的 `UdpFromFd` 套接字）的 `Host` 在接收端离开、超时、被 `on_auth` 拒绝或密钥不对之后，先报 `kDisconnected`（带原因），再报 `kConnecting`，在同一个端口等下一个接收端。抓屏一直在跑；下一个接收端从关键帧开始，拿到完整的画面、光标和 Hello；统计数字跨接收端累计。同一时间只服务一个接收端：服务期间别的接收端连不进来（UDP 收不到回应，TCP 被拒绝），重试即可。只发了杂包、不握手的对端（端口扫描之类）占不住位置：不像本协议开头的包直接忽略，像的在 `peer_timeout_ms` 内不握手就断开。管道、录制、自定义传输和已连接的套接字没有“下一个对端”，第一次断开仍是终态；`keep_serving = false` 也一样。
+**一个 Host 依次服务多个接收端。** `keep_serving`（默认开）时，用 `BindUdp`（或未连接的 `UdpFromFd` 套接字）的 `Host` 在接收端离开、超时、被 `on_auth` 拒绝或密钥不对之后，先报 `kDisconnected`（带原因），再报 `kConnecting`，在同一个端口等下一个接收端。抓屏一直在跑；下一个接收端从关键帧开始，拿到完整的画面、光标和 Hello；统计数字跨接收端累计。同一时间只服务一个接收端：服务期间别的接收端连不进来（收不到回应），重试即可。只发了杂包、不握手的对端（端口扫描之类）占不住位置：不像本协议开头的包直接忽略，像的在 `peer_timeout_ms` 内不握手就断开。管道、录制、自定义传输和已连接的套接字没有“下一个对端”，第一次断开仍是终态；`keep_serving = false` 也一样。
 
 ```cpp
 host.SetStateHandler([](rdaccel::ConnectionState s, rda_status reason) {
@@ -108,9 +106,9 @@ host.SetMessageHandler([](uint32_t type, std::span<const uint8_t> p) { ... });
 
 0x10000 以下的类型是库保留的（现在只定义了 1 = 剪贴板文本），发送保留类型会失败。库只负责传，剪贴板怎么读写由应用决定。
 
-**输入事件。** 键盘事件的 `code` 是 USB HID 用法码（键盘页 0x07：0x04 = A，0x28 = 回车，0xE0 = 左 Ctrl……），跟操作系统无关，所以 Mac 控制端和 Linux 被控端对得上。和本机键码互转：`KeyCodeFromMac` / `KeyCodeToMac`（macOS `kVK_*`、`NSEvent.keyCode`）、`KeyCodeFromEvdev` / `KeyCodeToEvdev`（Linux `KEY_*`，X11 键码减 8）；C 里是 `rda_keycode_from_mac()` 等。鼠标按键是 `kButtonLeft = 1`、`kButtonRight = 2`、`kButtonMiddle = 3`、`kButtonBack = 4`、`kButtonForward = 5`；`modifiers` 是 `kModShift | kModCtrl | kModAlt | kModMeta | kModCaps` 的组合（Mac 的 Command 是 `kModMeta`，Option 是 `kModAlt`）。滚轮的 `delta_x` / `delta_y` 以“行”（滚轮格）为单位，y > 0 向上、x > 0 向右。
+**输入事件。** 键盘事件的 `code` 是 USB HID 用法码（键盘页 0x07：0x04 = A，0x28 = 回车，0xE0 = 左 Ctrl……），跟操作系统无关。和本机键码互转：`KeyCodeFromMac` / `KeyCodeToMac`（macOS `kVK_*`、`NSEvent.keyCode`）；C 里是 `rda_keycode_from_mac()` / `rda_keycode_to_mac()`。鼠标按键是 `kButtonLeft = 1`、`kButtonRight = 2`、`kButtonMiddle = 3`、`kButtonBack = 4`、`kButtonForward = 5`；`modifiers` 是 `kModShift | kModCtrl | kModAlt | kModMeta | kModCaps` 的组合（Mac 的 Command 是 `kModMeta`，Option 是 `kModAlt`）。滚轮的 `delta_x` / `delta_y` 以“行”（滚轮格）为单位，y > 0 向上、x > 0 向右。
 
-**注入到系统。** 库只负责传输入事件；要让它们真正作用到被控机器上，可以自己注入，也可以用库带的 `Injector`（C：`rda_injector_*`）：Linux 走 X 服务器的 XTest 扩展，macOS 走 CGEvent（需要“辅助功能”权限，没有时创建返回 `RDA_ERR_PERMISSION`）。
+**注入到系统。** 库只负责传输入事件；要让它们真正作用到被控机器上，可以自己注入，也可以用库带的 `Injector`（C：`rda_injector_*`）：走 CGEvent（需要“辅助功能”权限，没有时创建返回 `RDA_ERR_PERMISSION`）。
 
 ```cpp
 rdaccel::InjectorConfig ic;
@@ -121,7 +119,7 @@ auto injector = rdaccel::Injector::Create(ic, &err);        // 在 Host 之前�
 host.SetInputHandler([&](const rdaccel::InputEvent& ev) { injector->Inject(ev); });
 ```
 
-键盘事件按物理键注入；`kText` 按字符输入，与被控端的键盘布局无关（Linux 上当前布局里没有的字符会临时借一个空闲键码映射过去，销毁 `Injector` 时还原）。`Injector` 销毁时会松开还按着的键和鼠标键。`rdaccel_serve --inject` 就是这样用的。
+键盘事件按物理键注入；`kText` 按字符输入，与被控端的键盘布局无关。`Injector` 销毁时会松开还按着的键和鼠标键。`rdaccel_serve --inject` 就是这样用的。
 
 **文字输入。** 按键码只描述“按了哪个物理键”，两边键盘布局不同、或者用输入法打中文时就不够了。这时发 `kText`（C：`RDA_INPUT_TEXT`）事件，`code` 是一个 Unicode 字符（码点 1..0x10FFFF，不含代理区），被控端照字面输入，与它自己的布局无关。C++ 里 `viewer->SendText("你好")` 会把 UTF-8 字符串拆成一个字符一个事件；无效的 UTF-8 整串不发。对方是 0.3 及更早的版本、不支持文字输入时（握手里没有这个能力位），发送返回失败（C：`RDA_ERR_UNSUPPORTED`），什么也不发。被控端遇到以后版本新增的输入类型会跳过而不是断开。
 
@@ -172,7 +170,7 @@ rda_audio_player_create(viewer, NULL, &player);   /* 默认输出设备 */
 rda_audio_player_destroy(player);                  /* 在 viewer 之前 */
 ```
 
-- 只有带数据报的传输有声音：UDP（`rda_udp_*`）、模拟网络、进程内管道。TCP 和自定义传输上 viewer 不声明能力位，host 的状态停在 `RDA_AUDIO_STATE_WAITING_PEER`，什么都不采集。
+- 只有带数据报的传输有声音：UDP（`rda_udp_*`）、模拟网络、进程内管道。自定义传输上 viewer 不声明能力位，host 的状态停在 `RDA_AUDIO_STATE_WAITING_PEER`，什么都不采集。
 - 权限（macOS）：采集要“系统声音录制”（TCC `kTCCServiceAudioCapture`，系统设置 → 隐私与安全性 → 屏幕与系统音频录制里的“仅系统音频录制”），和屏幕录制是两项。应用的 Info.plist 要有 `NSAudioCaptureUsageDescription`。询问在第一次开始读声音时出现；没有权限时采集照常运行但只给零（状态是 `RUNNING`，`silent` 为 1），明确拒绝时是 `NO_PERMISSION`。TCC 在一个进程里按缓存回答，进程运行中改了的授权可能要到下一个进程才查得到；所以没确认有权限时 tap 每 5 秒重建一次，读到非零样本就算确认。
 - `mute_local`：被读时本机不出声。只在确认有权限之后生效（`rda_audio_status.muted_local` 说现在是否在静音）；没确认之前本机照常出声。本机的音量、静音键、默认设备都不动；进程退出（包括崩溃）后本机声音自己回来。
 - 统计：`rda_host_stats.bytes_sent` 和 `rda_viewer_stats.bytes_received` 都包含声音；单独的 `audio_*` 字段见头文件。和画面一样不含 UDP/IP 和加密的包头，声音包小，线上每包另有约 56 字节。
@@ -186,8 +184,6 @@ rda_audio_player_destroy(player);                  /* 在 viewer 之前 */
 | `BindUdp` / `ConnectUdp` | 真实网络，尤其是带宽不稳定或会丢包的链路 | 有：带宽估计、按估计调码率、队列满时跳帧；光标和输入先于视频发送 |
 | `BindUdp` | 同上，发送端不想阻塞：立刻返回，第一个发来数据的接收端成为对端；之前送进的帧只保留最新一张，连上后从关键帧开始 | 同上 |
 | `UdpFromFd` | 你自己建好的 UDP socket（NAT 打洞之后、由启动器传进来）；成功后归库所有 | 同上 |
-| `BindTcp` / `ConnectTcp` | 局域网、只能走 TCP 的环境 | 没有：按 `bitrate_bps` 固定码率，网络慢时延迟会越积越大 |
-| `BindTcp` | 同上，发送端不想阻塞：立刻返回，第一个连上来的接收端成为对端；之前送进的帧只保留最新一张 | 同上 |
 | `CreateLocalPipe` | 同一进程（测试、回环演示） | 不需要 |
 | `CreateRecordingTransport` | 录制成 `.rdstream` 文件，之后用 `Viewer::FeedRecording` 回放 | 不需要 |
 | `CreateSimulatedNetwork` | 测试：进程内模拟限速、时延、丢包 | 有（跑的就是 UDP 协议） |
@@ -195,7 +191,7 @@ rda_audio_player_destroy(player);                  /* 在 viewer 之前 */
 
 自己实现 `Transport` 的要求（C 接口见 `rdaccel.h` 里的 `rda_transport_vtable`，C++ 里继承 `rdaccel::Transport`）：`Send` 线程安全；同一通道内字节有序，可以拆分或合并；接收回调设置之前到达的数据要先存着；析构时停掉自己的线程并等正在执行的回调返回。通道之间最好互相独立（光标、输入不排在视频后面）。通道号要原样传递：现在有 6 个（`RDA_CHANNEL_COUNT`，第 6 个是应用消息），以后可能增加，256 以下的通道号都应该能传。如果能测出带宽和排队量，实现 `GetStats`，`Host` 会自动做自适应码率。
 
-两端必须用同一种传输。
+两端必须用同一种传输。TCP 传输（`BindTcp` / `ConnectTcp`）在 2.0.0 删除了。
 
 ### 加密
 
@@ -204,7 +200,7 @@ rda_audio_player_destroy(player);                  /* 在 viewer 之前 */
 - 每次连接双方各出 32 字节随机数，用 BLAKE2b 从应用密钥派生出两个方向各自的会话密钥，所以同一个密钥长期使用也不会重复用 nonce。
 - 每条记录带通道号和递增计数，篡改、重放、乱序、跨通道搬运都会被发现；发现后这条连接以 `RDA_ERR_AUTH` 断开，对方也会立刻收到（不用等超时）。
 - 一端有密钥、另一端没有时以 `RDA_ERR_PROTOCOL` 断开；密钥不同时两端都是 `RDA_ERR_AUTH`。
-- TCP 和 UDP 传输上不给密钥会直接创建失败，除非显式设置 `allow_plaintext`。管道、录制、模拟网络和自定义传输不受此限制（自定义传输可能自带加密，比如 QUIC、WebRTC）。
+- UDP 传输上不给密钥会直接创建失败，除非显式设置 `allow_plaintext`。管道、录制、模拟网络和自定义传输不受此限制（自定义传输可能自带加密，比如 QUIC、WebRTC）。
 - 密钥怎么生成、怎么交给两端是应用的事（比如扫码配对、账号服务器下发）。用 `od -An -tx1 -N32 /dev/urandom` 就能生成一个；示例程序用 `--key=<64 位十六进制>`。
 - 加密用的是仓库里自带的 [Monocypher](../third_party/monocypher/README.md) 4.0.2（BSD-2 / CC0），已经和 libsodium 逐字节对照过。
 
@@ -218,39 +214,41 @@ rda_audio_player_destroy(player);                  /* 在 viewer 之前 */
 | `bitrate_bps` | 8 Mbps | 码率上限。UDP 下实际码率跟着带宽估计走，不会超过它 |
 | `min_bitrate_bps` | 300 kbps | 自适应码率的下限 |
 | `display_index` | 0（主显示器） | 多显示器时选要采集的那块屏。`ListDisplays()`（C：`rda_list_displays`）列出可选的显示器，0 永远是主显示器 |
-| `capture_width` / `capture_height` | 0（原生） | 4K / Retina 屏想降分辨率传输时（macOS 和 Linux 都支持，光标图像跟着缩放） |
+| `capture_width` / `capture_height` | 0（原生） | 4K / Retina 屏想降分辨率传输时（光标图像跟着缩放） |
 | `cursor_channel` | 开 | 一般不关；关掉且 `capture_cursor` 也关时接收端看不到光标 |
 | `video_regions` | 开 | 对比测试时关 |
 | `progressive` | 开 | 首帧先发视频版、随后补成无损。要求第一张画面就逐像素准确（截图、自动化测试）时关 |
-| `encoder` | 自动 | Linux 上强制 `libx265` 或 `hevc_nvenc`；`hevc_vaapi`（Intel / AMD 显卡，实验性，不会自动选用，设备用 `RDACCEL_VAAPI_DEVICE` 指定，默认 `/dev/dri/renderD128`）打不开时退回其他编码器 |
 
 每个模块的开关见 [架构](architecture.md#配置开关)，评测数据见 [评测](benchmarks.md)。
 
 ## 6. 统计、出错和日志
 
 - 能失败的 C 函数都返回 `rda_status`：`RDA_OK` 是 0，错误是负数。常见的有 `RDA_ERR_INVALID_ARG`（参数或配置不对）、`RDA_ERR_UNSUPPORTED`（这台机器没有视频编解码器）、`RDA_ERR_PERMISSION`（macOS 没给屏幕录制权限）、`RDA_ERR_CODEC`、`RDA_ERR_TRANSPORT`、`RDA_ERR_CLOSED`、`RDA_ERR_IO`。`rda_status_str()` 给出名字，`rda_last_error()` 给出本线程上一次失败的详细原因。C++ 包装层把详细原因写进 `std::string* error`。
-- 库自己从不往终端打印（FFmpeg 的输出也接到了库的日志里）。要看日志就用 `rda_set_log(fn, user, RDA_LOG_INFO)` 或 `rdaccel::SetLogHandler(...)` 装一个接收函数。
+- 库自己从不往终端打印。要看日志就用 `rda_set_log(fn, user, RDA_LOG_INFO)` 或 `rdaccel::SetLogHandler(...)` 装一个接收函数。
 - `Host::stats()` 和 `Viewer::stats()` 随时可以调用，返回的都是累计值，每秒取一次求差就是速率（`examples/serve.cpp` 就是这么做的）。
 - 错误回调（C：`on_error`）只报两类事：`RDA_ERR_UNSUPPORTED` 表示光标通道不可用，画面照常传；其他状态都表示 Host 已经停止、不会再出画面，应用应该销毁它（不在回调里）。
-  `RDA_ERR_CODEC` 是编码器创建失败；`RDA_ERR_PERMISSION` / `RDA_ERR_CLOSED` 是采集中途停止（macOS 收回屏幕录制权限、显示器拔掉、Wayland 停止共享）。
+  `RDA_ERR_CODEC` 是编码器创建失败；`RDA_ERR_PERMISSION` / `RDA_ERR_CLOSED` 是采集中途停止（macOS 收回屏幕录制权限、显示器拔掉）。
 - 编码器创建失败：`SubmitFrame` 返回 false，错误处理回调收到原因，之后的帧都会被拒绝。
 - 编码偶尔失败：返回 false，下一帧自动变成全屏刷新。这不进错误回调，只写日志并计入 `encode_errors`。
 - 接收端解码失败（或者从中途接入）：Viewer 自动向 Host 请求关键帧（最多每 250 ms 一次），Host 在下一帧发全屏刷新。`ViewerStats::keyframe_requests` 和 `HostStats::keyframe_requests` 记录次数。屏幕完全静止、没有新帧进来时（macOS 的 ScreenCaptureKit 只在画面变化时出帧，自己喂帧的程序也可能停喂），Host 在 100 ms 后用记住的最后一帧补发；因为拥塞跳过的那一帧也是这样补上，`HostStats::frames_resubmitted` 记录次数。
-- 光标读不到（比如 Linux 上没有 XFixes）：错误回调收到 `RDA_ERR_UNSUPPORTED`，画面照常传输。
+- 光标读不到：错误回调收到 `RDA_ERR_UNSUPPORTED`，画面照常传输。
 
 ## 7. 平台要求
 
-| | macOS | Linux |
-| --- | --- | --- |
-| 编码 / 解码 | VideoToolbox（HEVC 硬件；HEVC 太慢时 H.264，见 `rda_host_config.video_codec`） | FFmpeg：NVENC，否则 libx265；解码 FFmpeg（只有 HEVC） |
-| 屏幕采集 | ScreenCaptureKit，需要"屏幕录制"权限 | X11 MIT-SHM；Wayland 用 xdg-desktop-portal + PipeWire（系统弹窗选屏，见 building.md） |
-| 声音 | 采集：Process Tap，需要“系统声音录制”权限和 `NSAudioCaptureUsageDescription`；播放：默认输出设备 | 编解码、传输和空设备；没有系统采集和真设备播放 |
-| 光标 | CoreGraphics + NSCursor | XFixes；Wayland 用 PipeWire 光标元数据，没有时画进画面 |
-| 系统版本 | macOS 14.2+，Apple Silicon 或 Intel（发布包是 universal） | 见 building.md |
-| 依赖 | 系统框架；Opus（配置时下载，编进库里） | `libavcodec libavutil libswscale libx11 libxext libxfixes zlib`，Wayland 另需 `libpipewire-0.3 gio-2.0`；Opus 同左 |
+只支持 macOS（Linux 支持在 2.0.0 删除了）。
+
+| | macOS |
+| --- | --- |
+| 编码 / 解码 | VideoToolbox，只有 HEVC |
+| 屏幕采集 | ScreenCaptureKit，需要"屏幕录制"权限 |
+| 声音 | 采集：Process Tap，需要“系统声音录制”权限和 `NSAudioCaptureUsageDescription`；播放：默认输出设备 |
+| 输入注入 | CGEvent，需要“辅助功能”权限 |
+| 光标 | CoreGraphics + NSCursor |
+| 系统版本 | macOS 14.2+，Apple Silicon 或 Intel（发布包是 universal） |
+| 依赖 | 系统框架；Opus（配置时下载，编进库里） |
 
 ## 8. 版本
 
 - `rda_version()` 返回 `RDA_MAKE_VERSION(major, minor, patch)`，头文件里的 `RDA_VERSION` 是编译时的版本；`rda_version_string()` 返回文字版。
-- 1.0 之前每个次版本可能有不兼容的改动（CMake 包按 `SameMinorVersion` 匹配）。1.0 之后同一主版本内只在结构体末尾加字段、只加函数：库按 `struct_size` 识别旧程序传来的较短结构体，没传的字段用默认值，所以用旧头文件编译的程序可以直接换新库。
+- 1.0 之前每个次版本可能有不兼容的改动（CMake 包按 `SameMinorVersion` 匹配）。1.0 之后同一主版本内只在结构体末尾加字段、只加函数：库按 `struct_size` 识别旧程序传来的较短结构体，没传的字段用默认值，所以用旧头文件编译的程序可以直接换同一主版本的新库。主版本之间不保证：1.x 的程序换 2.0 要重新编译（见 [CHANGELOG](../CHANGELOG.md) 2.0.0）。
 - 线上协议有版本号，连接时协商（见 1.1）；当前是 4，旧（版本 3）录制文件仍然能回放。

@@ -2,7 +2,7 @@
 // public API (rdaccel/rdaccel.hpp).
 //
 //   rdaccel_record --out=a.rdstream [--source=synthetic|screen] [--frames=300]
-//                  [--size=1920x1080] [--fps=60] [--bitrate=8000000] [--encoder=libx265]
+//                  [--size=1920x1080] [--fps=60] [--bitrate=8000000]
 //
 // The synthetic source is deterministic and runs as fast as the encoder
 // allows, so the same command gives the same stream on every machine.
@@ -48,7 +48,7 @@ int main(int argc, char** argv) {
   if (out.empty()) {
     std::fprintf(stderr,
                  "usage: rdaccel_record --out=FILE [--source=synthetic|screen] [--frames=N]\n"
-                 "       [--size=WxH] [--fps=N] [--bitrate=BPS] [--encoder=NAME]\n");
+                 "       [--size=WxH] [--fps=N] [--bitrate=BPS]\n");
     return 2;
   }
   const std::string source = args.str("source", "synthetic");
@@ -67,7 +67,6 @@ int main(int argc, char** argv) {
   rdaccel::HostConfig cfg;
   cfg.fps = fps;
   cfg.bitrate_bps = args.num("bitrate", 8'000'000);
-  cfg.encoder = args.str("encoder");
   rdaccel::Host host(std::move(file), cfg);
 
   const auto t0 = std::chrono::steady_clock::now();

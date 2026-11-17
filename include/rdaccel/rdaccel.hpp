@@ -564,7 +564,6 @@ struct HostConfig {
   int32_t fps = 60;
   int64_t bitrate_bps = 8'000'000;
   int32_t min_qp = 24;
-  std::string encoder;  // empty = automatic
   int32_t capture_width = 0;
   int32_t capture_height = 0;
   int32_t display_index = 0;  // which display StartScreenCapture() takes; see ListDisplays()
@@ -690,7 +689,6 @@ class Host {
     c.fps = config.fps;
     c.bitrate_bps = config.bitrate_bps;
     c.min_qp = config.min_qp;
-    c.encoder = config.encoder.empty() ? nullptr : config.encoder.c_str();
     c.capture_width = config.capture_width;
     c.capture_height = config.capture_height;
     c.display_index = config.display_index;
