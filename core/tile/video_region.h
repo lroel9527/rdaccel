@@ -41,6 +41,9 @@ struct VideoRegionParams {
   // but at 10 Hz (the Host's idle re-submits) once it stands still, so a
   // count of frames alone took up to 3 s.
   int64_t linger_us = 250'000;
+  // An area counts as changing in a frame when at least one in this many of
+  // its tiles changed (any change, in an area of up to this many tiles).
+  int32_t min_moving_share = 16;
   // An area that closed is remembered this many frames: if most of its tiles
   // turn busy again for `confirm` frames in a row (the video plays on after
   // a pause), it reopens where it was at once, instead of earning its way

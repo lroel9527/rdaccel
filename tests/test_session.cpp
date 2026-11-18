@@ -1240,45 +1240,66 @@ TEST(Session, TextModeCodesMotionAsWithoutIt) {
   // A photo-like area that changes every frame, 20 kB pictures on a 20 Mbps
   // path: a picture every frame, at the whole bitrate, as without text mode
   // (a fixed video allowance made a full-screen transition a second of
-  // blocks), and polished once it stops.
-  auto [host_end, viewer_end] = transport::MakeLocalPipe();
-  constexpr int W = 320, H = 192, kFps = 30;
-  size_t pictures = 0;
-  int64_t bitrate = 0;
-  auto enc = std::make_unique<FakeEncoder>();
-  enc->pad = 20'000;
-  enc->pictures = &pictures;
-  enc->bitrate = &bitrate;
-  session::HostSession host(host_end.get(), std::move(enc), W, H,
-                            {.text_mode = true, .fps = kFps, .bitrate_bps = 20'000'000});
-  host.SetBitrate(20'000'000);
-  EXPECT_EQ(bitrate, 20'000'000);
-  std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 250);
-  uint64_t t = 1'000'000;
-  host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
-  uint32_t seed = 5;
-  constexpr int kFrames = 3 * kFps;
-  const size_t first = pictures;
-  for (int f = 0; f < kFrames; ++f) {
-    t += 1'000'000 / kFps;
-    for (int y = 0; y < 128; ++y) {
-      for (int x = 0; x < 128; ++x) {
-        seed = seed * 1103515245u + 12345u;
-        std::memcpy(&px[(static_cast<size_t>(y) * W + x) * 4], &seed, 3);  // noise: no palette
+  // blocks). What it leaves is not refined or polished (text_refine): the
+  // tiles that kept changing went to the encoder whole and stayed rough, so
+  // once they have been still for kRefreshDelay (6) frames they are owed and
+  // coded once more (split by cells, where there were text), all four in
+  // the same frame (they stopped together and the path takes them at once):
+  // one picture, then nothing. With text_refine they are refined and
+  // polished as without text mode.
+  for (const bool refine : {false, true}) {
+    auto [host_end, viewer_end] = transport::MakeLocalPipe();
+    constexpr int W = 320, H = 192, kFps = 30;
+    size_t pictures = 0;
+    int64_t bitrate = 0;
+    auto enc = std::make_unique<FakeEncoder>();
+    enc->pad = 20'000;
+    enc->pictures = &pictures;
+    enc->bitrate = &bitrate;
+    session::HostSession host(host_end.get(), std::move(enc), W, H,
+                              {.text_mode = true, .text_refine = refine, .fps = kFps, .bitrate_bps = 20'000'000});
+    host.SetBitrate(20'000'000);
+    EXPECT_EQ(bitrate, 20'000'000);
+    std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 250);
+    uint64_t t = 1'000'000;
+    host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+    uint32_t seed = 5;
+    constexpr int kFrames = 3 * kFps;
+    const size_t first = pictures;
+    for (int f = 0; f < kFrames; ++f) {
+      t += 1'000'000 / kFps;
+      for (int y = 0; y < 128; ++y) {
+        for (int x = 0; x < 128; ++x) {
+          seed = seed * 1103515245u + 12345u;
+          std::memcpy(&px[(static_cast<size_t>(y) * W + x) * 4], &seed, 3);  // noise: no palette
+        }
       }
+      host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
     }
-    host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+    EXPECT_EQ(pictures - first, static_cast<size_t>(kFrames)) << "text_refine " << refine;
+    const size_t before = pictures;
+    // Something is owed (a screen capture that sends no frames while the
+    // screen is still relies on this to have the last one submitted again).
+    EXPECT_TRUE(host.work_pending()) << "text_refine " << refine;
+    auto still = [&] {
+      t += 1'000'000 / kFps;
+      host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
+    };
+    if (refine) {
+      for (int f = 0; f < 60 * kFps && host.work_pending(); ++f) still();
+      EXPECT_FALSE(host.work_pending());
+      EXPECT_GT(pictures, before + 8);  // refinement and the still-screen polish
+    } else {
+      for (int f = 0; f < 10; ++f) still();
+      EXPECT_EQ(pictures, before + 1);
+      EXPECT_FALSE(host.work_pending());
+    }
+    const size_t settled = pictures;
+    for (int f = 0; f < 10 * kFps; ++f) still();
+    EXPECT_EQ(pictures, settled) << "text_refine " << refine;
+    EXPECT_FALSE(host.work_pending()) << "text_refine " << refine;
+    PipeStopper stop{host_end, viewer_end};
   }
-  EXPECT_EQ(pictures - first, static_cast<size_t>(kFrames));
-  const size_t before = pictures;
-  EXPECT_TRUE(host.work_pending());  // refinement and the still-screen polish
-  for (int f = 0; f < 60 * kFps && host.work_pending(); ++f) {
-    t += 1'000'000 / kFps;
-    host.OnFrame({{px.data(), W, H, W * 4}, {}, t});
-  }
-  EXPECT_FALSE(host.work_pending());
-  EXPECT_GT(pictures, before);
-  PipeStopper stop{host_end, viewer_end};
 }
 
 TEST(Session, LeavingTextModeRefreshesTheWholePicture) {
@@ -1546,11 +1567,17 @@ TEST(Session, TextModeCodesAgainWhatScrolledBeforeItWasPolished) {
   EXPECT_FALSE(host.work_pending());
   EXPECT_GT(pictures, pictures_moving);
   // Only the tiles the photo is in now (rows 1 to 3 of columns 5 and 6): the
-  // text around it was exact all along.
+  // text around it was exact all along. Those tiles are split by cells
+  // (split_cells), so the lines of text inside them, above and below the
+  // photo, go out losslessly again (they came from video): lossless_tiles
+  // counts rects, one run of cells per row of cells, at most 4 per re-coded
+  // tile. A tile of text alone is never sent again.
   const auto after = host.stats();
-  EXPECT_GE(after.progressive_tiles - moved.progressive_tiles, 1u);
-  EXPECT_LE(after.progressive_tiles - moved.progressive_tiles, 6u);
-  EXPECT_EQ(after.lossless_tiles, moved.lossless_tiles);
+  const uint64_t recoded = after.progressive_tiles - moved.progressive_tiles;
+  EXPECT_GE(recoded, 1u);
+  EXPECT_LE(recoded, 6u);
+  EXPECT_GT(after.lossless_tiles, moved.lossless_tiles);
+  EXPECT_LE(after.lossless_tiles - moved.lossless_tiles, 4 * recoded);
   // (The fake decoder paints nothing at this width: the photo stays black.)
   std::vector<uint8_t> want(page.begin() + static_cast<ptrdiff_t>(static_cast<size_t>(kStep * kSteps) * W * 4),
                             page.begin() + static_cast<ptrdiff_t>(static_cast<size_t>(kStep * kSteps + H) * W * 4));
@@ -1743,3 +1770,382 @@ TEST(Session, TextModeDragsAWindowWithoutSendingItInCrumbs) {
   EXPECT_EQ(wrong, 0u) << "pixels of the window not exact once it stopped";
 }
 
+
+// ---- text mode: tiles split by cells, video coded once --------------------
+
+namespace {
+
+// Lines of dark strokes on a light plain background, 16 pixels apart: text
+// as tile::LooksLikeText sees it (one value dominates, strokes stand out),
+// two colours.
+void FillStrokes(std::vector<uint8_t>& px, int w, const Rect& r, uint32_t& seed) {
+  for (int y = r.y; y < r.bottom(); ++y) {
+    for (int x = r.x; x < r.right(); ++x) {
+      seed = seed * 1103515245u + 12345u;
+      const int row = (y - r.y) % 16;
+      const bool stroke = row >= 4 && row < 12 && (seed >> 16) % 3 == 0;
+      uint8_t* p = &px[(static_cast<size_t>(y) * w + x) * 4];
+      p[0] = p[1] = p[2] = stroke ? 30 : 245;
+      p[3] = 255;
+    }
+  }
+}
+
+// Tile (tx, ty): a photo (noise) in its left half, text in its right half.
+// The halves are 16 x 16 cells apart, so the tile as a whole fits no
+// palette and its cells are either text or photo.
+void TextBesidePhoto(std::vector<uint8_t>& px, int w, int tx, int ty, uint32_t& seed) {
+  FillNoise(px, w, {tx * 64, ty * 64, 32, 64}, seed);
+  FillStrokes(px, w, {tx * 64 + 32, ty * 64, 32, 64}, seed);
+}
+Rect TextHalf(int tx, int ty) { return {tx * 64 + 32, ty * 64, 32, 64}; }
+
+// Pixels of `r` that differ between `want` and what the viewer shows once
+// frame `id` has been shown (SIZE_MAX: it was not).
+size_t ShownDiff(Shown& shown, const std::vector<uint8_t>& want, int w, const Rect& r, uint64_t id) {
+  std::unique_lock<std::mutex> lock(shown.mu);
+  if (!shown.cv.wait_for(lock, std::chrono::seconds(10), [&] { return shown.last_id >= id; })) return SIZE_MAX;
+  size_t n = 0;
+  for (int y = r.y; y < r.bottom(); ++y) {
+    for (int x = r.x; x < r.right(); ++x) {
+      const size_t i = (static_cast<size_t>(y) * w + x) * 4;
+      n += std::memcmp(&want[i], &shown.px[i], 3) != 0;
+    }
+  }
+  return n;
+}
+
+// A host and a viewer over a local pipe, a plain screen W x H sent as the
+// keyframe (and, with `end_keyframe`, the progressive keyframe over), and
+// the fake encoder's pictures counted. W = 256: the fake
+// decoder paints nothing, so what the viewer takes from a picture stays as
+// it was (black after the keyframe) and differs from the screen.
+struct TextRig {
+  static constexpr int W = 256, H = 128, kFps = 30;
+  std::unique_ptr<transport::LocalPipeEndpoint> host_end, viewer_end;
+  size_t pictures = 0;
+  std::unique_ptr<session::HostSession> host;
+  std::unique_ptr<session::ViewerSession> viewer;
+  Shown shown;
+  std::vector<uint8_t> px = std::vector<uint8_t>(static_cast<size_t>(W) * H * 4, 245);
+  uint64_t t = 1'000'000;
+  explicit TextRig(session::HostOptions o, bool end_keyframe = true) {
+    auto [a, b] = transport::MakeLocalPipe();
+    host_end = std::move(a);
+    viewer_end = std::move(b);
+    auto enc = std::make_unique<FakeEncoder>();
+    enc->pictures = &pictures;
+    o.fps = kFps;
+    o.bitrate_bps = 20'000'000;
+    host = std::make_unique<session::HostSession>(host_end.get(), std::move(enc), W, H, o);
+    viewer = std::make_unique<session::ViewerSession>(nullptr, std::make_unique<FakeDecoder>());
+    shown.Attach(*viewer);
+    viewer->Attach(viewer_end.get());
+    for (size_t i = 3; i < px.size(); i += 4) px[i] = 255;
+    host->OnFrame({{px.data(), W, H, W * 4}, {}, t});
+    if (end_keyframe) {
+      // A tile of other plain colour and back: frames that are not skipped
+      // end the progressive keyframe with everything exact (see
+      // TextModeGivesAPhotoThatIsTheFirstChangeAfterTheKeyframeTheSharpenPictureToo).
+      std::vector<uint8_t> plain = px;
+      for (int y = 64; y < 128; ++y) std::memset(&px[(static_cast<size_t>(y) * W + 192) * 4], 200, 64 * 4);
+      Frame();
+      px = plain;
+      Frame();
+    }
+  }
+  ~TextRig() {
+    host_end.reset();
+    viewer_end.reset();
+  }
+  void Frame() {
+    t += 1'000'000 / kFps;
+    host->OnFrame({{px.data(), W, H, W * 4}, {}, t});
+  }
+  // At least `min` frames, then until nothing is pending.
+  void Settle(int min = 10) {
+    for (int f = 0; f < 60 * kFps && (f < min || host->work_pending()); ++f) Frame();
+  }
+  size_t Diff(const Rect& r) { return ShownDiff(shown, px, W, r, host->stats().frames_encoded); }
+};
+
+}  // namespace
+
+TEST(Session, TextModeSendsTextBesideAPhotoExactlyAndThePhotoOnce) {
+  // Text beside a photo in the same tile (a caption, a file list next to a
+  // thumbnail): the tile as a whole fits no palette. Looked at by cells, its
+  // text goes out losslessly and the photo through the encoder, once: the
+  // tile is not refined or polished afterwards. Without the split (and with
+  // refinement, as before) the text came from the encoder, and went on
+  // costing pictures.
+  for (const bool split : {true, false}) {
+    TextRig rig({.text_mode = true, .split_cells = split ? 16 : 0, .text_refine = !split});
+    rig.Settle();
+    const size_t after_key = rig.pictures;
+    const auto before = rig.host->stats();
+    uint32_t seed = 41;
+    TextBesidePhoto(rig.px, TextRig::W, 1, 0, seed);
+    TextBesidePhoto(rig.px, TextRig::W, 2, 1, seed);
+    rig.Frame();
+    rig.Settle();
+    const uint64_t lossless = rig.host->stats().lossless_tiles - before.lossless_tiles;
+    if (split) {
+      EXPECT_EQ(lossless, 8u);  // per tile a run of two text cells in each of its 4 rows of cells
+      EXPECT_EQ(rig.pictures, after_key + 1);
+      EXPECT_FALSE(rig.host->work_pending());
+      const size_t settled = rig.pictures;
+      for (int f = 0; f < 10 * TextRig::kFps; ++f) rig.Frame();
+      EXPECT_EQ(rig.pictures, settled);
+      EXPECT_FALSE(rig.host->work_pending());
+      EXPECT_EQ(rig.Diff(TextHalf(1, 0)), 0u);
+      EXPECT_EQ(rig.Diff(TextHalf(2, 1)), 0u);
+    } else {
+      EXPECT_EQ(lossless, 0u);
+      EXPECT_EQ(rig.pictures, after_key + 1 + 8 + 60);  // refinement and polish (the defaults)
+      EXPECT_FALSE(rig.host->work_pending());
+      EXPECT_GT(rig.Diff(TextHalf(1, 0)), 0u);  // the text is the encoder's
+      EXPECT_GT(rig.Diff(TextHalf(2, 1)), 0u);
+    }
+  }
+}
+
+TEST(Session, TextModeSplitChangesNothingForTextAloneOrAPhotoAlone) {
+  // Tiles that are text alone fit a palette as a whole and tiles that are a
+  // photo alone have no cell to split out: as without the split, the same
+  // lossless rects and the same pictures. Only refinement and polish are
+  // gone (text_refine), which cost the photo its extra pictures.
+  struct Run {
+    uint64_t lossless = 0, lossless_bytes = 0;
+    size_t pictures = 0;
+  };
+  auto run = [](const session::HostOptions& o, bool photo) {
+    TextRig rig(o);
+    rig.Settle();
+    const auto before = rig.host->stats();
+    const size_t after_key = rig.pictures;
+    uint32_t seed = 43;
+    if (photo) {
+      FillNoise(rig.px, TextRig::W, {0, 0, 128, 128}, seed);
+    } else {
+      FillStrokes(rig.px, TextRig::W, {0, 0, TextRig::W, TextRig::H}, seed);
+    }
+    rig.Frame();
+    rig.Settle();
+    for (int f = 0; f < 3 * TextRig::kFps; ++f) rig.Frame();
+    EXPECT_FALSE(rig.host->work_pending());
+    if (!photo) EXPECT_EQ(rig.Diff({0, 0, TextRig::W, TextRig::H}), 0u);
+    const auto after = rig.host->stats();
+    return Run{after.lossless_tiles - before.lossless_tiles, after.lossless_bytes - before.lossless_bytes,
+               rig.pictures - after_key};
+  };
+  for (const bool photo : {false, true}) {
+    const Run now = run({.text_mode = true}, photo);
+    const Run unsplit = run({.text_mode = true, .split_cells = 0}, photo);
+    const Run before = run({.text_mode = true, .split_cells = 0, .text_refine = true}, photo);
+    const char* what = photo ? "photo" : "text";
+    EXPECT_EQ(now.lossless, unsplit.lossless) << what;
+    EXPECT_EQ(now.lossless_bytes, unsplit.lossless_bytes) << what;
+    EXPECT_EQ(now.pictures, unsplit.pictures) << what;
+    EXPECT_EQ(now.lossless, before.lossless) << what;
+    EXPECT_EQ(now.lossless_bytes, before.lossless_bytes) << what;
+    if (photo) {
+      EXPECT_EQ(now.lossless, 0u);
+      EXPECT_EQ(now.pictures, 1u);
+      EXPECT_GT(before.pictures, now.pictures);
+    } else {
+      EXPECT_EQ(now.lossless, 8u);  // each tile whole
+      EXPECT_EQ(now.pictures, 0u);
+      EXPECT_EQ(before.pictures, 0u);
+    }
+  }
+}
+
+TEST(Session, TextModeSplitsATileThatKeptChangingOnceItStops) {
+  // Typing next to a picture: the tile changes in every frame, goes to the
+  // encoder whole while it does (split_hot) and stays rough. Once it stops
+  // it is owed, coded again by cells, and its text is exact; then nothing
+  // more is sent.
+  TextRig rig({.text_mode = true});
+  rig.Settle();
+  uint32_t seed = 47;
+  TextBesidePhoto(rig.px, TextRig::W, 1, 0, seed);
+  rig.Frame();
+  rig.Settle();
+  EXPECT_EQ(rig.Diff(TextHalf(1, 0)), 0u);
+  for (int f = 0; f < 20; ++f) {
+    FillStrokes(rig.px, TextRig::W, TextHalf(1, 0), seed);  // new text every frame
+    rig.Frame();
+  }
+  // The last of it came from the encoder, and the tile is owed (a screen
+  // capture that sends no frames while the screen is still relies on this
+  // to have the last one submitted again).
+  EXPECT_GT(rig.Diff(TextHalf(1, 0)), 0u);
+  EXPECT_TRUE(rig.host->work_pending());
+  const size_t typed = rig.pictures;
+  const auto stopped = rig.host->stats();
+  rig.Settle();
+  EXPECT_FALSE(rig.host->work_pending());
+  EXPECT_EQ(rig.Diff(TextHalf(1, 0)), 0u);
+  EXPECT_EQ(rig.pictures, typed + 1);  // the photo half, once more
+  EXPECT_EQ(rig.host->stats().lossless_tiles - stopped.lossless_tiles, 4u);  // a run of text cells per row of cells
+  const size_t settled = rig.pictures;
+  for (int f = 0; f < 10 * TextRig::kFps; ++f) rig.Frame();
+  EXPECT_EQ(rig.pictures, settled);
+  EXPECT_FALSE(rig.host->work_pending());
+}
+
+namespace {
+
+// A photo appears on a plain screen and stays: the pictures it costs, as
+// TextModeGivesAStillPhotoOnePictureAndNoPolish counts them.
+// `end_keyframe` false: the photo is the first change after the keyframe of
+// a still screen, so the picture that ends the progressive keyframe (the
+// "sharpen" picture, once per keyframe) follows it and takes the photo too.
+void ExpectOnePictureForAStillPhoto(bool end_keyframe) {
+  const size_t sharpen = end_keyframe ? 0 : 1;
+  for (const bool refine : {false, true}) {
+    TextRig rig({.text_mode = true, .text_refine = refine}, end_keyframe);
+    rig.Settle();
+    const size_t after_key = rig.pictures;
+    uint32_t seed = 53;
+    FillNoise(rig.px, TextRig::W, {0, 0, 128, 128}, seed);
+    rig.Frame();
+    EXPECT_EQ(rig.pictures, after_key + 1) << "text_refine " << refine;
+    // (The sharpen picture is not counted as work pending: it goes out
+    // with the next frame that is not skipped.)
+    if (sharpen == 0) EXPECT_EQ(rig.host->work_pending(), refine);
+    for (int f = 0; f < 20 * TextRig::kFps; ++f) rig.Frame();
+    EXPECT_FALSE(rig.host->work_pending());
+    if (!refine) {
+      EXPECT_EQ(rig.pictures, after_key + 1 + sharpen);
+    } else if (sharpen == 0) {
+      EXPECT_EQ(rig.pictures, after_key + 1 + 8 + 60);  // the defaults: refine_frames, still_refine_frames
+    } else {
+      EXPECT_GE(rig.pictures, after_key + 1 + 8 + 60);
+    }
+  }
+}
+
+}  // namespace
+
+TEST(Session, TextModeGivesAStillPhotoOnePictureAndNoPolish) {
+  // Text mode codes what is not text once (text_refine): a photo that
+  // appears gets one picture and none after it, however long the screen
+  // stays still. With text_refine it is refined (refine_frames) and
+  // polished (still_refine_frames) as without text mode.
+  ExpectOnePictureForAStillPhoto(/*end_keyframe=*/true);
+}
+
+TEST(Session, TextModeGivesAPhotoThatIsTheFirstChangeAfterTheKeyframeTheSharpenPictureToo) {
+  // When the photo is the first change after the keyframe of a still
+  // screen, the progressive keyframe ends with that frame, and the picture
+  // that ends it (once per keyframe: what is not exact is taken from the
+  // encoder once more, having shared the first picture with the whole
+  // screen) takes the photo too: two pictures, and none after them.
+  ExpectOnePictureForAStillPhoto(/*end_keyframe=*/false);
+}
+
+TEST(Session, TextModeDoesNotSendThePageAgainAfterTwoScrollsPastAPhoto) {
+  // As TextModeDoesNotSendThePageAgainAfterAScrollPastAPhoto, scrolled twice
+  // with a pause between: the photo is marked finished video when it is
+  // coded, and that holds for copies of copies. Neither scroll leaves
+  // anything owed, and neither costs a picture.
+  constexpr int W = 512, H = 448, kFps = 30, kStep = 3, kSteps = 20;
+  auto [host_end, viewer_end] = transport::MakeLocalPipe();
+  auto enc = std::make_unique<FakeEncoder>();
+  size_t pictures = 0;
+  enc->pictures = &pictures;
+  session::HostSession host(host_end.get(), std::move(enc), W, H,
+                            {.text_mode = true, .context_tiles = true, .fps = kFps, .bitrate_bps = 20'000'000});
+  session::ViewerSession viewer(nullptr, std::make_unique<FakeDecoder>());
+  Shown shown;
+  shown.Attach(viewer);
+  viewer.Attach(viewer_end.get());
+  const auto page = PageWithAPhoto(W, H + 2 * kStep * kSteps);
+  uint64_t t = 1'000'000;
+  auto show = [&](int offset) {
+    t += 1'000'000 / kFps;
+    host.OnFrame({{page.data() + static_cast<size_t>(offset) * W * 4, W, H, W * 4}, {}, t});
+  };
+  auto settle = [&](int offset) {
+    for (int f = 0; f < 60 * kFps && (f < 10 || host.work_pending()); ++f) show(offset);
+  };
+  show(0);
+  settle(0);
+  const size_t pictures_before = pictures;
+  int offset = 0;
+  for (int scroll = 1; scroll <= 2; ++scroll) {
+    const auto before = host.stats();
+    for (int i = 1; i <= kSteps; ++i) show(offset += kStep);
+    const auto moved = host.stats();
+    EXPECT_GT(moved.moved_tiles, before.moved_tiles) << "scroll " << scroll;
+    settle(offset);
+    const auto after = host.stats();
+    EXPECT_FALSE(host.work_pending()) << "scroll " << scroll;
+    EXPECT_EQ(after.progressive_tiles, before.progressive_tiles) << "scroll " << scroll;
+    EXPECT_EQ(after.lossless_tiles, moved.lossless_tiles) << "scroll " << scroll;
+    EXPECT_EQ(pictures, pictures_before) << "scroll " << scroll;
+  }
+  // The text exact, the photo as the viewer had it (black), 120 pixels up.
+  std::vector<uint8_t> want(page.begin() + static_cast<ptrdiff_t>(static_cast<size_t>(offset) * W * 4),
+                            page.begin() + static_cast<ptrdiff_t>(static_cast<size_t>(offset + H) * W * 4));
+  for (int y = 128 - offset; y < 256 - offset; ++y) std::memset(&want[(static_cast<size_t>(y) * W + 320) * 4], 0, 128 * 4);
+  for (size_t i = 3; i < want.size(); i += 4) want[i] = 255;
+  const uint64_t frames = host.stats().frames_encoded;
+  PipeStopper stop{host_end, viewer_end};
+  EXPECT_EQ(shown.Differences(want, W, H, frames), "");
+}
+
+TEST(Session, TextModeLoadsTextBesideAPhotoFromTheCacheAsFinished) {
+  // A tile of text beside a photo, covered for a while (a menu, another
+  // window) and uncovered: the viewer paints it from its tile cache. Split
+  // and coded once, it was finished, and the slot remembers pixel by pixel
+  // what of it was text and what video: the load is all it needs, nothing
+  // is owed or sent again for it.
+  TextRig rig({.text_mode = true});
+  rig.Settle();
+  uint32_t seed = 59;
+  TextBesidePhoto(rig.px, TextRig::W, 1, 0, seed);
+  const std::vector<uint8_t> screen = rig.px;
+  rig.Frame();
+  rig.Settle(20);  // stable: stored when it is covered
+  ASSERT_EQ(rig.Diff(TextHalf(1, 0)), 0u);
+  for (int y = 0; y < 64; ++y) {
+    for (int x = 64; x < 128; ++x) std::memset(&rig.px[(static_cast<size_t>(y) * TextRig::W + x) * 4], 120, 3);
+  }
+  rig.Frame();
+  rig.Settle(20);
+  const auto covered = rig.host->stats();
+  const size_t pictures = rig.pictures;
+  rig.px = screen;
+  rig.Frame();
+  EXPECT_EQ(rig.host->stats().cached_tiles, covered.cached_tiles + 1);
+  EXPECT_FALSE(rig.host->work_pending());
+  for (int f = 0; f < 10 * TextRig::kFps; ++f) rig.Frame();
+  const auto after = rig.host->stats();
+  EXPECT_FALSE(rig.host->work_pending());
+  EXPECT_EQ(after.lossless_tiles, covered.lossless_tiles);
+  EXPECT_EQ(after.progressive_tiles, covered.progressive_tiles);
+  EXPECT_EQ(rig.pictures, pictures);
+  EXPECT_EQ(rig.Diff(TextHalf(1, 0)), 0u);
+}
+
+TEST(Session, TextModeOffStillRefinesAndPolishesTextBesideAPhoto) {
+  // Without text mode the same tile is what it always was: video (no
+  // palette fits it as a whole), refined and polished.
+  TextRig rig({});
+  rig.Settle();
+  const size_t after_key = rig.pictures;
+  uint32_t seed = 61;
+  TextBesidePhoto(rig.px, TextRig::W, 1, 0, seed);
+  rig.Frame();
+  EXPECT_EQ(rig.pictures, after_key + 1);
+  EXPECT_TRUE(rig.host->work_pending());
+  int frames = 0;
+  for (; frames < 60 * TextRig::kFps && rig.host->work_pending(); ++frames) rig.Frame();
+  EXPECT_FALSE(rig.host->work_pending());
+  EXPECT_EQ(rig.pictures, after_key + 1 + 8 + 60);  // the defaults: refine_frames, still_refine_frames
+  const size_t settled = rig.pictures;
+  for (int f = 0; f < 3 * TextRig::kFps; ++f) rig.Frame();
+  EXPECT_EQ(rig.pictures, settled);
+}

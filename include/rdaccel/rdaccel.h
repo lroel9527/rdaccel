@@ -43,8 +43,8 @@ extern "C" {
 /* ---- version ------------------------------------------------------------ */
 
 #define RDA_VERSION_MAJOR 3
-#define RDA_VERSION_MINOR 0
-#define RDA_VERSION_PATCH 1
+#define RDA_VERSION_MINOR 1
+#define RDA_VERSION_PATCH 0
 /* "rc1" and so on for a pre-release, "" for a release. rda_version() does
  * not include it; rda_version_string() does ("1.0.0-rc1"). */
 #define RDA_VERSION_PRERELEASE ""
@@ -480,15 +480,18 @@ typedef struct rda_host_config {
    * process does not film itself. */
   int32_t capture_own_windows; /* 0 */
 
-  /* 1.5. 1: text mode: the same experience with less traffic. Text and UI
-   * that stand still, or change in a few places (typing), are reduced to 16
-   * of their own colours (more where 16 would show; only at edges, smooth
-   * areas keep theirs), coded compactly and sent at once; this is where
-   * the saving is, three to seven times on text. Motion (a scroll, a zoom
-   * to full screen, a film) goes through the video encoder as without text
-   * mode, and what is text is sent again exactly once it stops. Video and
-   * the bitrate are as without text mode (1.9.1); the cursor is sent at
-   * most 60 times a second. See rda_host_set_text_mode(). */
+  /* 1.5. 1: text mode: little traffic with sharp text. Text and UI that
+   * stand still, or change in a few places (typing), are reduced to 16 of
+   * their own colours (more where 16 would show; only at edges, smooth
+   * areas keep theirs), coded compactly and sent at once, also where they
+   * share a tile with a picture, a shadow or an icon (3.1: by cells of 16 x
+   * 16 pixels). Motion (a scroll, a zoom to full screen, a film) goes
+   * through the video encoder as without text mode, at the same bitrate,
+   * and what is text is sent again exactly once it stops. What is not text
+   * gets the one picture: it is not refined or polished afterwards as
+   * without text mode (3.1), so photos, icons and wallpaper look rougher
+   * than there. The cursor is sent at most 60 times a second. See
+   * rda_host_set_text_mode(). */
   int32_t text_mode; /* 0 */
 } rda_host_config;
 

@@ -4,7 +4,14 @@
 # `rdaccel_clip record` captures the screen. See docs/clips.md.
 #
 #   tools/clip/scenarios/record.sh [OUT_DIR] [scenario ...]
-#   scenarios: terminal typing ime idle scroll drag video switching (default: all)
+#   scenarios: terminal typing ime idle scroll drag video switching
+#              code smalltext translucent animation subtitles (default: all)
+#
+# The last five stress text: source code in a dark editor, scrolled in steps
+# (code); small and low-contrast text with thin table rules (smalltext); text
+# on blurred translucent panels while the page under them scrolls by itself
+# (translucent); small CSS animations next to still text (animation); a film
+# with burned-in subtitles, in a window and then full screen (subtitles).
 #
 # OUT_DIR defaults to clips/ in the repository, which git ignores: the clips
 # show this screen, whatever is on it, and stay on this machine.
@@ -13,10 +20,10 @@
 #   * cmake --build build --target rdaccel_clip
 #   * tools/clip/scenarios/make_content.sh  (into OUT_DIR/content)
 #   * the terminal needs the Screen Recording and Accessibility permissions
-#   * nobody may use the screen meanwhile (about 6 minutes): input from
+#   * nobody may use the screen meanwhile (about 10 minutes): input from
 #     anyone else lands in the clips, and the driver stops when the app it
 #     types into is no longer in front.
-# Silent: the test video has no sound track, nothing else plays anything.
+# Silent: the test videos have no sound track, nothing else plays anything.
 # Afterwards the windows it opened are closed (TextEdit and QuickTime Player
 # quit without saving if they were not running before) and the input source
 # is put back.
@@ -240,15 +247,107 @@ S
   osascript -e 'tell application "Safari" to close (every window whose name is "scroll test")' >/dev/null 2>&1
 }
 
+safari_page() {  # file : open a page of the content in Safari, in the scroll scene's place
+  [[ -f $CONTENT/$1 ]] || { echo "== no $CONTENT/$1: make the content again (make_content.sh), skipped"; return 1; }
+  open -a Safari "$CONTENT/$1"
+  sleep 3
+  win Safari 30 30 1250 830
+  sleep 1.5
+}
+safari_close() {  # title : close the tabs showing that page (a window goes with its last tab)
+  [[ $(running com.apple.Safari) == true ]] || return 0
+  osascript -e 'tell application "Safari"' -e 'repeat with i from (count windows) to 1 by -1' -e 'try' \
+            -e "tell window i to close (every tab whose name is \"$1\")" -e 'end try' -e 'end repeat' -e 'end tell' >/dev/null 2>&1
+}
+
+code() {
+  # Steps of about 18 lines with pauses, still for a while, a longer scroll,
+  # back up.
+  safari_page code.html || return
+  {
+    echo "activate com.apple.Safari"; echo "front com.apple.Safari"; echo "move 700 450"
+    echo "sleep 4000"
+    for i in 1 2 3 4 5; do echo "scroll -12 30 16"; echo "sleep 2500"; done
+    echo "sleep 4000"
+    echo "scroll -8 90 16"; echo "sleep 3000"
+    for i in 1 2; do echo "scroll 12 30 16"; echo "sleep 2500"; done
+    echo "sleep 3000"
+  } > "$D/code.txt"
+  record code 40 "$D/code.txt"
+  safari_close "code test"
+}
+
+smalltext() {
+  # Mostly still: three small scrolls of about 100 px, long pauses.
+  safari_page smalltext.html || return
+  {
+    echo "activate com.apple.Safari"; echo "front com.apple.Safari"; echo "move 650 450"
+    echo "sleep 12000"
+    echo "scroll -6 18 16"; echo "sleep 10000"
+    echo "scroll -6 18 16"; echo "sleep 8000"
+    echo "scroll 6 18 16"; echo "sleep 7000"
+  } > "$D/smalltext.txt"
+  record smalltext 40 "$D/smalltext.txt"
+  safari_close "small text test"
+}
+
+translucent() {
+  # The page scrolls itself (JavaScript: 4 s still, 6 s moving); the driver
+  # only keeps Safari in front, the pointer off the panels.
+  safari_page translucent.html || return
+  print "activate com.apple.Safari\nfront com.apple.Safari\nmove 900 600\nsleep 40000" > "$D/translucent.txt"
+  record translucent 40 "$D/translucent.txt"
+  safari_close "translucent test"
+}
+
+animation() {
+  # CSS animations run by themselves; nothing scrolls.
+  safari_page animation.html || return
+  print "activate com.apple.Safari\nfront com.apple.Safari\nmove 1150 800\nsleep 40000" > "$D/animation.txt"
+  record animation 40 "$D/animation.txt"
+  safari_close "animation test"
+}
+
+subtitles() {
+  # Like video, with subtitles: in a window, a pause, then full screen
+  # (present), another pause, back to the window at the end.
+  [[ -f $CONTENT/video_sub.mp4 ]] || { echo "== subtitles: no $CONTENT/video_sub.mp4 (ffmpeg, Pillow), skipped"; return; }
+  local qt='tell application "QuickTime Player" to'
+  osascript -e "$qt open POSIX file \"$CONTENT/video_sub.mp4\"" -e "$qt activate" >/dev/null
+  sleep 2.5
+  win "QuickTime Player" 60 60 1280 760
+  sleep 1
+  osascript -e "$qt play document 1" >/dev/null
+  echo "== subtitles (40s)"
+  "$CLIP" record "$OUT/subtitles.clip" --seconds=40 > "$OUT/subtitles.log" 2>&1 &
+  local rec=$!
+  sleep 9;   osascript -e "$qt pause document 1" >/dev/null
+  sleep 3;   osascript -e "$qt play document 1" >/dev/null
+  sleep 4;   osascript -e "$qt present document 1" >/dev/null
+  sleep 1.5; osascript -e "$qt play document 1" >/dev/null
+  sleep 7.5; osascript -e "$qt pause document 1" >/dev/null
+  sleep 3;   osascript -e "$qt play document 1" >/dev/null
+  sleep 7    # the film ends (29 s) and stays on its last frame
+  osascript -e "$qt set presenting of document 1 to false" >/dev/null 2>&1 ||
+    print "front com.apple.QuickTimePlayerX\nkey escape" | "$DRIVE"
+  wait $rec
+  tail -1 "$OUT/subtitles.log"
+  osascript -e "$qt close every document saving no" >/dev/null 2>&1
+}
+
 cleanup() {
   [[ $TEXTEDIT_BEFORE == true ]] || osascript -e 'tell application "TextEdit" to quit saving no' >/dev/null 2>&1
   [[ $QUICKTIME_BEFORE == true ]] || osascript -e 'tell application "QuickTime Player" to quit' >/dev/null 2>&1
+  [[ $QUICKTIME_BEFORE == true ]] && osascript -e 'tell application "QuickTime Player"' \
+    -e 'repeat with d in (get every document whose name starts with "video_sub")' -e 'try' -e 'set presenting of d to false' \
+    -e 'close d saving no' -e 'end try' -e 'end repeat' -e 'end tell' >/dev/null 2>&1
   osascript -e 'tell application "Safari" to close (every window whose name is "scroll test")' >/dev/null 2>&1
+  for t in "code test" "small text test" "translucent test" "animation test"; do safari_close $t; done
   osascript -e 'tell application "Terminal" to close (every window whose name contains "terminal.command")' >/dev/null 2>&1
   [[ -n $IME_BEFORE ]] && print "ime $IME_BEFORE" | "$DRIVE"
   [[ -n $FRONT_BEFORE ]] && osascript -e "tell application id \"$FRONT_BEFORE\" to activate" >/dev/null 2>&1
 }
 trap cleanup EXIT INT TERM
 
-(( $# )) || set -- terminal typing ime idle scroll drag video switching
+(( $# )) || set -- terminal typing ime idle scroll drag video switching code smalltext translucent animation subtitles
 for s in "$@"; do $s; done

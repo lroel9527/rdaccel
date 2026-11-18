@@ -45,6 +45,31 @@ namespace rdacore::session {
 
 using HostStats = rdacore::HostStats;
 
+// What one frame did: why its rects went to the video encoder, what the
+// encoder's picture was coded for and how large it came out. See
+// HostOptions::trace.
+struct FrameTrace {
+  uint64_t frame_no = 0;
+  bool key = false;      // a keyframe
+  bool still = false;    // coded with the still-screen QP floor
+  bool sharpen = false;  // the picture that ends a progressive keyframe
+  size_t picture_bytes = 0;  // the full-screen encoder's picture; 0 = none
+  int video_rects = 0;       // rects of new content the viewer takes from the picture
+  // ... of which, by why they are not lossless:
+  int video_colours = 0;         // too many colours for a palette
+  int video_hot = 0;             // few enough for a palette, too many for content that changes every frame
+  int video_budget = 0;          // a palette, but the lossless budget of the frame was spent
+  int video_keyframe_first = 0;  // a palette, sent as video first with a progressive keyframe
+  int video_motion = 0;          // text mode: part of motion, too many colours for a hot rect
+  int refine_tiles = 0;  // tiles taken again from the picture: ordinary refinement
+  int polish_tiles = 0;  // ... the still-screen polish
+  int lossless_rects = 0;
+  int hot = 0;          // tiles that also changed in the frame before
+  int hot_unmoved = 0;  // ... of which no move accounts for (text mode)
+  int moved = 0;        // copy commands
+  bool mass_motion = false;  // text mode treated the frame as motion
+};
+
 struct HostOptions {
   bool lossless = true;
   int lossless_max_colors = 256;
@@ -94,12 +119,33 @@ struct HostOptions {
   //     again exactly once it stops. So does text beyond the lossless
   //     budget. Tiles wait as the viewer has them (stale) only with a
   //     keyframe on a slow path.
-  //   * Video (motion, photos, video areas, refinement and the still-screen
-  //     polish) is coded as without text mode, at the same bitrate: the
-  //     mode saves on text, not by making what moves look worse.
+  //   * Video (motion, photos, video areas) is coded as without text mode,
+  //     at the same bitrate, but it is not refined or polished afterwards
+  //     (text_refine): what is not text gets the one picture.
   // See SetTextMode() to switch while streaming.
   bool text_mode = false;
   int text_colors = 16;
+  // Text mode decides by 16 x 16 cells where a tile as a whole has too many
+  // colours for a palette (text beside a window's shadow, an icon, a
+  // translucent bar: a fifth of the text cells of a desktop sat in such
+  // tiles and stayed at video quality). A cell of text (tile/text_cell.h)
+  // goes out losslessly, in reduced colours where that stays faithful and
+  // as it is otherwise; any other cell that fits a palette of up to
+  // `split_cells` colours does too; the rest of the tile goes to the
+  // encoder. 0 = off: the whole tile goes to the encoder.
+  int split_cells = 16;
+  // ... also tiles that changed in the frame before (typing next to a
+  // picture, a caret). Off: those go to the encoder as before and are split
+  // once they stop changing (splitting them at once cost a tenth more
+  // traffic with a candidate window open, for text that changes again).
+  bool split_hot = false;
+  // Text mode's first aim is little traffic with sharp text; what is not
+  // text does not have to look as in the normal mode. So what the encoder
+  // codes in text mode is not refined (refine_frames) or polished
+  // (still_refine_frames): on a real desktop those pictures were 59% of the
+  // traffic while typing and 61% of an idle screen's. true = as in the
+  // normal mode.
+  bool text_refine = false;
   // Text mode's tiles (2..16 colours) go through the context model
   // (codec/context_tiles.h), about half the bytes of deflate on text. Only
   // for a viewer that decodes it (proto::kCapContextTiles); see
@@ -117,6 +163,11 @@ struct HostOptions {
   int32_t region_min_qp = 27;               // quality floor inside video areas
   int64_t region_bitrate_bps = 0;           // 0 = a share of bitrate_bps by area
   tile::VideoRegionParams region_params = {};
+  // Called once for every frame that is not skipped, with what the frame
+  // did (see FrameTrace). For tools that account for the traffic
+  // (rdaccel_clip); costs one more palette search for each rect that goes
+  // to the encoder.
+  std::function<void(const FrameTrace&)> trace = nullptr;
   // Install the transport's receive callback (input, keyframe requests).
   // Host turns this off: its Link receives and calls in.
   bool own_receiver = true;
@@ -173,8 +224,14 @@ class HostSession {
   // frame instead. Not thread-safe against OnFrame.
   bool work_pending() const {
     return force_keyframe_ || !carry_video_tiles_.empty() || pending_lossless_count_ > 0 || refining_ > 0 ||
-           polish_owed_ || coarse_count_ > 0 || !regions_.regions().empty();
+           polish_owed_ || coarse_count_ > 0 || rough_waiting_ || !pending_sharpen_.empty() || !regions_.regions().empty();
   }
+
+  // How the viewer has `r` as of the last frame: 0 = all of it from the
+  // lossless layer (or a copy of that), 1 = some of it video that had its
+  // still-screen polish, 2 = some of it other video. For tools that measure
+  // (rdaccel_clip). Not thread-safe against OnFrame.
+  int ShownQuality(const Rect& r) const { return pixel_quality_.empty() ? 2 : WorstPixelQuality(r); }
 
   // The screen as of the last frame passed to OnFrame (BGRA, rows of
   // width * 4 bytes), e.g. to encode a requested keyframe when no new frame
@@ -237,6 +294,11 @@ class HostSession {
   static constexpr uint8_t kUnpolished = 255;
   std::vector<uint8_t> polish_;
   bool polish_owed_ = false;  // some tile is waiting for, or in, its polish
+  // Text mode: some tile was left rough without refinement to follow (it
+  // kept changing and went to the encoder whole) and will be owed once it
+  // has stood still for kRefreshDelay frames. Until then frames must keep
+  // coming, or it stays as it is until the screen changes again.
+  bool rough_waiting_ = false;
 
   // Text mode. Per tile, what the viewer shows is not what the host had in
   // the previous frame: kStaleText = part of it waits for the lossless
@@ -333,6 +395,7 @@ class HostSession {
   // Exact pixels of `r` become kPxVideo (the viewer takes `r` from a picture).
   void TakenFromVideo(const Rect& r);
   uint8_t WorstPixelQuality(const Rect& r) const;
+  void RestorePixelQuality(uint32_t slot, const Rect& tile, const Rect& r);
 
   // Palette content that went as video because it kept changing (a hot
   // tile takes lossless_max_colors_hot colours at most: a terminal printing,
@@ -348,6 +411,11 @@ class HostSession {
   // a tile, the uncovered pixels usually equal that stored content, so they
   // can be painted from the slot instead of being coded.
   std::vector<uint8_t> slot_pixels_;  // kTileCacheSlots tiles of kTileSize^2 BGRA
+  // ... and how the viewer had each of those pixels when the slot was stored
+  // (pixel_quality_'s values): a tile is text here and video there, and a
+  // load restores that, so that text that came back from the cache exact is
+  // not owed again and video that was text in motion still is.
+  std::vector<uint8_t> slot_pixel_quality_;  // kTileCacheSlots tiles of kTileSize^2
   std::vector<int64_t> tile_slot_;     // per tile, -1 = none
   std::vector<uint64_t> tile_slot_hash_;
   // Video areas and their encoders (by stream id).

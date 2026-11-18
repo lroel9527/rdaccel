@@ -10,6 +10,7 @@
 //       One of the example scenes (examples/scenes.h: idle typing scroll drag
 //       zoom video pause) as a clip, at 60 Hz.
 //   rdaccel_clip eval CLIP [--text=0] [--bitrate=8000000] [--label=NAME] [--csv=FRAMES.csv] [--focus=x,y,w,h]
+//                     [--refine=N] [--still-refine=N] [--split-cells=N] [--split-hot=1] [--text-refine=1] [--cells=1]
 //       Sends the clip through a host and a viewer with the platform's video
 //       encoder and decoder, as the Host does it: each frame when the screen
 //       changed, and the last one every 100 ms while something is owed.
@@ -17,8 +18,12 @@
 //       pixels the viewer shows exactly and its PSNR (weighted by time), and
 //       for the pauses (0.5 s or more without a change) how much is exact at
 //       their end. --csv writes what each frame sent.
-//   rdaccel_clip frame CLIP --index=N --out=FRAME.ppm
-//       Frame N of the clip as a PPM, to look at what was recorded.
+//       Further lines: the text of the screen apart from the rest
+//       (text_cells.h), what the encoder's pictures were coded for and why
+//       rects went to it; --cells=1 lists the text cells left unsharp.
+//   rdaccel_clip frame CLIP --index=N --out=FRAME.ppm [--textmap=1]
+//       Frame N of the clip as a PPM, to look at what was recorded;
+//       --textmap=1 dims what is not counted as text.
 //
 // eval works on the internals (session::HostSession), not the public API, so
 // it sees every frame the host decides on; the numbers are what the Host
@@ -41,11 +46,13 @@
 #include "scenes.h"
 #include "session/host_session.h"
 #include "session/viewer_session.h"
+#include "text_cells.h"
 #include "transport/local_pipe.h"
 
 using namespace rdacore;
 using rdaccel::clip::ClipReader;
 using rdaccel::clip::ClipWriter;
+using rdaccel::clip::kTextCell;
 using rdaccel::examples::Args;
 
 namespace {
@@ -55,7 +62,8 @@ int Usage() {
                "usage: rdaccel_clip record OUT.clip [--seconds=60] [--display=0] [--fps=60]\n"
                "       rdaccel_clip render OUT.clip --scenario=NAME [--background=SCREEN.ppm] [--seconds=20]\n"
                "       rdaccel_clip eval CLIP [--text=0] [--bitrate=8000000] [--label=NAME] [--csv=FRAMES.csv] [--focus=x,y,w,h]\n"
-               "       rdaccel_clip frame CLIP --index=N --out=FRAME.ppm\n");
+               "                    [--refine=N] [--still-refine=N] [--split-cells=N] [--split-hot=1] [--text-refine=1] [--cells=1]\n"
+               "       rdaccel_clip frame CLIP --index=N --out=FRAME.ppm [--textmap=1]\n");
   return 2;
 }
 
@@ -150,10 +158,25 @@ int Frame(const Args& args) {
   if (!f) return 1;
   std::fprintf(f, "P6 %d %d 255\n", clip.width(), clip.height());
   const auto& px = clip.frame();
+  // --textmap=1: the cells counted as text (text_cells.h) keep their colours,
+  // the rest is dimmed, to check the labelling by eye.
+  std::vector<uint8_t> text_cell;
+  const bool textmap = args.num("textmap", 0) != 0;
+  if (textmap) rdaccel::clip::LabelTextCells(px.data(), clip.width(), clip.height(), clip.width() * 4, text_cell);
+  uint64_t n_text = 0;
+  for (const uint8_t c : text_cell) n_text += c;
   for (size_t k = 0; k < px.size(); k += 4) {
-    const uint8_t rgb[3] = {px[k + 2], px[k + 1], px[k]};
+    uint8_t rgb[3] = {px[k + 2], px[k + 1], px[k]};
+    if (textmap) {
+      const auto p = static_cast<int32_t>(k / 4);
+      const int32_t cx = p % clip.width() / kTextCell, cy = p / clip.width() / kTextCell;
+      if (!text_cell[static_cast<size_t>(cy) * rdaccel::clip::TextCellCols(clip.width()) + cx]) {
+        for (auto& v : rgb) v = static_cast<uint8_t>(v / 4);
+      }
+    }
     std::fwrite(rgb, 1, 3, f);
   }
+  if (textmap) std::printf("%llu of %zu cells are text\n", static_cast<unsigned long long>(n_text), text_cell.size());
   std::fclose(f);
   std::printf("frame %lld of the clip\n", i);
   return 0;
@@ -218,10 +241,107 @@ int Eval(const Args& args) {
   };
   std::vector<Stretch> stretches;
 
+  // The text of the screen (text_cells.h), apart from the rest. A text cell
+  // on the viewer is one of:
+  //   exact    every pixel as on the screen;
+  //   sharp    from the lossless layer and close to the screen: text mode's
+  //            reduced colours (edges where they are, shades merged);
+  //   before   still the content from before the cell's last change;
+  //   soft     from the video encoder and close to the screen;
+  //   wrong    none of these (a placeholder, or far from the screen).
+  // Text that changed is timed until it is exact or sharp.
+  constexpr double kSoftDb = 25.0;  // "close to the screen": at least this PSNR over the cell
+  std::vector<uint8_t> prev_screen, before, text_cell, has_before;
+  std::vector<uint64_t> changed_at;  // per cell: when its text changed, while the viewer has not shown it exactly
+  int32_t cols = 0, rows = 0;
+  double w_tshare = 0, w_tpx = 0, w_tcell = 0, w_sharp = 0, w_stale = 0, w_soft = 0, w_wrong = 0;
+  double last_tshare = 0, last_tpx = 100, last_tcell = 100, last_sharp = 0, last_stale = 0, last_soft = 0, last_wrong = 0;
+  double sharp_se = 0, sharp_n = 0;  // how far sharp cells are from the screen
+  double soft_se = 0, soft_n = 0;    // ... and soft ones
+  // Soft cells by the colours the cell itself has on the screen: up to 16,
+  // up to 64, more. (Few colours in a soft cell: it went to the encoder for
+  // what else is in its tile.)
+  double w_soft16 = 0, w_soft64 = 0, last_soft16 = 0, last_soft64 = 0;
+  auto cell_colours = [&](const Rect& r) {
+    uint32_t seen[65];
+    int n = 0;
+    for (int32_t y = r.y; y < r.bottom(); ++y) {
+      const uint8_t* p = screen.data() + (static_cast<size_t>(y) * W + r.x) * 4;
+      for (int32_t x = 0; x < r.w; ++x, p += 4) {
+        const uint32_t c = static_cast<uint32_t>(p[0]) | static_cast<uint32_t>(p[1]) << 8 | static_cast<uint32_t>(p[2]) << 16;
+        int k = 0;
+        while (k < n && seen[k] != c) ++k;
+        if (k < n) continue;
+        if (n == 65) return 65;
+        seen[n++] = c;
+      }
+    }
+    return n;
+  };
+  std::vector<double> to_exact_ms;
+  uint64_t superseded = 0;
+  double superseded_ms = 0;
+  auto cell_rect = [&](int32_t cx, int32_t cy) {
+    Rect r{cx * kTextCell, cy * kTextCell, kTextCell, kTextCell};
+    r.w = std::min(r.w, W - r.x);
+    r.h = std::min(r.h, H - r.y);
+    return r;
+  };
+  auto cell_equal = [&](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, const Rect& r) {
+    for (int32_t y = r.y; y < r.bottom(); ++y) {
+      const size_t off = (static_cast<size_t>(y) * W + r.x) * 4;
+      if (std::memcmp(a.data() + off, b.data() + off, static_cast<size_t>(r.w) * 4) != 0) return false;
+    }
+    return true;
+  };
+  // A new clip frame is in `screen`, the one before it in `prev_screen`.
+  auto new_screen = [&](uint64_t t) {
+    cols = rdaccel::clip::TextCellCols(W);
+    rows = rdaccel::clip::TextCellRows(H);
+    rdaccel::clip::LabelTextCells(screen.data(), W, H, W * 4, text_cell);
+    const size_t n = static_cast<size_t>(cols) * rows;
+    changed_at.resize(n, 0);
+    has_before.resize(n, 0);
+    before.resize(screen.size());
+    const bool first = prev_screen.size() != screen.size();
+    for (int32_t cy = 0; cy < rows; ++cy) {
+      for (int32_t cx = 0; cx < cols; ++cx) {
+        const size_t idx = static_cast<size_t>(cy) * cols + cx;
+        const Rect r = cell_rect(cx, cy);
+        const bool changed = first || !cell_equal(prev_screen, screen, r);
+        if (changed && !first) {
+          for (int32_t y = r.y; y < r.bottom(); ++y) {
+            const size_t off = (static_cast<size_t>(y) * W + r.x) * 4;
+            std::memcpy(before.data() + off, prev_screen.data() + off, static_cast<size_t>(r.w) * 4);
+          }
+          has_before[idx] = 1;
+        }
+        if (!text_cell[idx]) {
+          changed_at[idx] = 0;
+        } else if (changed) {
+          if (changed_at[idx] != 0) {
+            ++superseded;
+            superseded_ms += static_cast<double>(t - changed_at[idx]) / 1e3;
+          }
+          changed_at[idx] = t;
+        }
+      }
+    }
+  };
+
+  // What the full-screen encoder's pictures were coded for, and why rects
+  // went to it (session::FrameTrace).
+  struct {
+    double b_key = 0, b_new = 0, b_refine = 0, b_polish = 0, b_other = 0;
+    uint64_t pictures = 0, pictures_no_new = 0;
+    uint64_t colours = 0, hot = 0, budget = 0, keyframe_first = 0, motion = 0, lossless = 0;
+  } why;
+  session::FrameTrace last_trace;
+
   std::FILE* csv = nullptr;
   if (args.has("csv")) {
     csv = std::fopen(args.str("csv").c_str(), "w");
-    if (csv) std::fprintf(csv, "t_ms,resent,dirty_px,video_b,lossless_b,lossless_rects,moved_tiles,cached_tiles,owed_tiles,video_frame,exact_pct\n");
+    if (csv) std::fprintf(csv, "t_ms,resent,dirty_px,video_b,lossless_b,lossless_rects,moved_tiles,cached_tiles,owed_tiles,video_frame,exact_pct,text_exact_pct,text_sharp_pct,text_before_pct,text_soft_pct,text_wrong_pct,hot,hot_unmoved,moves,motion,video_rects\n");
   }
 
   auto measure = [&](uint64_t t) {
@@ -238,6 +358,15 @@ int Eval(const Args& args) {
       w_psnr += last_psnr * dt;
       w_in += last_in * dt;
       w_out += last_out * dt;
+      w_tshare += last_tshare * dt;
+      w_tpx += last_tpx * dt;
+      w_tcell += last_tcell * dt;
+      w_sharp += last_sharp * dt;
+      w_stale += last_stale * dt;
+      w_soft += last_soft * dt;
+      w_soft16 += last_soft16 * dt;
+      w_soft64 += last_soft64 * dt;
+      w_wrong += last_wrong * dt;
       w_time += dt;
     }
     uint64_t same = 0, n_in = 0;
@@ -267,9 +396,71 @@ int Eval(const Args& args) {
     last_psnr = mse == 0 ? 99.0 : std::min(99.0, 10 * std::log10(255.0 * 255.0 / mse));
     last_q_t = t;
     if (!stretches.empty()) stretches.back().samples.push_back({t, last_exact});
+    uint64_t t_px = 0, t_same = 0, cells = 0, c_exact = 0, c_sharp = 0, c_stale = 0, c_soft = 0, c_wrong = 0;
+    uint64_t c_soft16 = 0, c_soft64 = 0;
+    for (int32_t cy = 0; cy < rows; ++cy) {
+      for (int32_t cx = 0; cx < cols; ++cx) {
+        const size_t idx = static_cast<size_t>(cy) * cols + cx;
+        if (!text_cell[idx]) continue;
+        const Rect r = cell_rect(cx, cy);
+        uint64_t c_same = 0;
+        double c_se = 0;
+        for (int32_t y = r.y; y < r.bottom(); ++y) {
+          const size_t off = (static_cast<size_t>(y) * W + r.x) * 4;
+          for (int32_t x = 0; x < r.w; ++x) {
+            const size_t i = off + static_cast<size_t>(x) * 4;
+            const int d0 = shown[i] - screen[i], d1 = shown[i + 1] - screen[i + 1], d2 = shown[i + 2] - screen[i + 2];
+            c_same += (d0 | d1 | d2) == 0;
+            c_se += d0 * d0 + d1 * d1 + d2 * d2;
+          }
+        }
+        const uint64_t n = static_cast<uint64_t>(r.w) * r.h;
+        ++cells;
+        t_px += n;
+        t_same += c_same;
+        const bool close = c_same == n || 10 * std::log10(255.0 * 255.0 / (c_se / static_cast<double>(n * 3))) >= kSoftDb;
+        const bool stale = c_same != n && has_before[idx] && cell_equal(shown, before, r);
+        const bool sharp = c_same != n && !stale && close && host->ShownQuality(r) == 0;
+        if (c_same == n || sharp) {
+          if (changed_at[idx] != 0) {
+            to_exact_ms.push_back(static_cast<double>(t - changed_at[idx]) / 1e3);
+            changed_at[idx] = 0;
+          }
+        }
+        if (c_same == n) {
+          ++c_exact;
+        } else if (sharp) {
+          ++c_sharp;
+          sharp_se += c_se;
+          sharp_n += static_cast<double>(n * 3);
+        } else if (stale) {
+          ++c_stale;
+        } else if (close) {
+          ++c_soft;
+          soft_se += c_se;
+          soft_n += static_cast<double>(n * 3);
+          const int colours = cell_colours(r);
+          c_soft16 += colours <= 16;
+          c_soft64 += colours > 16 && colours <= 64;
+        } else {
+          ++c_wrong;
+        }
+      }
+    }
+    const double nc = static_cast<double>(std::max<uint64_t>(cells, 1));
+    last_tshare = 100.0 * static_cast<double>(cells) / std::max<double>(1.0, static_cast<double>(cols) * rows);
+    last_tpx = t_px ? 100.0 * static_cast<double>(t_same) / static_cast<double>(t_px) : 100.0;
+    last_tcell = cells ? 100.0 * static_cast<double>(c_exact) / nc : 100.0;
+    last_sharp = 100.0 * static_cast<double>(c_sharp) / nc;
+    last_stale = 100.0 * static_cast<double>(c_stale) / nc;
+    last_soft = 100.0 * static_cast<double>(c_soft) / nc;
+    last_soft16 = 100.0 * static_cast<double>(c_soft16) / nc;
+    last_soft64 = 100.0 * static_cast<double>(c_soft64) / nc;
+    last_wrong = 100.0 * static_cast<double>(c_wrong) / nc;
   };
   auto submit = [&](uint64_t t, const std::vector<Rect>& dirty, bool resend) {
-    const auto before = host->stats();
+    const auto stats_before = host->stats();
+    last_trace = {};
     host->OnFrame({{screen.data(), W, H, W * 4}, dirty, t});
     last_submit = t;
     measure(t);
@@ -277,15 +468,17 @@ int Eval(const Args& args) {
       const auto a = host->stats();
       int64_t dpx = 0;
       for (const auto& r : dirty) dpx += static_cast<int64_t>(r.w) * r.h;
-      std::fprintf(csv, "%.0f,%d,%lld,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%.2f\n", (t - first_t) / 1e3, resend ? 1 : 0,
-                   static_cast<long long>(dpx), static_cast<unsigned long long>(a.video_bytes - before.video_bytes),
-                   static_cast<unsigned long long>(a.lossless_bytes - before.lossless_bytes),
-                   static_cast<unsigned long long>(a.lossless_tiles - before.lossless_tiles),
-                   static_cast<unsigned long long>(a.moved_tiles - before.moved_tiles),
-                   static_cast<unsigned long long>(a.cached_tiles - before.cached_tiles),
-                   static_cast<unsigned long long>(a.progressive_tiles + a.refreshed_tiles - before.progressive_tiles -
-                                                   before.refreshed_tiles),
-                   static_cast<unsigned long long>(a.video_frames - before.video_frames), last_exact);
+      std::fprintf(csv, "%.0f,%d,%lld,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d,%d,%d,%d\n", (t - first_t) / 1e3, resend ? 1 : 0,
+                   static_cast<long long>(dpx), static_cast<unsigned long long>(a.video_bytes - stats_before.video_bytes),
+                   static_cast<unsigned long long>(a.lossless_bytes - stats_before.lossless_bytes),
+                   static_cast<unsigned long long>(a.lossless_tiles - stats_before.lossless_tiles),
+                   static_cast<unsigned long long>(a.moved_tiles - stats_before.moved_tiles),
+                   static_cast<unsigned long long>(a.cached_tiles - stats_before.cached_tiles),
+                   static_cast<unsigned long long>(a.progressive_tiles + a.refreshed_tiles - stats_before.progressive_tiles -
+                                                   stats_before.refreshed_tiles),
+                   static_cast<unsigned long long>(a.video_frames - stats_before.video_frames), last_exact, last_tcell, last_sharp,
+                   last_stale, last_soft, last_wrong, last_trace.hot, last_trace.hot_unmoved, last_trace.moved,
+                   last_trace.mass_motion ? 1 : 0, last_trace.video_rects);
     }
   };
 
@@ -308,8 +501,43 @@ int Eval(const Args& args) {
       o.context_tiles_64 = text;
       o.fps = 60;
       o.bitrate_bps = bitrate;
+      // Experiments: how much the refinement and the still-screen polish
+      // cost and give (HostOptions::refine_frames, still_refine_frames).
+      // Text mode's decisions (HostOptions): --split-cells=0 --text-refine=1
+      // is text mode as it was up to rdaccel 3.0.1.
+      o.split_cells = static_cast<int>(args.num("split-cells", o.split_cells));
+      o.split_hot = args.num("split-hot", o.split_hot ? 1 : 0) != 0;
+      o.text_refine = args.num("text-refine", o.text_refine ? 1 : 0) != 0;
+      if (args.has("refine")) o.refine_frames = static_cast<int>(args.num("refine", o.refine_frames));
+      if (args.has("still-refine")) o.still_refine_frames = static_cast<int>(args.num("still-refine", o.still_refine_frames));
       o.region_encoder_factory = [](const codec::EncoderConfig& c, std::string* e) {
         return platform::CreateVideoEncoder(c, e);
+      };
+      o.trace = [&](const session::FrameTrace& f) {
+        last_trace = f;
+        why.colours += f.video_colours;
+        why.hot += f.video_hot;
+        why.budget += f.video_budget;
+        why.keyframe_first += f.video_keyframe_first;
+        why.motion += f.video_motion;
+        why.lossless += f.lossless_rects;
+        if (f.picture_bytes == 0) return;
+        ++why.pictures;
+        const auto bytes = static_cast<double>(f.picture_bytes);
+        if (f.key || f.sharpen) {
+          why.b_key += bytes;
+          return;
+        }
+        // A picture's bytes go to what it was coded for, by tiles.
+        const double all = f.video_rects + f.refine_tiles + f.polish_tiles;
+        if (all <= 0) {
+          why.b_other += bytes;
+          return;
+        }
+        why.b_new += bytes * f.video_rects / all;
+        why.b_refine += bytes * f.refine_tiles / all;
+        why.b_polish += bytes * f.polish_tiles / all;
+        if (f.video_rects == 0) ++why.pictures_no_new;
       };
       host = std::make_unique<session::HostSession>(host_end.get(), std::move(enc), W, H, o);
     } else if (clip.width() != W || clip.height() != H) {
@@ -327,7 +555,9 @@ int Eval(const Args& args) {
       submit(last_submit + kResubmitUs, {}, true);
       ++resent;
     }
+    prev_screen.swap(screen);
     screen = clip.frame();
+    new_screen(clip.time_us());
     stretches.push_back({clip.time_us(), {}});
     submit(clip.time_us(), clip.dirty(), false);
     ++frames;
@@ -349,6 +579,15 @@ int Eval(const Args& args) {
     w_psnr += last_psnr * dt;
     w_in += last_in * dt;
     w_out += last_out * dt;
+    w_tshare += last_tshare * dt;
+    w_tpx += last_tpx * dt;
+    w_tcell += last_tcell * dt;
+    w_sharp += last_sharp * dt;
+    w_stale += last_stale * dt;
+    w_soft += last_soft * dt;
+    w_soft16 += last_soft16 * dt;
+    w_soft64 += last_soft64 * dt;
+    w_wrong += last_wrong * dt;
     w_time += dt;
   }
   std::vector<double> pause_exact;
@@ -367,6 +606,62 @@ int Eval(const Args& args) {
               static_cast<unsigned long long>(resent), s.bytes_sent / 1e3, s.bytes_sent * 8 / 1e3 / std::max(secs, 0.001),
               s.video_bytes / 1e3, s.lossless_bytes / 1e3, w_time > 0 ? w_exact / w_time : 0.0,
               w_time > 0 ? w_psnr / w_time : 0.0, pause_exact.size(), pause_exact.empty() ? 0.0 : pe / pause_exact.size());
+  {
+    std::sort(to_exact_ms.begin(), to_exact_ms.end());
+    auto at = [&](double q) {
+      return to_exact_ms.empty() ? 0.0 : to_exact_ms[static_cast<size_t>(q * static_cast<double>(to_exact_ms.size() - 1))];
+    };
+    uint64_t never = 0;
+    for (const uint64_t c : changed_at) never += c != 0;
+    const double wt = std::max(w_time, 1.0);
+    std::printf("  text: %4.1f%% of the screen | cells, by time: exact %5.1f%%, sharp %5.1f%% (PSNR %.1f), as before the "
+                "change %5.2f%%, soft %5.2f%% (PSNR %.1f; cells of up to 16 colours %.2f%%, up to 64 %.2f%%), wrong %5.2f%% | pixels exact "
+                "%5.1f%%\n",
+                w_tshare / wt, w_tcell / wt, w_sharp / wt,
+                sharp_n > 0 && sharp_se > 0 ? 10 * std::log10(255.0 * 255.0 / (sharp_se / sharp_n)) : 99.0, w_stale / wt,
+                w_soft / wt, soft_n > 0 && soft_se > 0 ? 10 * std::log10(255.0 * 255.0 / (soft_se / soft_n)) : 99.0, w_soft16 / wt,
+                w_soft64 / wt, w_wrong / wt, w_tpx / wt);
+    std::printf("  changed text cells until exact or sharp: %zu, median %.0f ms, 95%% %.0f ms, longest %.0f ms | changed again first: "
+                "%llu (after %.0f ms on average) | not exact at the end: %llu\n",
+                to_exact_ms.size(), at(0.5), at(0.95), at(1.0), static_cast<unsigned long long>(superseded),
+                superseded ? superseded_ms / static_cast<double>(superseded) : 0.0, static_cast<unsigned long long>(never));
+  }
+  std::printf("  pictures: %llu (%llu with nothing new) | keyframes %.0f kB, new content %.0f, refinement %.0f, still polish "
+              "%.0f, other %.0f kB\n",
+              static_cast<unsigned long long>(why.pictures), static_cast<unsigned long long>(why.pictures_no_new),
+              why.b_key / 1e3, why.b_new / 1e3, why.b_refine / 1e3, why.b_polish / 1e3, why.b_other / 1e3);
+  std::printf("  rects: %llu lossless | to video: %llu too many colours, %llu too many for content that keeps changing, "
+              "%llu over the lossless budget, %llu in motion (saver), %llu video first with a keyframe\n",
+              static_cast<unsigned long long>(why.lossless), static_cast<unsigned long long>(why.colours),
+              static_cast<unsigned long long>(why.hot), static_cast<unsigned long long>(why.budget),
+              static_cast<unsigned long long>(why.motion), static_cast<unsigned long long>(why.keyframe_first));
+  // --cells=1: the text cells that are not exact or sharp when the clip
+  // ends, to find out why.
+  if (args.num("cells", 0) != 0 && shown.size() == screen.size()) {
+    for (int32_t cy = 0; cy < rows; ++cy) {
+      for (int32_t cx = 0; cx < cols; ++cx) {
+        if (!text_cell[static_cast<size_t>(cy) * cols + cx]) continue;
+        const Rect r = cell_rect(cx, cy);
+        double se = 0;
+        uint64_t same = 0;
+        for (int32_t y = r.y; y < r.bottom(); ++y) {
+          for (int32_t x = r.x; x < r.right(); ++x) {
+            const size_t i = (static_cast<size_t>(y) * W + x) * 4;
+            const int d0 = shown[i] - screen[i], d1 = shown[i + 1] - screen[i + 1], d2 = shown[i + 2] - screen[i + 2];
+            same += (d0 | d1 | d2) == 0;
+            se += d0 * d0 + d1 * d1 + d2 * d2;
+          }
+        }
+        const double n = static_cast<double>(r.w) * r.h;
+        if (same == static_cast<uint64_t>(n)) continue;
+        const double db = 10 * std::log10(255.0 * 255.0 / (se / (n * 3)));
+        const int q = host->ShownQuality(r);
+        if (q == 0 && db >= kSoftDb) continue;
+        std::printf("  cell %4d,%4d  PSNR %5.1f  %s  %d colours%s\n", r.x, r.y, db,
+                    q == 0 ? "lossless" : q == 1 ? "polished video" : "video", cell_colours(r), db < kSoftDb ? "  WRONG" : "");
+      }
+    }
+  }
   if (focus.w > 0 && w_time > 0) std::printf("  PSNR inside the focus %.1f, outside %.1f\n", w_in / w_time, w_out / w_time);
   std::printf("  video areas: %llu opened, %llu closed, %.0f kB in their streams\n",
               static_cast<unsigned long long>(s.regions_opened), static_cast<unsigned long long>(s.regions_closed),

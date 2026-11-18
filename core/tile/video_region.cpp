@@ -80,14 +80,21 @@ std::vector<VideoRegion> VideoRegionTracker::Update(const std::vector<uint8_t>& 
     history_[i] = ((history_[i] << 1) | (i < busy.size() && busy[i] ? 1 : 0)) & mask;
   }
   for (auto& reg : regions_) {
+    // An area stays open while it changes as an area: a few tiles of a
+    // large one (a caret, a spinner, a clock inside what was a full-screen
+    // transition) do not keep it, or everything else in it, text included,
+    // stays at the area's quality until they stop.
+    int32_t tiles = 0, moving = 0;
     for (int32_t row = reg.rect.y / kTileSize; row * kTileSize < reg.rect.bottom(); ++row) {
       for (int32_t col = reg.rect.x / kTileSize; col * kTileSize < reg.rect.right(); ++col) {
         const size_t i = static_cast<size_t>(row) * cols_ + col;
-        if (i < changed.size() && changed[i]) {
-          reg.last_change = frame_;
-          reg.last_change_us = now_us;
-        }
+        ++tiles;
+        moving += i < changed.size() && changed[i];
       }
+    }
+    if (moving > 0 && moving * p_.min_moving_share >= tiles) {
+      reg.last_change = frame_;
+      reg.last_change_us = now_us;
     }
   }
 

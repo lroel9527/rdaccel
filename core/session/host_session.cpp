@@ -1,5 +1,7 @@
 #include "session/host_session.h"
 
+#include "tile/text_cell.h"
+
 #include <algorithm>
 #include <cstring>
 #include <set>
@@ -398,10 +400,12 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     pending_sharpen_.clear();
   }
   // Tiles at video quality that the still-screen polish has yet to do.
-  // (Text mode polishes as without it: with half the pictures, photos,
-  // icons and the wallpaper stayed softer than in the normal mode.)
+  // (Text mode does not refine or polish, see HostOptions::text_refine: the
+  // pictures that brought photos, icons and the wallpaper to the normal
+  // mode's quality were half of its traffic while typing.)
+  const int refine_option = text && !options_.text_refine ? 0 : options_.refine_frames;
   const auto still_frames = static_cast<uint8_t>(
-      options_.still_min_qp > 0 && options_.refine_frames > 0 ? std::clamp(options_.still_refine_frames, 0, static_cast<int>(kUnpolished) - 1) : 0);
+      options_.still_min_qp > 0 && refine_option > 0 ? std::clamp(options_.still_refine_frames, 0, static_cast<int>(kUnpolished) - 1) : 0);
   for (const auto& c : changes) polish_[static_cast<size_t>(c.row) * differ_.cols() + c.col] = kUnpolished;
   polish_owed_ = false;
   if (still_frames > 0 && !key) {
@@ -464,6 +468,13 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
                       prev_.data() + static_cast<size_t>(c.rect.y + y) * enc_stride + c.rect.x * 4,
                       static_cast<size_t>(c.rect.w) * 4);
         }
+        constexpr size_t kSlotPixels = static_cast<size_t>(kTileSize) * kTileSize;
+        if (slot_pixel_quality_.empty()) slot_pixel_quality_.resize(proto::kTileCacheSlots * kSlotPixels, kPxVideo);
+        for (int32_t y = 0; y < c.rect.h; ++y) {
+          std::memcpy(slot_pixel_quality_.data() + slot * kSlotPixels + static_cast<size_t>(y) * kTileSize,
+                      pixel_quality_.data() + static_cast<size_t>(c.rect.y + y) * width_ + c.rect.x,
+                      static_cast<size_t>(c.rect.w));
+        }
         tile_slot_[tile_index(c)] = slot;
         tile_slot_hash_[tile_index(c)] = c.prev_hash;
       }
@@ -515,10 +526,13 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   // tile by tile (this one sharp now, that one later, a third as video)
   // showed the screen cut into pieces of different ages for as long as it
   // moved. A few such tiles (typing, a caret, a clock) stay exact.
+  FrameTrace trace;  // filled only for options_.trace
+  const bool tracing = static_cast<bool>(options_.trace);
   constexpr size_t kTextMaxHotTiles = 8;
   size_t n_hot = 0;
   for (bool h : hot) n_hot += h;
   bool mass_motion = text && n_hot > kTextMaxHotTiles;
+  trace.hot = static_cast<int>(n_hot);
 
   std::vector<tile::Move> moves;
   std::vector<bool> moved;
@@ -571,6 +585,8 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     size_t hot_unmoved = 0;
     for (size_t i = 0; i < changes.size(); ++i) hot_unmoved += hot[i] && !moved[i];
     if (hot_unmoved <= kTextMaxHotTiles) mass_motion = false;
+    trace.hot_unmoved = static_cast<int>(hot_unmoved);
+    trace.moved = static_cast<int>(moves.size());
     const double hold = static_cast<double>(options_.bitrate_bps) / 8.0 * kLosslessBurstFrames * frame_us / 1e6;
     if (moves.size() > 64 && moves.size() > 6 * moved_count && options_.bitrate_bps > 0 &&
         kBytesPerMove * static_cast<double>(moves.size()) > 0.5 * hold) {
@@ -680,7 +696,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   std::vector<codec::SlotOp> loads;
   std::vector<codec::PaletteTile> lossless_tiles;
   std::vector<tile::TileChange> video_tiles;  // video coded, whole or in part
-  const auto refine_frames = static_cast<uint8_t>(std::clamp(options_.refine_frames, 0, 255));
+  const auto refine_frames = static_cast<uint8_t>(std::clamp(refine_option, 0, 255));
   auto set_refine = [&](const tile::TileChange& c, uint8_t v) {
     uint8_t& r = refine_[tile_index(c)];
     refining_ += (v > 0) - (r > 0);
@@ -740,7 +756,10 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
                            (progressive_now.empty() || !progressive_now[tile_index(c)]);
     if (in_motion) {
       palette = codec::ExtractPalette(frame.bgra, r, max_colors, t);
-      if (!palette) owe_lossless(tile_index(c));
+      if (!palette) {
+        owe_lossless(tile_index(c));
+        ++trace.video_motion;
+      }
     } else if (text) {
       const size_t idx = tile_index(c);
       // The quick pass: a whole tile on its turn, which the viewer has
@@ -758,8 +777,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
         palette = codec::ExtractReducedPalette(frame.bgra, r, options_.text_colors,
                                                options_.lossless_max_colors, 4096, t, nullptr, /*faithful=*/true);
         // Not text (a gradient, a wallpaper, an icon): the video encoder's,
-        // which is good at these and polishes them once the screen is
-        // still. (Exact, as without text mode for up to 256 colours, such a
+        // which is good at these. (Exact, as without text mode for up to 256 colours, such a
         // tile costs 2-3 kB; a scroll over a textured background came to
         // more traffic than without text mode.)
       }
@@ -773,6 +791,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
         // Video now, lossless later (only whole tiles are keyframe changes).
         // Plain tiles cost next to nothing either way and go right away.
         owe_lossless(tile_index(c));
+        ++trace.video_keyframe_first;
         CopyRectInto(frame.bgra, r, enc_input_.data(), enc_stride);
         tile::TileChange part = c;
         part.rect = r;
@@ -819,6 +838,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
           }
           return kDeferred;
         }
+        ++trace.video_budget;
         CopyRectInto(frame.bgra, r, enc_input_.data(), enc_stride);
         tile::TileChange part = c;
         part.rect = r;
@@ -836,7 +856,18 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
         FillRect(r, t.colors[0], enc_input_.data(), enc_stride);
       }
       lossless_tiles.push_back(std::move(t));
+      ++trace.lossless_rects;
       return kCodedLossless;
+    }
+    if (tracing && !in_motion) {
+      // Too many colours for any palette, or only for a hot rect's?
+      codec::PaletteTile whole;
+      if (!text && max_colors < options_.lossless_max_colors &&
+          codec::ExtractPalette(frame.bgra, r, options_.lossless_max_colors, whole)) {
+        ++trace.video_hot;
+      } else {
+        ++trace.video_colours;
+      }
     }
     CopyRectInto(frame.bgra, r, enc_input_.data(), enc_stride);
     tile::TileChange part = c;
@@ -899,7 +930,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
                            static_cast<uint32_t>(y - c.rect.y)});
           matched += static_cast<int64_t>(run.w) * run.h;
           // (If the slot is given up below, the caller codes all of `r`.)
-          SetPixelQuality(run, slot_quality_[slot] == kExact ? kPxExact : kPxVideo);
+          RestorePixelQuality(static_cast<uint32_t>(slot), c.rect, run);
         } else {
           rest.push_back(run);
         }
@@ -1047,10 +1078,14 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
     if (i < n_changed && !key && options_.tile_cache) {
       if (auto slot = cache_.Find(c.hash)) {
         loads.push_back({*slot, c.rect});
-        SetPixelQuality(c.rect, slot_quality_[*slot] == kExact ? kPxExact : kPxVideo);
+        RestorePixelQuality(*slot, c.rect, c.rect);
         quality_[idx] = slot_quality_[*slot];
         stale_[idx] = 0;
-        if (text && quality_[idx] != kExact) owe_lossless(idx);
+        // Owed only where some of it is video that is not finished (text
+        // that went as video): a tile that was split comes back with its
+        // text exact and the rest finished, and coding it again would send
+        // the same.
+        if (text && quality_[idx] != kExact && WorstPixelQuality(c.rect) == kPxVideo) owe_lossless(idx);
         continue;
       }
     }
@@ -1069,6 +1104,102 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
         quality_[idx] = q;
         if (text && q != kExact) owe_lossless(idx);
         continue;
+      }
+    }
+    // Text mode (HostOptions::split_cells): a tile that does not fit a
+    // palette as a whole is looked at in 16 x 16 cells. Its cells of text
+    // (tile::LooksLikeText: text beside a shadow, an icon or a translucent
+    // panel) go out losslessly, and so do other cells of few colours; the
+    // rest goes through the encoder, once: such a tile is not refined or
+    // polished (the picture has its lossless cells flattened, and taking the
+    // whole tile from it again would paint over them).
+    if (options_.split_cells > 0 && text && !(i < n_changed && hot[i] && (mass_motion || !options_.split_hot))) {
+      codec::PaletteTile probe;
+      if (!codec::ExtractReducedPalette(frame.bgra, c.rect, options_.text_colors, options_.lossless_max_colors, 4096,
+                                        probe, nullptr, /*faithful=*/true)) {
+        constexpr int32_t kCell = 16;
+        std::vector<Rect> exact_runs, video_runs, as_is;
+        for (int32_t y = c.rect.y; y < c.rect.bottom(); y += kCell) {
+          const int32_t h = std::min(kCell, c.rect.bottom() - y);
+          int last = -1;  // 1 = the open run is lossless, 0 = video
+          for (int32_t x = c.rect.x; x < c.rect.right(); x += kCell) {
+            const Rect cell{x, y, std::min(kCell, c.rect.right() - x), h};
+            // Text always goes out losslessly: in reduced colours where
+            // that stays faithful, else as it is (a cell has at most 256
+            // colours). Anything else only where it is cheap.
+            const bool reduces = codec::ExtractReducedPalette(frame.bgra, cell, options_.text_colors,
+                                                              options_.lossless_max_colors, 4096, probe, nullptr, true);
+            const bool is_text = tile::LooksLikeText(frame.bgra, cell);
+            if (is_text && !reduces) {
+              as_is.push_back(cell);
+              last = -1;
+              continue;
+            }
+            const bool fits = reduces && (is_text || static_cast<int>(probe.colors.size()) <= options_.split_cells);
+            auto& runs = fits ? exact_runs : video_runs;
+            if (last == (fits ? 1 : 0)) {
+              runs.back().w += cell.w;
+            } else {
+              runs.push_back(cell);
+            }
+            last = fits ? 1 : 0;
+          }
+        }
+        if (!exact_runs.empty() || !as_is.empty()) {
+          bool video = !video_runs.empty(), deferred = false;
+          // One rect around the cells for the encoder (each part costs the
+          // region list its bytes, and more than a few make the tile rough
+          // again); the lossless runs inside it are flattened below and
+          // painted over the picture by the viewer.
+          if (video) {
+            Rect b = video_runs.front();
+            for (const Rect& r : video_runs) {
+              const int32_t x0 = std::min(b.x, r.x), y0 = std::min(b.y, r.y);
+              const int32_t x1 = std::max(b.right(), r.right()), y1 = std::max(b.bottom(), r.bottom());
+              b = {x0, y0, x1 - x0, y1 - y0};
+            }
+            CopyRectInto(frame.bgra, b, enc_input_.data(), enc_stride);
+            tile::TileChange part = c;
+            part.rect = b;
+            video_tiles.push_back(part);
+            // What is not text gets no more than this picture: finished
+            // (the lossless runs below are set exact again).
+            SetPixelQuality(b, kPxPolished);
+          }
+          // A run goes out as one rect where its cells share a palette;
+          // where they do not (each fits one, the run does not), cell by
+          // cell. What then still goes to the encoder is over the lossless
+          // budget: text as video for now, owed, and the tile not finished.
+          for (const Rect& r : exact_runs) {
+            if (r.w <= kCell || codec::ExtractReducedPalette(frame.bgra, r, options_.text_colors,
+                                                             options_.lossless_max_colors, 4096, probe, nullptr, true)) {
+              deferred |= code_rect(c, r, false) != kCodedLossless;
+              continue;
+            }
+            for (int32_t x = r.x; x < r.right(); x += kCell) {
+              deferred |= code_rect(c, Rect{x, r.y, std::min(kCell, r.right() - x), r.h}, false) != kCodedLossless;
+            }
+          }
+          for (const Rect& r : as_is) {
+            codec::PaletteTile t;
+            if (!codec::ExtractPalette(frame.bgra, r, 256, t)) continue;  // (cannot happen: 256 pixels)
+            FillRect(r, t.colors[0], enc_input_.data(), enc_stride);
+            const size_t n = t.colors.size();
+            lossless_spent += (3.0 * static_cast<double>(n) + static_cast<double>(r.w) * r.h) * (text ? lossless_ratio_ : 1.0);
+            lossless_raw += 3.0 * static_cast<double>(n) + static_cast<double>(r.w) * r.h;
+            lossless_tiles.push_back(std::move(t));
+            lossless_px.push_back(kPxExact);
+            ++trace.lossless_rects;
+          }
+          if (deferred) {
+            quality_[idx] = kRough;
+          } else {
+            quality_[idx] = video ? kRefined : kExact;
+            stale_[idx] = 0;
+          }
+          coarse_[idx] = 0;
+          continue;
+        }
       }
     }
     const int how = code_rect(c, c.rect, i < n_changed && hot[i]);
@@ -1177,6 +1308,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
         rect.w = std::min(rect.w, width_ - rect.x);
         rect.h = std::min(rect.h, height_ - rect.y);
         region_tiles.push_back({col, row, 0, 0, rect});
+        ++trace.refine_tiles;
         if (--r == 0) {
           --refining_;
           // The encoder has had its chance to sharpen this tile.
@@ -1191,8 +1323,23 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   if (progressive_key) refine_after.clear();
   for (size_t i : refine_after) {
     set_refine(changes[i], refine_frames);
+    if (refine_frames != 0) continue;
+    const size_t idx = tile_index(changes[i]);
+    if (text && ((i < n_changed && hot[i]) || pending_lossless_[idx])) {
+      // Text mode without refinement: a tile that keeps changing was not
+      // looked at by cells. It stays rough, so it is owed once it stops and
+      // its text is split out then (typing beside an icon or a shadow). So
+      // does one that is owed already: it may be text that went as video
+      // (in motion, over the budget), and must not count as finished when
+      // it comes back from the tile cache before its turn.
+      continue;
+    }
     // With no refinement planned, a refresh would not do better either.
-    if (refine_frames == 0) quality_[tile_index(changes[i])] = kRefined;
+    quality_[idx] = kRefined;
+    // ... and in text mode this is all the video it gets: finished, so that
+    // a scroll does not owe it again (see kPxPolished). Not where it is
+    // owed: that may be text that went as video.
+    if (text) SetPixelQuality(changes[i].rect, kPxPolished);
   }
   // The end of a progressive keyframe: the text has gone out losslessly, so
   // the encoder's picture is now mostly flat and a fresh intra picture of it
@@ -1284,6 +1431,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
           polish_[idx] = still_frames;
         }
         region_tiles.push_back({col, row, 0, 0, rect});
+        ++trace.polish_tiles;
         if (--polish_[idx] == 0) {
           quality_[idx] = kRefined;
           SetPixelQuality(rect, kPxPolished);
@@ -1342,6 +1490,16 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
       ++stats_.encode_errors;
       return false;
     }
+  }
+  if (tracing) {
+    trace.frame_no = frame_no_;
+    trace.mass_motion = mass_motion;
+    trace.key = key;
+    trace.still = still;
+    trace.sharpen = sharpen;
+    trace.picture_bytes = au ? au->nal_data.size() : 0;
+    trace.video_rects = static_cast<int>(video_tiles.size());
+    options_.trace(trace);
   }
   const uint64_t t2 = capture::MonotonicMicros();
 
@@ -1459,6 +1617,13 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   stats_.refreshed_tiles += refresh.size() - put_back - progressive_sent;
   stats_.progressive_tiles += progressive_sent;
   stats_.lossless_us_total += (t1 - t0) + (t3 - t2);
+  rough_waiting_ = false;
+  if (text && options_.lossless) {
+    for (size_t i = 0; i < n_tiles && !rough_waiting_; ++i) {
+      if (quality_[i] != kRough || refine_[i] != 0 || pending_lossless_[i]) continue;
+      rough_waiting_ = regions_.RegionOf(static_cast<int32_t>(i % differ_.cols()), static_cast<int32_t>(i / differ_.cols())) < 0;
+    }
+  }
   return true;
 }
 
@@ -1472,6 +1637,21 @@ void HostSession::TakenFromVideo(const Rect& r) {
   for (int32_t y = r.y; y < r.bottom(); ++y) {
     uint8_t* p = pixel_quality_.data() + static_cast<size_t>(y) * width_ + r.x;
     for (int32_t x = 0; x < r.w; ++x) p[x] = p[x] == kPxExact ? kPxVideo : p[x];
+  }
+}
+
+// `r` (inside the tile `tile`) is painted from `slot`: its pixels are as the
+// viewer had them when the slot was stored.
+void HostSession::RestorePixelQuality(uint32_t slot, const Rect& tile, const Rect& r) {
+  constexpr size_t kSlotPixels = static_cast<size_t>(kTileSize) * kTileSize;
+  if (slot_pixel_quality_.size() < (static_cast<size_t>(slot) + 1) * kSlotPixels) {
+    SetPixelQuality(r, slot_quality_[slot] == kExact ? kPxExact : kPxVideo);
+    return;
+  }
+  for (int32_t y = r.y; y < r.bottom(); ++y) {
+    std::memcpy(pixel_quality_.data() + static_cast<size_t>(y) * width_ + r.x,
+                slot_pixel_quality_.data() + slot * kSlotPixels + static_cast<size_t>(y - tile.y) * kTileSize + (r.x - tile.x),
+                static_cast<size_t>(r.w));
   }
 }
 
