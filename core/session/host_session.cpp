@@ -1803,6 +1803,9 @@ bool HostSession::EncodeRegions(const capture::CapturedFrame& frame, const std::
 
 void HostSession::FinishRegions(const std::vector<uint8_t>& busy,
                                 const std::vector<uint8_t>& changed, uint64_t now_us) {
+  regions_.SetLingerUs(options_.text_mode && options_.lossless && options_.text_linger_us > 0
+                           ? options_.text_linger_us
+                           : options_.region_params.linger_us);
   const auto closed = regions_.Update(busy, changed, now_us);
   for (const auto& reg : closed) {
     for (size_t idx : TilesOf(reg.rect)) pending_sharpen_.push_back(idx);

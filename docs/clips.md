@@ -180,6 +180,7 @@ soft 格再按这一格在原画面上有几种颜色分开：最多 16 种、17
 | `--split-cells=N` | 16 | `split_cells`：整块放不进调色板的块按 16 × 16 的格拆，非文字格最多 N 色才无损；0 = 不拆 |
 | `--split-hot=1` | 0 | `split_hot`：上一帧也变了的块也立刻拆 |
 | `--text-refine=1` | 0 | `text_refine`：文字模式也照普通模式细修和打磨 |
+| `--linger-ms=N` | 100 | `text_linger_us`：文字模式下视频区域不再变化多久后关闭（毫秒；0 = 照普通模式的 250 ms） |
 
 `--split-cells=0 --text-refine=1` 按 3.0.1 的规则决定（视频区域的改动除外，见 [CHANGELOG](../CHANGELOG.md) 3.1.0）。
 

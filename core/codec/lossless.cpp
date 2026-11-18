@@ -260,6 +260,24 @@ bool ExtractReducedPalette(const ImageView& img, const Rect& r, int max_colors, 
     const auto total = static_cast<uint64_t>(r.w) * r.h;
     return far * 50 <= total && static_cast<double>(sum) <= kMaxMeanSquare * static_cast<double>(total);
   };
+  // Whether every 16 x 16 cell of the tile, on its own, stays within
+  // `bound` (mean squared RGB distance a pixel). The tile's mean can be fine
+  // while its errors sit in the cells with text: the shades of anti-aliasing
+  // are what is merged.
+  auto cells_close = [&](double bound) {
+    for (int32_t cy = 0; cy < r.h; cy += 16) {
+      for (int32_t cx = 0; cx < r.w; cx += 16) {
+        const int32_t h = std::min(16, r.h - cy), w = std::min(16, r.w - cx);
+        uint64_t sum = 0;
+        for (int32_t y = cy; y < cy + h; ++y) {
+          const uint16_t* row = px.data() + static_cast<size_t>(y) * r.w;
+          for (int32_t x = cx; x < cx + w; ++x) sum += nearest_d[row[x]];
+        }
+        if (static_cast<double>(sum) > bound * static_cast<double>(w * h)) return false;
+      }
+    }
+    return true;
+  };
   const bool plainly_text = static_cast<int>(n) <= exact_colors;
   const bool gated = faithful || !plainly_text;
   int limit = max_colors;
@@ -294,6 +312,92 @@ bool ExtractReducedPalette(const ImageView& img, const Rect& r, int max_colors, 
       return false;
     }
     limit = std::min(last_limit, limit * 2);
+  }
+  // Faithful: the same number of colours, chosen better where a cell with
+  // text is off by more than 40 dB would show (the decision above, whether
+  // to reduce and to how many, stays the greedy pick's: so does the cost).
+  // Each kept colour but the background and the one furthest from it (the
+  // core of the strokes, which must keep its contrast) moves to the member
+  // of its group that is closest to the group as a whole, weighted by
+  // pixels; a few rounds. A colour that a cell shown exactly uses stays, so
+  // that cell stays exact. Where that would show on the smooth parts or
+  // leave the tile less close, the greedy pick stays.
+  constexpr double kCell40Db = 3.0 * 255 * 255 / 1e4;  // 19.5: a cell at 40 dB PSNR
+  constexpr int kRounds = 3;
+  constexpr size_t kCandidates = 32;  // per group, its most frequent colours
+  if (faithful && kept.size() > 2 && !cells_close(kCell40Db)) {
+    const auto kept0 = kept;
+    const auto nearest0 = nearest;
+    const auto nearest_d0 = nearest_d;
+    std::vector<uint8_t> fixed(kept.size(), 0);
+    fixed[0] = 1;  // `first`, the background
+    size_t extreme = 1;
+    for (size_t j = 1; j < kept.size(); ++j) {
+      if (dist2(kept[j], first) > dist2(kept[extreme], first)) extreme = j;
+    }
+    fixed[extreme] = 1;
+    for (int32_t cy = 0; cy < r.h; cy += 16) {
+      for (int32_t cx = 0; cx < r.w; cx += 16) {
+        const int32_t h = std::min(16, r.h - cy), w = std::min(16, r.w - cx);
+        bool exact = true;
+        for (int32_t y = cy; y < cy + h && exact; ++y) {
+          const uint16_t* row = px.data() + static_cast<size_t>(y) * r.w;
+          for (int32_t x = cx; x < cx + w && exact; ++x) exact = nearest_d[row[x]] == 0;
+        }
+        if (!exact) continue;
+        for (int32_t y = cy; y < cy + h; ++y) {
+          const uint16_t* row = px.data() + static_cast<size_t>(y) * r.w;
+          for (int32_t x = cx; x < cx + w; ++x) fixed[nearest[row[x]]] = 1;
+        }
+      }
+    }
+    std::vector<std::vector<uint16_t>> members(kept.size());
+    std::vector<uint16_t> cand;
+    for (int round = 0; round < kRounds; ++round) {
+      for (auto& m : members) m.clear();
+      for (size_t k = 0; k < n; ++k) members[nearest[k]].push_back(static_cast<uint16_t>(k));
+      bool moved = false;
+      for (size_t j = 0; j < kept.size(); ++j) {
+        const auto& m = members[j];
+        if (fixed[j] || m.size() < 2) continue;
+        cand = m;
+        if (cand.size() > kCandidates) {
+          std::partial_sort(cand.begin(), cand.begin() + kCandidates, cand.end(),
+                            [&](uint16_t a, uint16_t b) { return counts[a] > counts[b]; });
+          cand.resize(kCandidates);
+        }
+        uint64_t best = UINT64_MAX;
+        size_t best_c = kept[j];
+        for (const uint16_t c : cand) {
+          uint64_t e = 0;
+          for (const uint16_t k : m) e += static_cast<uint64_t>(dist2(k, c)) * counts[k];
+          if (e < best) {
+            best = e;
+            best_c = c;
+          }
+        }
+        if (best_c != kept[j]) {
+          kept[j] = best_c;
+          moved = true;
+        }
+      }
+      if (!moved) break;
+      for (size_t k = 0; k < n; ++k) {
+        nearest_d[k] = UINT32_MAX;
+        for (size_t j = 0; j < kept.size(); ++j) {
+          const uint32_t d = dist2(k, kept[j]);
+          if (d < nearest_d[k]) {
+            nearest_d[k] = d;
+            nearest[k] = static_cast<uint16_t>(j);
+          }
+        }
+      }
+    }
+    if (!(close_enough() && smooth_kept())) {
+      kept = kept0;
+      nearest = nearest0;
+      nearest_d = nearest_d0;
+    }
   }
   // Most frequent first (ties by value), as ExtractPalette does.
   std::vector<uint32_t> kept_count(kept.size(), 0);

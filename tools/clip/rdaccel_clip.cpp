@@ -541,6 +541,7 @@ int Eval(const Args& args) {
       o.split_cells = static_cast<int>(args.num("split-cells", o.split_cells));
       o.split_hot = args.num("split-hot", o.split_hot ? 1 : 0) != 0;
       o.text_refine = args.num("text-refine", o.text_refine ? 1 : 0) != 0;
+      if (args.has("linger-ms")) o.text_linger_us = static_cast<int64_t>(args.num("linger-ms", 0) * 1000);
       if (args.has("refine")) o.refine_frames = static_cast<int>(args.num("refine", o.refine_frames));
       if (args.has("still-refine")) o.still_refine_frames = static_cast<int>(args.num("still-refine", o.still_refine_frames));
       o.region_encoder_factory = [](const codec::EncoderConfig& c, std::string* e) {

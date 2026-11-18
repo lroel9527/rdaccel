@@ -2130,6 +2130,54 @@ TEST(Session, TextModeLoadsTextBesideAPhotoFromTheCacheAsFinished) {
   EXPECT_EQ(rig.Diff(TextHalf(1, 0)), 0u);
 }
 
+TEST(Session, TextModeClosesAStillAreaSooner) {
+  // A full-screen transition or a paused video leaves an area whose text
+  // stays at the area's quality until it closes. Once the screen stands
+  // still only the Host's re-submits come, every 100 ms:
+  // without text mode the area closes after linger_us (250 ms), the third
+  // of them; text mode closes it after text_linger_us (100 ms), the first,
+  // and the next frame brings its sharp picture.
+  for (const bool text : {false, true}) {
+    auto [host_end, viewer_end] = transport::MakeLocalPipe();
+    constexpr int W = 320, H = 256;
+    session::HostOptions opts;
+    opts.text_mode = text;
+    opts.refine_frames = 0;
+    opts.region_encoder_factory = [](const codec::EncoderConfig&, std::string*) {
+      return std::make_unique<FakeEncoder>();
+    };
+    opts.region_params.window = 4;
+    opts.region_params.min_busy = 2;
+    opts.region_params.confirm = 1;
+    opts.region_params.linger = 100;  // frames: never, here
+    session::HostSession host(host_end.get(), std::make_unique<FakeEncoder>(), W, H, opts);
+    std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 50);
+    uint64_t t = 1'000'000;
+    ASSERT_TRUE(host.OnFrame({{px.data(), W, H, W * 4}, {}, t}));
+    uint32_t seed = 1;
+    for (int i = 0; i < 10; ++i) {
+      for (int y = 64; y < 192; ++y) {
+        for (int x = 64; x < 256; ++x) {
+          seed = seed * 1664525u + 1013904223u;
+          std::memcpy(&px[(static_cast<size_t>(y) * W + x) * 4], &seed, 3);
+        }
+      }
+      t += 16'667;
+      ASSERT_TRUE(host.OnFrame({{px.data(), W, H, W * 4}, {}, t}));
+    }
+    ASSERT_EQ(host.stats().regions_opened, 1u) << "text " << text;
+    int ticks = 0;
+    while (host.stats().regions_closed == 0 && ticks < 10) {
+      t += 100'000;
+      ASSERT_TRUE(host.OnFrame({{px.data(), W, H, W * 4}, {}, t}));
+      ++ticks;
+    }
+    EXPECT_EQ(ticks, text ? 1 : 3);
+    EXPECT_TRUE(host.work_pending()) << "text " << text;  // the sharp picture
+    PipeStopper stop{host_end, viewer_end};
+  }
+}
+
 TEST(Session, TextModeOffStillRefinesAndPolishesTextBesideAPhoto) {
   // Without text mode the same tile is what it always was: video (no
   // palette fits it as a whole), refined and polished.

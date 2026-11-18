@@ -72,6 +72,10 @@ class VideoRegionTracker {
   // Index of the area containing tile (col, row), or -1.
   int RegionOf(int32_t col, int32_t row) const;
 
+  // Changes VideoRegionParams::linger_us (text mode closes a still area
+  // sooner: HostOptions::text_linger_us).
+  void SetLingerUs(int64_t us) { p_.linger_us = us; }
+
   // Records one processed frame. `busy` has one entry per tile (row-major);
   // `changed` likewise says which tiles changed at all (to keep areas open).
   // Returns the areas that closed in this call (their tiles should get a

@@ -146,6 +146,14 @@ struct HostOptions {
   // traffic while typing and 61% of an idle screen's. true = as in the
   // normal mode.
   bool text_refine = false;
+  // Text mode closes a video area this long after it stopped changing as an
+  // area (without text mode: region_params.linger_us, 250 ms): after a
+  // full-screen transition, or when a film is paused, the text in the area
+  // stays at the area's quality until it closes and is coded again. With
+  // the Host re-submitting a still screen every 100 ms the area closes on
+  // the first re-submit instead of the third, and its text is sharp about
+  // 200 ms after the motion instead of 450. 0 = as without text mode.
+  int64_t text_linger_us = 100'000;
   // Text mode's tiles (2..16 colours) go through the context model
   // (codec/context_tiles.h), about half the bytes of deflate on text. Only
   // for a viewer that decodes it (proto::kCapContextTiles); see
