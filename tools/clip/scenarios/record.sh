@@ -24,6 +24,8 @@ set -u
 REPO=$(cd "$(dirname "$0")/../../.." && pwd)
 OUT=${1:-$REPO/clips}
 [[ $# -gt 0 ]] && shift
+mkdir -p "$OUT"
+OUT=$(cd "$OUT" && pwd)  # absolute: Safari and QuickTime Player open the content by path
 CONTENT=$OUT/content
 CLIP=$REPO/build/bin/rdaccel_clip
 DRIVE=$OUT/drive
@@ -158,8 +160,9 @@ idle() {
 }
 
 scroll() {
-  osascript -e "tell application \"Safari\" to make new document with properties {URL:\"file://$CONTENT/scroll.html\"}" \
-            -e 'tell application "Safari" to activate' >/dev/null
+  # `open`, not a URL handed over by AppleScript: Safari may read a file
+  # outside its sandbox only when Launch Services passes it.
+  open -a Safari "$CONTENT/scroll.html"
   sleep 3
   win Safari 30 30 1250 830
   sleep 1.5
@@ -210,7 +213,7 @@ video() {
 
 switching() {
   [[ $(osascript -e 'tell application "TextEdit" to count documents' 2>/dev/null) -gt 0 ]] || textedit_open
-  osascript -e "tell application \"Safari\" to make new document with properties {URL:\"file://$CONTENT/scroll.html\"}" >/dev/null
+  open -a Safari "$CONTENT/scroll.html"
   sleep 2
   win Safari 30 30 1250 830
   cat > "$D/switching.txt" <<'S'
@@ -247,4 +250,5 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-for s in ${@:-terminal typing ime idle scroll drag video switching}; do $s; done
+(( $# )) || set -- terminal typing ime idle scroll drag video switching
+for s in "$@"; do $s; done
