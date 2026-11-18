@@ -96,6 +96,15 @@ OPTIONAL = [
     ("focus_out", "PSNR inside the focus", r"outside\s+" + NUM),
     ("missed", "(", r"\((\d+) frames without a picture"),
 ]
+# Printed by newer binaries only: the text cells by their pixels alone,
+# independent of the host's bookkeeping. Older outputs do not have the line,
+# so it is not reported as missing either; "-" for the mean (every text cell
+# exact all the time) parses as absent.
+OPTIONAL += [
+    ("t_px40", "text by pixels alone:", r"within 40 dB\s+" + NUM + "%"),
+    ("t_px30", "text by pixels alone:", r"within 30 dB\s+" + NUM + "%"),
+    ("t_px_mean", "text by pixels alone:", r"others' mean PSNR\s+" + NUM),
+]
 
 
 def parse(text):
@@ -226,6 +235,9 @@ def regressions(results, clips, configs):
             a, b = exact_sharp(v), exact_sharp(ref)
             if a is not None and b is not None and a < b - 0.5:
                 checks.append("exact+sharp %.1f%% -> %.1f%% (%+.1f points)" % (b, a, a - b))
+            a, b = get(v, "t_px40"), get(ref, "t_px40")
+            if a is not None and b is not None and a < b - 1.0:
+                checks.append("within 40 dB %.1f%% -> %.1f%% (%+.1f points)" % (b, a, a - b))
             a, b = get(v, "t_wrong"), get(ref, "t_wrong")
             if a is not None and b is not None and a > b + 0.05:
                 checks.append("wrong %.2f%% -> %.2f%% (%+.2f points)" % (b, a, a - b))
@@ -255,8 +267,8 @@ def report(results, clips, configs, markdown):
                 delta = "-" if d is None else "%+.1f%%" % d
             rows1.append([clip.stem, name, fmt(v.get("total_kb")), fmt(v.get("video_kb")), fmt(v.get("lossless_kb")),
                           fmt(v.get("kbps")), delta])
-            rows2.append([clip.stem, name, fmt(v.get("text_share")), fmt(exact_sharp(v), 1), fmt(v.get("t_exact")),
-                          fmt(v.get("t_sharp")), fmt(v.get("t_soft")), fmt(v.get("t_soft_psnr")), fmt(v.get("t_wrong")),
+            rows2.append([clip.stem, name, fmt(v.get("text_share")), fmt(exact_sharp(v), 1), fmt(v.get("t_px40")),
+                          fmt(v.get("t_exact")), fmt(v.get("t_sharp")), fmt(v.get("t_soft")), fmt(v.get("t_soft_psnr")), fmt(v.get("t_wrong")),
                           fmt(v.get("t_before")), fmt(v.get("median_ms")), fmt(v.get("p95_ms")),
                           fmt(v.get("longest_ms")), fmt(v.get("not_exact_end"))])
             rows3.append([clip.stem, name, fmt(v.get("pictures")), fmt(v.get("key_kb")), fmt(v.get("new_kb")),
@@ -266,8 +278,8 @@ def report(results, clips, configs, markdown):
     table("Traffic (kB; change of the total against %s)" % ref_name,
           ["clip", "config", "total kB", "video kB", "lossless kB", "kbps", "total vs ref"], rows1, markdown)
     table("Text (% of text cells by time; times until exact or sharp in ms)",
-          ["clip", "config", "text %", "exact+sharp", "exact", "sharp", "soft", "soft PSNR", "wrong", "as before",
-           "median", "95%", "longest", "not exact at end"], rows2, markdown)
+          ["clip", "config", "text %", "exact+sharp", "within 40 dB", "exact", "sharp", "soft", "soft PSNR", "wrong",
+           "as before", "median", "95%", "longest", "not exact at end"], rows2, markdown)
     table("Video pictures coded for (kB), and rects sent lossless / to video and why",
           ["clip", "config", "pictures", "keyframes", "new content", "refinement", "still polish", "lossless rects",
            "too many colours", "keeps changing", "over budget", "in motion", "keyframe first"], rows3, markdown)
@@ -275,7 +287,8 @@ def report(results, clips, configs, markdown):
     found = regressions(results, clips, configs)
     print()
     title = "Regressions against %s" % ref_name
-    rule = ("exact+sharp lower by more than 0.5 points, wrong higher by more than 0.05 points, "
+    rule = ("exact+sharp lower by more than 0.5 points, within 40 dB lower by more than 1.0 point, "
+            "wrong higher by more than 0.05 points, "
             "95% time higher by more than 50 ms, or total traffic higher by more than 2%")
     if markdown:
         print("### " + title)

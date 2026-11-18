@@ -262,6 +262,16 @@ int Eval(const Args& args) {
   // up to 64, more. (Few colours in a soft cell: it went to the encoder for
   // what else is in its tile.)
   double w_soft16 = 0, w_soft64 = 0, last_soft16 = 0, last_soft64 = 0;
+  // The same text cells by their pixels alone: how close the viewer's cell
+  // is to the screen's, whatever the host believes it sent. "sharp" above
+  // rests on the host's own bookkeeping (ShownQuality), which can be wrong;
+  // this does not. Shares of cells at least 40 and 30 dB PSNR over the cell
+  // (exact ones included), and the PSNR of the cells that are not exact,
+  // capped at kCapDb so a nearly exact cell does not outweigh the rest,
+  // averaged over cell-time (sum and count both weighted by time).
+  constexpr double kCapDb = 60.0;
+  double w_px40 = 0, w_px30 = 0, w_ne_db = 0, w_ne = 0;
+  double last_px40 = 100, last_px30 = 100, last_ne_db = 0, last_ne = 0;
   auto cell_colours = [&](const Rect& r) {
     uint32_t seen[65];
     int n = 0;
@@ -341,7 +351,7 @@ int Eval(const Args& args) {
   std::FILE* csv = nullptr;
   if (args.has("csv")) {
     csv = std::fopen(args.str("csv").c_str(), "w");
-    if (csv) std::fprintf(csv, "t_ms,resent,dirty_px,video_b,lossless_b,lossless_rects,moved_tiles,cached_tiles,owed_tiles,video_frame,exact_pct,text_exact_pct,text_sharp_pct,text_before_pct,text_soft_pct,text_wrong_pct,hot,hot_unmoved,moves,motion,video_rects\n");
+    if (csv) std::fprintf(csv, "t_ms,resent,dirty_px,video_b,lossless_b,lossless_rects,moved_tiles,cached_tiles,owed_tiles,video_frame,exact_pct,text_exact_pct,text_sharp_pct,text_before_pct,text_soft_pct,text_wrong_pct,hot,hot_unmoved,moves,motion,video_rects,text_px40_pct,text_px30_pct\n");
   }
 
   auto measure = [&](uint64_t t) {
@@ -367,6 +377,10 @@ int Eval(const Args& args) {
       w_soft16 += last_soft16 * dt;
       w_soft64 += last_soft64 * dt;
       w_wrong += last_wrong * dt;
+      w_px40 += last_px40 * dt;
+      w_px30 += last_px30 * dt;
+      w_ne_db += last_ne_db * dt;
+      w_ne += last_ne * dt;
       w_time += dt;
     }
     uint64_t same = 0, n_in = 0;
@@ -398,6 +412,8 @@ int Eval(const Args& args) {
     if (!stretches.empty()) stretches.back().samples.push_back({t, last_exact});
     uint64_t t_px = 0, t_same = 0, cells = 0, c_exact = 0, c_sharp = 0, c_stale = 0, c_soft = 0, c_wrong = 0;
     uint64_t c_soft16 = 0, c_soft64 = 0;
+    uint64_t c_px40 = 0, c_px30 = 0, c_ne = 0;
+    double ne_db = 0;
     for (int32_t cy = 0; cy < rows; ++cy) {
       for (int32_t cx = 0; cx < cols; ++cx) {
         const size_t idx = static_cast<size_t>(cy) * cols + cx;
@@ -419,6 +435,18 @@ int Eval(const Args& args) {
         t_px += n;
         t_same += c_same;
         const bool close = c_same == n || 10 * std::log10(255.0 * 255.0 / (c_se / static_cast<double>(n * 3))) >= kSoftDb;
+        // By pixels alone. An exact cell has no error (and an infinite PSNR):
+        // it counts as within both and stays out of the mean.
+        if (c_same == n) {
+          ++c_px40;
+          ++c_px30;
+        } else {
+          const double db = std::min(kCapDb, 10 * std::log10(255.0 * 255.0 / (c_se / static_cast<double>(n * 3))));
+          c_px40 += db >= 40.0;
+          c_px30 += db >= 30.0;
+          ne_db += db;
+          ++c_ne;
+        }
         const bool stale = c_same != n && has_before[idx] && cell_equal(shown, before, r);
         const bool sharp = c_same != n && !stale && close && host->ShownQuality(r) == 0;
         if (c_same == n || sharp) {
@@ -457,6 +485,11 @@ int Eval(const Args& args) {
     last_soft16 = 100.0 * static_cast<double>(c_soft16) / nc;
     last_soft64 = 100.0 * static_cast<double>(c_soft64) / nc;
     last_wrong = 100.0 * static_cast<double>(c_wrong) / nc;
+    // No text cells: all of none is close, as for last_tcell.
+    last_px40 = cells ? 100.0 * static_cast<double>(c_px40) / nc : 100.0;
+    last_px30 = cells ? 100.0 * static_cast<double>(c_px30) / nc : 100.0;
+    last_ne_db = ne_db;
+    last_ne = static_cast<double>(c_ne);
   };
   auto submit = [&](uint64_t t, const std::vector<Rect>& dirty, bool resend) {
     const auto stats_before = host->stats();
@@ -468,7 +501,7 @@ int Eval(const Args& args) {
       const auto a = host->stats();
       int64_t dpx = 0;
       for (const auto& r : dirty) dpx += static_cast<int64_t>(r.w) * r.h;
-      std::fprintf(csv, "%.0f,%d,%lld,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d,%d,%d,%d\n", (t - first_t) / 1e3, resend ? 1 : 0,
+      std::fprintf(csv, "%.0f,%d,%lld,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d,%d,%d,%d,%.2f,%.2f\n", (t - first_t) / 1e3, resend ? 1 : 0,
                    static_cast<long long>(dpx), static_cast<unsigned long long>(a.video_bytes - stats_before.video_bytes),
                    static_cast<unsigned long long>(a.lossless_bytes - stats_before.lossless_bytes),
                    static_cast<unsigned long long>(a.lossless_tiles - stats_before.lossless_tiles),
@@ -478,7 +511,7 @@ int Eval(const Args& args) {
                                                    stats_before.refreshed_tiles),
                    static_cast<unsigned long long>(a.video_frames - stats_before.video_frames), last_exact, last_tcell, last_sharp,
                    last_stale, last_soft, last_wrong, last_trace.hot, last_trace.hot_unmoved, last_trace.moved,
-                   last_trace.mass_motion ? 1 : 0, last_trace.video_rects);
+                   last_trace.mass_motion ? 1 : 0, last_trace.video_rects, last_px40, last_px30);
     }
   };
 
@@ -588,6 +621,10 @@ int Eval(const Args& args) {
     w_soft16 += last_soft16 * dt;
     w_soft64 += last_soft64 * dt;
     w_wrong += last_wrong * dt;
+    w_px40 += last_px40 * dt;
+    w_px30 += last_px30 * dt;
+    w_ne_db += last_ne_db * dt;
+    w_ne += last_ne * dt;
     w_time += dt;
   }
   std::vector<double> pause_exact;
@@ -621,6 +658,13 @@ int Eval(const Args& args) {
                 sharp_n > 0 && sharp_se > 0 ? 10 * std::log10(255.0 * 255.0 / (sharp_se / sharp_n)) : 99.0, w_stale / wt,
                 w_soft / wt, soft_n > 0 && soft_se > 0 ? 10 * std::log10(255.0 * 255.0 / (soft_se / soft_n)) : 99.0, w_soft16 / wt,
                 w_soft64 / wt, w_wrong / wt, w_tpx / wt);
+    // The exact share is the one above (an exact cell is exact by pixels
+    // alone), repeated so the line reads on its own. "-" for the mean when
+    // every text cell was exact all the time.
+    char ne_mean[16] = "-";
+    if (w_ne > 0) std::snprintf(ne_mean, sizeof ne_mean, "%.1f", w_ne_db / w_ne);
+    std::printf("  text by pixels alone: within 40 dB %5.1f%% (exact %5.1f%%), within 30 dB %5.1f%%, others' mean PSNR %s\n",
+                w_px40 / wt, w_tcell / wt, w_px30 / wt, ne_mean);
     std::printf("  changed text cells until exact or sharp: %zu, median %.0f ms, 95%% %.0f ms, longest %.0f ms | changed again first: "
                 "%llu (after %.0f ms on average) | not exact at the end: %llu\n",
                 to_exact_ms.size(), at(0.5), at(0.95), at(1.0), static_cast<unsigned long long>(superseded),

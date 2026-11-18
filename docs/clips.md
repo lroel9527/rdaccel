@@ -83,9 +83,9 @@ build/bin/rdaccel_clip eval clips/drag.clip --text=1
 | PSNR | 同样按时间加权 |
 | pauses: exact | 片段里每段 0.5 秒以上没有变化的停顿，结束时逐像素相同的比例的平均 |
 
-下面几行依次是：`text:`、`changed text cells until exact or sharp:`、`pictures:`、`rects:`（见下面几节），`--focus=x,y,w,h` 时这块区域（比如视频窗口）里面和外面各自的 PSNR（同样按时间加权），最后是视频区域开了几次、关了几次、区域流共多少字节。
+下面几行依次是：`text:`、`text by pixels alone:`、`changed text cells until exact or sharp:`、`pictures:`、`rects:`（见下面几节），`--focus=x,y,w,h` 时这块区域（比如视频窗口）里面和外面各自的 PSNR（同样按时间加权），最后是视频区域开了几次、关了几次、区域流共多少字节。
 
-逐像素相同只是一个方面：视频细修后的块看着清楚，但不算在 exact 里。所以另外单看文字（`text:` 两行）。`--csv=FILE` 输出每一帧发了什么，用来找流量花在哪一帧、哪一类块上。列：
+逐像素相同只是一个方面：视频细修后的块看着清楚，但不算在 exact 里。所以另外单看文字（`text:` 开头的三行）。`--csv=FILE` 输出每一帧发了什么，用来找流量花在哪一帧、哪一类块上。列：
 
 | 列 | 含义 |
 | --- | --- |
@@ -99,6 +99,7 @@ build/bin/rdaccel_clip eval clips/drag.clip --text=1
 | `video_frame` | 这一帧编了几幅视频画面 |
 | `exact_pct` | 这一帧之后对端画面逐像素相同的比例 |
 | `text_exact_pct` `text_sharp_pct` `text_before_pct` `text_soft_pct` `text_wrong_pct` | 这一帧之后文字格五种状态各占文字格的比例（见下） |
+| `text_px40_pct` `text_px30_pct` | 每行最后两列（在 `video_rects` 之后，前面的列和顺序不变）：这一帧之后只看像素、和原画面至少 40 dB、30 dB 的文字格的比例（见“只看像素”） |
 
 个别帧在对端没有自己的画面（输出末尾会说有几帧），这时量的是对端当时显示的画面，也就是用户看到的。
 
@@ -117,6 +118,24 @@ build/bin/rdaccel_clip eval clips/drag.clip --text=1
 一行里依次是：文字格占屏幕的比例；五种状态各占文字格的比例，都按时间加权；sharp 格和 soft 格各自的 PSNR（所有这种格的误差合在一起算，不按时间加权）；文字像素逐像素相同的比例。
 
 soft 格再按这一格在原画面上有几种颜色分开：最多 16 种、17–64 种（其余是更多的）。这一项要紧，因为无损层按 64 × 64 的块决定：颜色少的格本来可以无损发，变成 soft 是因为同一个块里别的东西（图标、照片、渐变）颜色太多，整块送进了视频编码器。少颜色的 soft 格多，说明值得把块分得更细，而不是文字本身没法无损。
+
+### 只看像素：`text by pixels alone:` 一行
+
+```
+  text by pixels alone: within 40 dB  93.1% (exact  16.2%), within 30 dB  99.2%, others' mean PSNR 33.4
+```
+
+同样的文字格，只比对端显示的像素和原画面，不管 Host 以为自己发了什么：整格 PSNR 至少 40 dB 的格占文字格的比例（exact 的格算在内），括号里是其中 exact 的比例（和 `text:` 一行的 exact 是同一个数），至少 30 dB 的比例，以及不是 exact 的格的平均 PSNR（每格最多算 60 dB，免得几乎相同的格把其余的盖住；每个画面里所有不 exact 的格的 PSNR 相加，按格数和时间加权平均；文字格一直都 exact 时是“-”）。比例都按时间加权，和 `text:` 一行一样。低于 25 dB 的已经算在 `text:` 一行的 wrong（或 as before）里，这里不再重复。
+
+为什么要这一行：sharp 靠的是 Host 自己的记账（`HostSession::ShownQuality` 为 0，即整格来自无损层），记账错了，exact + sharp 就会偏高或偏低。以前就有过：缓存槽给整块只记一个质量，和原画面相差不到 45 dB 的格也因此被算成不是 sharp。这一行和记账无关，可以拿来核对。
+
+两个数一起看：
+
+- exact + sharp 高，40 dB 以内低：Host 认为文字是无损的，对端显示的却是别的东西；或者文字模式减色后的颜色离原画面比平常远。
+- 40 dB 以内高，exact + sharp 低：记账把文字说得比实际差（比如上面缓存槽的例子）。
+- 两个数差不多：记账和像素一致，exact + sharp 可信。
+
+两个数不会完全相等：减色后的 sharp 格合起来的 PSNR 在 45 dB 左右，但其中有一部分单格低于 40 dB；反过来，来自视频的 soft 格有的也在 40 dB 以上。`idle`、`typing` 两个片段在文字模式下，exact + sharp 是 99.5%、97.5%，40 dB 以内是 90.9%、93.7%；按 3.0.1 的规则（`--split-cells=0 --text-refine=1`）是 78.0%、76.4% 和 81.2%、84.7%。要看的是同一个片段在两种设置之间两个数是不是往同一个方向变，而不是两个数的绝对差。
 
 ### 文字变化后多久清楚：`changed text cells until exact or sharp:` 一行
 
@@ -205,7 +224,7 @@ tools/clip/compare_runs.py --only idle,typing --markdown base='--text=1' old='--
 
 每次运行的完整输出存在 `--out`（默认 `clips/baseline/runs/`）的 `<片段>.<设置>.txt`，第一行记着 ARGS；同样的 ARGS、比片段和程序都新的输出直接拿来用，不重跑，`--force` 才重跑。`--list` 只列出会跑什么。
 
-打出的表：流量；文字；视频画面编的目的和矩形送进视频的原因；最后是比参照差的地方（regressions：文字格 exact 加 sharp 少 0.5 个百分点以上、wrong 多 0.05 个百分点以上、变化后到 exact 或 sharp 的 95% 时间多 50 ms 以上、流量多 2% 以上，或者没有结果）。`--markdown` 打 Markdown 表。程序没有输出某一项（旧版本、另一种模式）时显示“-”，stderr 说缺了哪些。
+打出的表：流量；文字（exact+sharp 旁边是只看像素 40 dB 以内的比例，旧的输出里没有这一行时显示“-”，也不算缺）；视频画面编的目的和矩形送进视频的原因；最后是比参照差的地方（regressions：文字格 exact 加 sharp 少 0.5 个百分点以上、只看像素 40 dB 以内的少 1.0 个百分点以上、wrong 多 0.05 个百分点以上、变化后到 exact 或 sharp 的 95% 时间多 50 ms 以上、流量多 2% 以上，或者没有结果）。`--markdown` 打 Markdown 表。程序没有输出某一项（旧版本、另一种模式）时显示“-”，stderr 说缺了哪些。
 
 ## 合成场景做成片段
 
