@@ -47,6 +47,7 @@ rda_status Classify(const std::string& msg, rda_status fallback) {
   if (msg.rfind("disconnected", 0) == 0 || Contains(msg, "connection closed")) return RDA_ERR_CLOSED;
   if (Contains(msg, "reserved") || Contains(msg, "larger than")) return RDA_ERR_INVALID_ARG;
   if (Contains(msg, "not connected yet")) return RDA_ERR_BUSY;
+  if (Contains(msg, "older version")) return RDA_ERR_UNSUPPORTED;
   return fallback;
 }
 
@@ -1259,6 +1260,15 @@ rda_status rda_viewer_send_bulk_message(rda_viewer* v, uint32_t type, const uint
   if (!v || (!payload && n)) return Fail(RDA_ERR_INVALID_ARG, "viewer and payload are required");
   std::string err;
   const bool ok = v->viewer->SendBulkMessage(type, std::span<const uint8_t>(payload, n), &err);
+  return SendMessageStatus(ok, err);
+  RDA_GUARD_END
+}
+
+rda_status rda_viewer_send_input_message(rda_viewer* v, uint32_t type, const uint8_t* payload, size_t n) {
+  RDA_GUARD_BEGIN
+  if (!v || (!payload && n)) return Fail(RDA_ERR_INVALID_ARG, "viewer and payload are required");
+  std::string err;
+  const bool ok = v->viewer->SendInputMessage(type, std::span<const uint8_t>(payload, n), &err);
   return SendMessageStatus(ok, err);
   RDA_GUARD_END
 }

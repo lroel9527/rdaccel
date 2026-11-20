@@ -43,8 +43,8 @@ extern "C" {
 /* ---- version ------------------------------------------------------------ */
 
 #define RDA_VERSION_MAJOR 3
-#define RDA_VERSION_MINOR 1
-#define RDA_VERSION_PATCH 1
+#define RDA_VERSION_MINOR 2
+#define RDA_VERSION_PATCH 0
 /* "rc1" and so on for a pre-release, "" for a release. rda_version() does
  * not include it; rda_version_string() does ("1.0.0-rc1"). */
 #define RDA_VERSION_PRERELEASE ""
@@ -443,7 +443,9 @@ typedef struct rda_host_config {
    * RDA_STATE_CONNECTING when the host waits for the next viewer.
    * Transport thread, the library's timer thread, or its serve thread. */
   void (*on_state)(void* user, rda_state state, rda_status reason);
-  /* An application message from the viewer. Transport receive thread. */
+  /* An application message from the viewer. Transport receive thread; those
+   * sent with rda_viewer_send_input_message() (3.2) on the thread that calls
+   * on_input, in order with the input events. */
   void (*on_message)(void* user, uint32_t type, const uint8_t* payload, size_t n);
   /* Decides whether a viewer may connect, from the token in its config;
    * nonzero = accept. NULL = accept everyone. Transport receive thread.
@@ -711,6 +713,15 @@ RDA_API rda_status rda_viewer_send_message(rda_viewer* v, uint32_t type, const u
 RDA_API rda_status rda_viewer_send_bulk_message(rda_viewer* v, uint32_t type, const uint8_t* payload,
                                                 size_t n);
 RDA_API int64_t rda_viewer_bulk_queued_bytes(const rda_viewer* v);
+/* 3.2: an application message on the input channel, so the host gets it in
+ * order with the input events sent before and after it (an input method's
+ * text, then the keys typed after it). It arrives through the host's
+ * on_message, on the thread that calls on_input. Type rules as
+ * rda_viewer_send_message(); at most 64 KiB (RDA_ERR_INVALID_ARG above).
+ * RDA_ERR_UNSUPPORTED with a host older than 3.2; RDA_ERR_BUSY before the
+ * host accepted the viewer. */
+RDA_API rda_status rda_viewer_send_input_message(rda_viewer* v, uint32_t type, const uint8_t* payload,
+                                                 size_t n);
 /* Asks the host for a full refresh (the viewer also does it by itself after
  * decode errors). */
 RDA_API void rda_viewer_request_keyframe(rda_viewer* v);

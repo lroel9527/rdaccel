@@ -126,7 +126,12 @@ void Link::OnReceive(transport::Channel ch, std::span<const uint8_t> bytes) {
       if (role_ != Role::kHost || state_.load() != LinkState::kConnected) return;
       input_parser_.Append(bytes);
       while (auto m = input_parser_.Next()) {
-        if (h_.on_other) h_.on_other(*m);
+        if (auto* am = std::get_if<proto::AppMessage>(&*m)) {
+          if (h_.on_message) h_.on_message(am->type, am->payload);
+        } else if (h_.on_other) {
+          h_.on_other(*m);
+        }
+        if (disconnected()) return;
       }
       if (!input_parser_.error().empty()) {
         log::Warn("input channel: " + input_parser_.error());
@@ -216,6 +221,22 @@ bool Link::SendBulkMessage(uint32_t type, std::span<const uint8_t> payload, std:
     return SendOn(transport::Channel::kBulk, bulk_send_mu_, type, payload, error);
   }
   return SendOn(transport::Channel::kMessage, send_mu_, type, payload, error);
+}
+
+bool Link::SendInputMessage(uint32_t type, std::span<const uint8_t> payload, std::string* error) {
+  if (role_ != Role::kViewer) {
+    if (error) *error = "only a viewer sends messages on the input channel";
+    return false;
+  }
+  if (state_.load() == LinkState::kConnected && !(peer_caps() & proto::kCapInputMessages)) {
+    if (error) *error = "the host does not take messages in order with input (older version)";
+    return false;
+  }
+  if (payload.size() > proto::kMaxInputMessage) {
+    if (error) *error = "message on the input channel larger than 64 KiB";
+    return false;
+  }
+  return SendOn(transport::Channel::kInput, input_send_mu_, type, payload, error);
 }
 
 int64_t Link::BulkQueuedBytes() const {

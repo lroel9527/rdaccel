@@ -3,6 +3,15 @@
 版本号遵循语义化版本。从 1.0 起，同一主版本内 C ABI 只加不改（新函数、结构体末尾加字段），
 `find_package(rdaccel 1.0)` 接受任何 1.x。1.0 之前次版本号（0.x）变化时 C ABI 可能有不兼容改动。
 
+## 3.2.0
+
+新功能：**和输入同序的应用消息**。C ABI 只加不改，线上协议版本号（4）不变。
+
+- `rda_viewer_send_input_message()`（C++：`Viewer::SendInputMessage`）：应用消息走 input 通道，Host 收到它的顺序和前后的输入事件完全一致。Host 照旧经 `on_message` 收到，回调在调用 `on_input` 的那个线程上，排在之前的按键之后、之后的按键之前。给输入法用：上屏的一段文字后面紧跟回车或 ⌘S，不能先到；原来消息和按键各走一个通道，彼此不保序。
+- 最多 64 KiB（更大的返回 `RDA_ERR_INVALID_ARG`），类型规则和 `rda_viewer_send_message()` 一样；Host 接受 viewer 之前返回 `RDA_ERR_BUSY`。
+- 能力协商：新的能力位 `kCapInputMessages`（128），进 `kCapsAll`。Host 在 `Welcome` 里带上它表示认识 input 通道上的应用消息；早于 3.2 的 Host 没有这一位，viewer 这时返回 `RDA_ERR_UNSUPPORTED`，应用退回自己的旧做法。早于 3.2 的 viewer 从不发。
+- 测试：消息和按键交替发 300 条，Host 两个回调里看到的顺序和发出的一样；对 3.1 的 Host 不发；大小和方向的限制；C 接口。
+
 ## 3.1.1
 
 修订：文字模式的两处改进，普通模式的输出不变（13 段片段的流量、画质逐项相同）。C ABI 和线上格式不变。

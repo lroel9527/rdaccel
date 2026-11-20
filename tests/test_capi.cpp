@@ -37,8 +37,8 @@ struct Counter {
 
 TEST(CApi, Version) {
   EXPECT_EQ(rda_version(), RDA_VERSION);
-  EXPECT_EQ(rda_version(), RDA_MAKE_VERSION(3, 1, 1));
-  EXPECT_STREQ(rda_version_string(), "3.1.1");
+  EXPECT_EQ(rda_version(), RDA_MAKE_VERSION(3, 2, 0));
+  EXPECT_STREQ(rda_version_string(), "3.2.0");
   EXPECT_GT(std::strlen(rda_platform_name()), 0u);
   EXPECT_STREQ(rda_status_str(RDA_ERR_TIMEOUT), "RDA_ERR_TIMEOUT");
   EXPECT_STREQ(rda_status_str(static_cast<rda_status>(-999)), "RDA_ERR_UNKNOWN");
@@ -538,6 +538,16 @@ TEST(CApi, ConnectionStateMessagesAndGoodbye) {
   EXPECT_EQ(p.host_ev.messages[0].second, clip);
   EXPECT_EQ(p.viewer_ev.messages[0].first, RDA_MSG_USER_FIRST + 1);
   EXPECT_EQ(p.viewer_ev.messages[0].second, "abc");
+
+  // 3.2: a message in order with the input, through the same on_message.
+  ASSERT_EQ(rda_viewer_send_input_message(p.viewer, RDA_MSG_USER_FIRST + 2, user, 3), RDA_OK);
+  EXPECT_EQ(rda_viewer_send_input_message(p.viewer, RDA_MSG_USER_FIRST + 2, nullptr, 3), RDA_ERR_INVALID_ARG);
+  std::vector<uint8_t> big(64 * 1024 + 1, 0);
+  EXPECT_EQ(rda_viewer_send_input_message(p.viewer, RDA_MSG_USER_FIRST + 2, big.data(), big.size()),
+            RDA_ERR_INVALID_ARG);
+  ASSERT_TRUE(WaitUntil([&] { return p.host_ev.MessageCount() == 2; }));
+  EXPECT_EQ(p.host_ev.messages[1].first, RDA_MSG_USER_FIRST + 2);
+  EXPECT_EQ(p.host_ev.messages[1].second, "abc");
 
   // The viewer leaves: the host hears goodbye, and further sends fail.
   rda_viewer_destroy(p.viewer);

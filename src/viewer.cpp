@@ -154,6 +154,14 @@ bool Viewer::SendBulkMessage(uint32_t type, std::span<const uint8_t> payload, st
   return impl_->link->SendBulkMessage(type, payload, error);
 }
 
+bool Viewer::SendInputMessage(uint32_t type, std::span<const uint8_t> payload, std::string* error) {
+  if (!impl_->link) {
+    if (error) *error = "no transport";
+    return false;
+  }
+  return impl_->link->SendInputMessage(type, payload, error);
+}
+
 int64_t Viewer::BulkQueuedBytes() const { return impl_->link ? impl_->link->BulkQueuedBytes() : -1; }
 
 ConnectionState Viewer::state() const {

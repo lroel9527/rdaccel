@@ -1125,6 +1125,15 @@ class Viewer {
     return SendMessage(type, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(text.data()), text.size()),
                        error);
   }
+  // 3.2: in order with the input events (rda_viewer_send_input_message).
+  bool SendInputMessage(uint32_t type, std::span<const uint8_t> payload, std::string* error = nullptr) {
+    return rda_viewer_send_input_message(v_, type, payload.data(), payload.size()) == RDA_OK ||
+           detail::SetError(error);
+  }
+  bool SendInputMessage(uint32_t type, std::string_view text, std::string* error = nullptr) {
+    return SendInputMessage(
+        type, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(text.data()), text.size()), error);
+  }
   // Decodes a recording synchronously on this thread.
   void FeedRecording(std::span<const uint8_t> bytes) { rda_viewer_feed_recording(v_, bytes.data(), bytes.size()); }
 

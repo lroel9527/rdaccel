@@ -479,3 +479,101 @@ TEST(Link, ThroughATransportWithoutTheBulkChannelBulkGoesAsMessages) {
   EXPECT_EQ(p.host_rec->Sent(Channel::kBulk), 0u);
   EXPECT_GE(p.viewer_rec->Sent(Channel::kMessage), big.size());
 }
+
+TEST(Link, InputMessagesArriveInOrderWithTheInput) {
+  // An input method's text, then the keys typed after it: the host must see
+  // them exactly as the viewer sent them, across two different handlers.
+  auto [a, b] = CreateLocalPipe();
+  std::mutex mu;
+  std::vector<std::string> seen;
+  Link::Handlers hh;
+  hh.on_other = [&](const proto::Message& m) {
+    if (auto* in = std::get_if<proto::InputEvent>(&m)) {
+      std::lock_guard<std::mutex> lock(mu);
+      seen.push_back("key " + std::to_string(in->code));
+    }
+  };
+  hh.on_message = [&](uint32_t type, std::span<const uint8_t> p) {
+    std::lock_guard<std::mutex> lock(mu);
+    seen.push_back("msg " + std::to_string(type - kFirstUserMessage) + " " + std::string(p.begin(), p.end()));
+  };
+  Link host(Link::Role::kHost, a.get(), {}, std::move(hh));
+  Events viewer_ev;
+  Link viewer(Link::Role::kViewer, b.get(), {}, viewer_ev.Handlers());
+  a->SetReceiver([&](Channel ch, std::span<const uint8_t> bytes) { host.OnReceive(ch, bytes); });
+  b->SetReceiver([&](Channel ch, std::span<const uint8_t> bytes) { viewer.OnReceive(ch, bytes); });
+  host.Start();
+  viewer.Start();
+  ASSERT_TRUE(WaitUntil([&] { return viewer.state() == LinkState::kConnected; }));
+  EXPECT_TRUE(viewer.peer_caps() & proto::kCapInputMessages);
+
+  std::vector<std::string> sent;
+  std::string err;
+  for (uint32_t i = 0; i < 300; ++i) {
+    if (i % 3 == 1) {
+      const std::string text = "t" + std::to_string(i);
+      ASSERT_TRUE(viewer.SendInputMessage(kFirstUserMessage + 7,
+                                          std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(text.data()),
+                                                                   text.size()),
+                                          &err))
+          << err;
+      sent.push_back("msg 7 " + text);
+    } else {
+      proto::InputEvent ev;
+      ev.kind = proto::InputKind::kKeyDown;
+      ev.code = i;
+      b->Send(Channel::kInput, proto::Encode(ev));  // as ViewerSession::SendInput does
+      sent.push_back("key " + std::to_string(i));
+    }
+  }
+  ASSERT_TRUE(WaitUntil([&] {
+    std::lock_guard<std::mutex> lock(mu);
+    return seen.size() == sent.size();
+  }));
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    EXPECT_EQ(seen, sent);
+  }
+  viewer.Shutdown();
+  host.Shutdown();
+  b.reset();
+  a.reset();
+}
+
+TEST(Link, InputMessagesNeedAHostThatOffersThem) {
+  auto [a, b] = CreateLocalPipe();
+  RawPeer host(std::move(a));
+  Events ev;
+  Link viewer(Link::Role::kViewer, b.get(), {}, ev.Handlers());
+  b->SetReceiver([&](Channel ch, std::span<const uint8_t> bytes) { viewer.OnReceive(ch, bytes); });
+  viewer.Start();
+  proto::Welcome w;
+  w.caps = proto::kCapsAll & ~proto::kCapInputMessages;  // what a 3.1 host sends
+  host.Send(w);
+  ASSERT_TRUE(WaitUntil([&] { return viewer.state() == LinkState::kConnected; }));
+  std::string err;
+  const uint8_t one[1] = {1};
+  EXPECT_FALSE(viewer.SendInputMessage(kFirstUserMessage, one, &err));
+  EXPECT_NE(err.find("older version"), std::string::npos) << err;
+  // The ordinary message channel still works.
+  EXPECT_TRUE(viewer.SendMessage(kFirstUserMessage, one, &err)) << err;
+  viewer.Shutdown();
+  b.reset();
+}
+
+TEST(Link, InputMessagesAreSmallAndOnlyFromTheViewer) {
+  Pair p;
+  ASSERT_TRUE(WaitUntil([&] { return p.viewer->state() == LinkState::kConnected; }));
+  ASSERT_TRUE(WaitUntil([&] { return p.host->state() == LinkState::kConnected; }));
+  std::string err;
+  std::vector<uint8_t> big(proto::kMaxInputMessage + 1, 0);
+  EXPECT_FALSE(p.viewer->SendInputMessage(kFirstUserMessage, big, &err));
+  EXPECT_NE(err.find("larger than"), std::string::npos) << err;
+  big.pop_back();
+  EXPECT_TRUE(p.viewer->SendInputMessage(kFirstUserMessage, big, &err)) << err;
+  EXPECT_FALSE(p.viewer->SendInputMessage(2, {}, &err));  // reserved type
+  EXPECT_FALSE(p.host->SendInputMessage(kFirstUserMessage, {}, &err));
+  ASSERT_TRUE(WaitUntil([&] { return p.host_ev.message_count() == 1; }));
+  std::lock_guard<std::mutex> lock(p.host_ev.mu);
+  EXPECT_EQ(p.host_ev.messages[0].second.size(), proto::kMaxInputMessage);
+}

@@ -6,6 +6,8 @@
 // responsible for; everything else goes on to the session.
 //
 //   host side:    parses control, input and message; nothing is forwarded raw
+//                 (application messages on the input channel go to on_message,
+//                 in order with the input that on_other gets)
 //                 (the host session may be created later, mid-stream).
 //   viewer side:  parses control (Hello) and message; control, video and
 //                 cursor bytes are also forwarded raw to the viewer session.
@@ -82,6 +84,10 @@ class Link {
   // (the transport has no queue of its own, or the peer has no bulk
   // channel and they went on the message channel).
   int64_t BulkQueuedBytes() const;
+  // Viewer: the same on the input channel, so the host gets it in order with
+  // the input events sent before and after it. False with a host that does
+  // not offer it (older than 3.2) or a payload over proto::kMaxInputMessage.
+  bool SendInputMessage(uint32_t type, std::span<const uint8_t> payload, std::string* error);
 
   LinkState state() const { return state_.load(); }
   // Sound (proto::kCapAudio): the viewer asks for it, the host offers it, in
@@ -132,6 +138,7 @@ class Link {
   proto::StreamParser control_parser_, input_parser_, message_parser_, bulk_parser_;
   std::mutex send_mu_;       // keeps a chunked AppMessage contiguous
   std::mutex bulk_send_mu_;  // the same on the bulk channel
+  std::mutex input_send_mu_;  // the same on the input channel
   bool SendOn(transport::Channel ch, std::mutex& mu, uint32_t type, std::span<const uint8_t> payload,
               std::string* error);
 

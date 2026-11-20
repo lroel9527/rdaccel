@@ -106,6 +106,10 @@ class Viewer {
   // On the bulk channel, and what of it waits (see Host::SendBulkMessage).
   bool SendBulkMessage(uint32_t type, std::span<const uint8_t> payload, std::string* error = nullptr);
   int64_t BulkQueuedBytes() const;
+  // On the input channel: the host gets it in order with the input events
+  // sent before and after it, through its message handler. At most 64 KiB;
+  // false with a host older than 3.2 (it does not offer it).
+  bool SendInputMessage(uint32_t type, std::span<const uint8_t> payload, std::string* error = nullptr);
 
   // kConnecting until the host answers; kDisconnected is final. A viewer
   // without a transport (recording playback) stays kConnecting.

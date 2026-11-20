@@ -46,7 +46,11 @@ inline constexpr uint64_t kCapBulk = 16;
 // when it has sound to send on such a transport. The host captures and sends
 // only to a viewer that has it. 1.13.
 inline constexpr uint64_t kCapAudio = 64;
-inline constexpr uint64_t kCapsAll = kCapMessages | kCapTextInput | kCapContextTiles | kCapContextTiles64 | kCapBulk;
+// Host: takes AppMessage on Channel::kInput too, in order with the input
+// events around it (an input method's text with the keys after it). 3.2.
+inline constexpr uint64_t kCapInputMessages = 128;
+inline constexpr uint64_t kCapsAll =
+    kCapMessages | kCapTextInput | kCapContextTiles | kCapContextTiles64 | kCapBulk | kCapInputMessages;
 
 enum class MsgType : uint8_t {
   kHello = 1,
@@ -119,7 +123,10 @@ struct Goodbye {
 
 // Either direction, on the message channel: an application message, or one
 // of the library's standard ones (clipboard text). Reliable and ordered.
+// Viewer -> host also on the input channel (kCapInputMessages), at most
+// kMaxInputMessage bytes, ordered with the input events.
 inline constexpr size_t kMaxAppMessage = 16u << 20;
+inline constexpr size_t kMaxInputMessage = 64u << 10;
 struct AppMessage {
   uint32_t type = 0;
   std::vector<uint8_t> payload;
