@@ -44,7 +44,7 @@ rdaccel 是一个“分层混合编码”的远程桌面库：先判断哪些块
 | 通道 | 内容 |
 | --- | --- |
 | control | 握手和版本协商、心跳、关键帧请求、断开通知 |
-| input | 键盘、鼠标、滚轮、文字输入（USB HID 键码） |
+| input | 键盘、鼠标、滚轮、文字输入（USB HID 键码）；3.2 起也带和输入同序的应用消息（viewer → host，`rda_viewer_send_input_message`） |
 | surface | 拷贝、缓存、无损块（那条 deflate 流），必须有序 |
 | video | HEVC 码流和本帧的区域列表 |
 | cursor | 指针位置和光标图像，高优先级 |
