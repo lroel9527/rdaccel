@@ -295,7 +295,7 @@ class MacInjector final : public IInputInjector {
         return true;
       }
       case InputKind::kText: {
-        LeaveInputMethod();
+        if (text_leaves_) LeaveInputMethod();
         last_text_ = std::chrono::steady_clock::now();
         // The character itself rides on the event, whatever key 0 is.
         UniChar utf16[2];
@@ -354,8 +354,16 @@ class MacInjector final : public IInputInjector {
     return result->ok;
   }
 
+  void SetTextLeavesInputMethod(bool leaves) override {
+    text_leaves_ = leaves;
+    // An input method stepped away from comes back now: text no longer
+    // needs the layout, and no key event may come to bring it back.
+    if (!leaves && main_ok_ && ime_->switched()) RunOnMain([ime = ime_] { ime->Restore(); }, kMainTimeoutMs);
+  }
+
  private:
   static constexpr int kMainTimeoutMs = 200;
+  std::atomic<bool> text_leaves_{true};
   static constexpr auto kTextIdle = std::chrono::seconds(1);
 
   void LeaveInputMethod() {

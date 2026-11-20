@@ -496,6 +496,14 @@ rda_status rda_injector_select_input_source(rda_injector* injector, const char* 
   RDA_GUARD_END
 }
 
+rda_status rda_injector_set_text_leaves_input_method(rda_injector* injector, int leaves) {
+  RDA_GUARD_BEGIN
+  if (!injector) return Fail(RDA_ERR_INVALID_ARG, "injector is required");
+  injector->impl->SetTextLeavesInputMethod(leaves != 0);
+  return RDA_OK;
+  RDA_GUARD_END
+}
+
 // ---- transports -----------------------------------------------------------
 
 rda_status rda_transport_custom(const rda_transport_vtable* vtable, void* self, rda_transport** out) {

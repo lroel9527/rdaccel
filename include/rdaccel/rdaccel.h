@@ -43,7 +43,7 @@ extern "C" {
 /* ---- version ------------------------------------------------------------ */
 
 #define RDA_VERSION_MAJOR 3
-#define RDA_VERSION_MINOR 2
+#define RDA_VERSION_MINOR 3
 #define RDA_VERSION_PATCH 0
 /* "rc1" and so on for a pre-release, "" for a release. rda_version() does
  * not include it; rda_version_string() does ("1.0.0-rc1"). */
@@ -274,6 +274,14 @@ RDA_API rda_status rda_current_input_source(rda_input_source_info* out);
  * RDA_INPUT_TEXT, so that choice is not undone later. RDA_ERR_INVALID_ARG
  * for a source that is not enabled there. Thread-safe. */
 RDA_API rda_status rda_injector_select_input_source(rda_injector* injector, const char* id);
+/* (3.3) Whether RDA_INPUT_TEXT first steps away from an input method to the
+ * ASCII-capable layout (see rda_injector_inject; nonzero, the default) or
+ * types into whatever source is current (0): for an input method of the
+ * application's own that passes keys through, which stepping away would
+ * replace with a layout that nothing brings back while only text comes.
+ * Turning it off gives back an input method stepped away from. Thread-safe;
+ * no effect where there are no input sources. */
+RDA_API rda_status rda_injector_set_text_leaves_input_method(rda_injector* injector, int leaves);
 
 /* ---- connection --------------------------------------------------------- */
 

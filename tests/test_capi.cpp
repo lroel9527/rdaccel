@@ -37,8 +37,8 @@ struct Counter {
 
 TEST(CApi, Version) {
   EXPECT_EQ(rda_version(), RDA_VERSION);
-  EXPECT_EQ(rda_version(), RDA_MAKE_VERSION(3, 2, 0));
-  EXPECT_STREQ(rda_version_string(), "3.2.0");
+  EXPECT_EQ(rda_version(), RDA_MAKE_VERSION(3, 3, 0));
+  EXPECT_STREQ(rda_version_string(), "3.3.0");
   EXPECT_GT(std::strlen(rda_platform_name()), 0u);
   EXPECT_STREQ(rda_status_str(RDA_ERR_TIMEOUT), "RDA_ERR_TIMEOUT");
   EXPECT_STREQ(rda_status_str(static_cast<rda_status>(-999)), "RDA_ERR_UNKNOWN");
@@ -853,6 +853,7 @@ TEST(CApi, KeyboardInputSources) {
   EXPECT_STREQ(shorter.id, cur.id);
   EXPECT_EQ(shorter.guard, 0xABCDu);
   EXPECT_EQ(rda_injector_select_input_source(nullptr, "x"), RDA_ERR_INVALID_ARG);
+  EXPECT_EQ(rda_injector_set_text_leaves_input_method(nullptr, 0), RDA_ERR_INVALID_ARG);
 }
 
 // ---- sound (1.13) -----------------------------------------------------------

@@ -30,6 +30,10 @@ class IInputInjector {
     if (error) *error = "selecting input sources is not supported on this platform";
     return false;
   }
+  // Whether kText first steps away from an input method to an ASCII-capable
+  // layout (macOS; true by default). Turned off, text goes to whatever source
+  // is current, for one that passes keys through. Thread-safe.
+  virtual void SetTextLeavesInputMethod(bool leaves) { (void)leaves; }
 };
 
 }  // namespace rdacore::platform
