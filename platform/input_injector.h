@@ -34,6 +34,10 @@ class IInputInjector {
   // layout (macOS; true by default). Turned off, text goes to whatever source
   // is current, for one that passes keys through. Thread-safe.
   virtual void SetTextLeavesInputMethod(bool leaves) { (void)leaves; }
+  // An input method that passes keys through (an application's own): while
+  // it is the current source, kText goes into it as is; other input methods
+  // are still stepped away from. Empty = none. Thread-safe. (3.4)
+  virtual void SetTextPassthroughSource(const std::string& id) { (void)id; }
 };
 
 }  // namespace rdacore::platform

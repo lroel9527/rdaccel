@@ -105,6 +105,8 @@ bool IsInputMethod(TISInputSourceRef src) {
                   CFEqual(type, kTISTypeKeyboardInputMethodModeEnabled));
 }
 
+std::string CFString(CFTypeRef v);
+
 // While an input method is the current input source it takes the injected
 // characters as keystrokes of a composition (or drops them while one is
 // open). So text is typed with an ASCII-capable layout selected, and the
@@ -115,13 +117,15 @@ struct InputSourceSwitch {
   std::mutex mu;
   TISInputSourceRef saved = nullptr;  // the input method we switched away from
   TISInputSourceRef ours = nullptr;   // the layout we selected
+  std::string passthrough;            // an input method text goes into as is (3.4)
 
   // Main thread. True if it switched just now.
   bool LeaveInputMethod() {
     std::lock_guard<std::mutex> lock(mu);
     if (saved) return false;
     TISInputSourceRef cur = TISCopyCurrentKeyboardInputSource();
-    if (!IsInputMethod(cur)) {
+    if (!IsInputMethod(cur) ||
+        (!passthrough.empty() && CFString(TISGetInputSourceProperty(cur, kTISPropertyInputSourceID)) == passthrough)) {
       if (cur) CFRelease(cur);
       return false;
     }
@@ -152,6 +156,14 @@ struct InputSourceSwitch {
   bool switched() {
     std::lock_guard<std::mutex> lock(mu);
     return saved != nullptr;
+  }
+
+  // Any thread. True if the input method switched away from is that one:
+  // it is to come back now.
+  bool SetPassthrough(const std::string& id) {
+    std::lock_guard<std::mutex> lock(mu);
+    passthrough = id;
+    return saved && !id.empty() && CFString(TISGetInputSourceProperty(saved, kTISPropertyInputSourceID)) == id;
   }
 
   // Main thread. Drops the remembered input method without selecting it
@@ -361,6 +373,12 @@ class MacInjector final : public IInputInjector {
     if (!leaves && main_ok_ && ime_->switched()) RunOnMain([ime = ime_] { ime->Restore(); }, kMainTimeoutMs);
   }
 
+  void SetTextPassthroughSource(const std::string& id) override {
+    // Stepped away from that one already: it comes back now, for the same
+    // reason as above.
+    if (ime_->SetPassthrough(id) && main_ok_) RunOnMain([ime = ime_] { ime->Restore(); }, kMainTimeoutMs);
+  }
+
  private:
   static constexpr int kMainTimeoutMs = 200;
   std::atomic<bool> text_leaves_{true};
@@ -426,7 +444,7 @@ class MacInjector final : public IInputInjector {
 
   std::mutex mu_;
   std::shared_ptr<InputSourceSwitch> ime_ = std::make_shared<InputSourceSwitch>();
-  bool main_ok_ = true;  // false once the main thread failed to answer
+  std::atomic<bool> main_ok_{true};  // false once the main thread failed to answer
   std::chrono::steady_clock::time_point last_text_{};
   const CGDirectDisplayID id_;
   int32_t src_w_ = 1, src_h_ = 1;

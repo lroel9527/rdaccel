@@ -43,7 +43,7 @@ extern "C" {
 /* ---- version ------------------------------------------------------------ */
 
 #define RDA_VERSION_MAJOR 3
-#define RDA_VERSION_MINOR 3
+#define RDA_VERSION_MINOR 4
 #define RDA_VERSION_PATCH 0
 /* "rc1" and so on for a pre-release, "" for a release. rda_version() does
  * not include it; rda_version_string() does ("1.0.0-rc1"). */
@@ -282,6 +282,15 @@ RDA_API rda_status rda_injector_select_input_source(rda_injector* injector, cons
  * Turning it off gives back an input method stepped away from. Thread-safe;
  * no effect where there are no input sources. */
 RDA_API rda_status rda_injector_set_text_leaves_input_method(rda_injector* injector, int leaves);
+/* (3.4) An input method that passes every key through (an application's
+ * own, by input source id): while it is the current source, RDA_INPUT_TEXT
+ * types into it as is, and only other input methods are stepped away from.
+ * Narrower than rda_injector_set_text_leaves_input_method(0), which types
+ * into any input method, also one that would compose the characters.
+ * NULL or "" = none. Set while text is stepped away from that source, it
+ * comes back at once. Thread-safe; no effect where there are no input
+ * sources. */
+RDA_API rda_status rda_injector_set_text_passthrough_source(rda_injector* injector, const char* id);
 
 /* ---- connection --------------------------------------------------------- */
 

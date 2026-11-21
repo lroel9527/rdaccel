@@ -504,6 +504,14 @@ rda_status rda_injector_set_text_leaves_input_method(rda_injector* injector, int
   RDA_GUARD_END
 }
 
+rda_status rda_injector_set_text_passthrough_source(rda_injector* injector, const char* id) {
+  RDA_GUARD_BEGIN
+  if (!injector) return Fail(RDA_ERR_INVALID_ARG, "injector is required");
+  injector->impl->SetTextPassthroughSource(id ? id : "");
+  return RDA_OK;
+  RDA_GUARD_END
+}
+
 // ---- transports -----------------------------------------------------------
 
 rda_status rda_transport_custom(const rda_transport_vtable* vtable, void* self, rda_transport** out) {

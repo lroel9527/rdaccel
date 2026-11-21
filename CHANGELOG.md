@@ -3,6 +3,14 @@
 版本号遵循语义化版本。从 1.0 起，同一主版本内 C ABI 只加不改（新函数、结构体末尾加字段），
 `find_package(rdaccel 1.0)` 接受任何 1.x。1.0 之前次版本号（0.x）变化时 C ABI 可能有不兼容改动。
 
+## 3.4.0
+
+新功能：**只让指定的输入法原样接收文字**。C ABI 只加不改，线上格式不变。
+
+- `rda_injector_set_text_passthrough_source(injector, id)`：当前输入源是这个 id 的输入法（应用自己的、不吞按键的那种）时，`RDA_INPUT_TEXT` 直接打进去；换成别的输入法（拼音等）仍照旧先切到 ASCII 布局。3.3 的 `rda_injector_set_text_leaves_input_method(0)` 对所有输入法都不切，系统把输入源换成拼音的那一会儿，文字会被拼音当成按键组字或吞掉。设置时如果正从这个输入法切开着，马上切回。
+- `main_ok_` 改成原子变量：`rda_injector_set_text_leaves_input_method` 在别的线程读它。
+- 测试：C 接口的参数检查。
+
 ## 3.3.0
 
 新功能：**打文字时可以不切走输入法**。C ABI 只加不改，线上格式不变。
