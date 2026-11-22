@@ -1,16 +1,25 @@
 # rdaccel
 
-面向极低带宽的远程桌面加速库。画面按区域分类传输：没变的区域不发，平移的区域只发拷贝指令，以前出现过的内容从接收端缓存贴回，文字和界面走无损调色板层，只有视频类区域交给硬件 HEVC 编码（macOS VideoToolbox，Linux FFmpeg；本机 HEVC 太慢时可回退到 H.264）。
+面向低带宽的远程桌面加速库。画面按区域分类传输：没变的区域不发，平移的区域只发拷贝指令，以前出现过的内容从接收端缓存贴回，文字和界面走无损调色板层，只有视频类区域交给硬件 HEVC 编码（macOS VideoToolbox）。
 
-当前版本 3.4.0（只支持 macOS，只走 UDP，只用 HEVC；Linux、TCP 传输和 H.264 在 2.0.0 删掉了）。[rdmachine](https://github.com/lroel9527/rdmachine)（对标 NoMachine 的 Mac 远程桌面）就建在 rdaccel 之上：画面、光标、输入和传输由 rdaccel 负责，登录、会话和界面由 rdmachine 负责。
+当前版本 3.4.0，功能已经完成，之后只修问题。[rdmachine](https://github.com/lroel9527/rdmachine)（Mac 远程桌面，功能对标 macOS 屏幕共享、流量少得多）建在 rdaccel 之上：画面、光标、输入、声音和传输由 rdaccel 负责，登录、会话和界面由 rdmachine 负责。
 
 - 静止桌面几十 kbps，打字约 50 kbps，滚动和拖窗 1 Mbps 以内，文字保持无损（[评测](docs/benchmarks.md)）
-- 文字模式（`text_mode`）：体验和普通模式一样，流量更少。静止和打字省 3–7 倍（文字减色后用专门的编码），滚动和拖窗省三到六成（[架构](docs/architecture.md#文字模式)）
+- 文字模式（`text_mode`）：文字精确、立刻到，流量更少；按 16 × 16 小块认出文字单独编码，不是文字的内容只编一遍、不再打磨。静止和打字省 3–7 倍，滚动和拖窗省三到六成（[架构](docs/architecture.md#文字模式)）
 - 自带 UDP 传输：丢包重传、BBR 式拥塞控制、自适应码率，0.4 Mbps 的链路上也不超发
 - 光标走独立通道，链路占满时指针照样跟手
 - 声音（1.13）：macOS 14.2 的系统声音（Process Tap，可让被控端本机不出声），Opus 低延迟编码，安静时一个包都不发，走不重传的数据报、自适应抖动缓冲和时钟漂移修正；可选的播放器
 - XChaCha20-Poly1305 加密（密钥由应用提供）、连接状态、认证钩子、输入事件和应用消息通道
-- 稳定的 C ABI，加一层只有头文件的 C++ 包装；只支持 macOS 14.2+（Apple Silicon 和 Intel）
+- 稳定的 C ABI，加一层只有头文件的 C++ 包装
+
+## 限制
+
+- **只支持 macOS 14.2+**（Apple 芯片和 Intel），两端都是。Linux 和 Windows 不支持（Linux 在 2.0.0 删掉了）。
+- **只用 HEVC 硬件编码**，没有 H.264、VP9、AV1，也没有软件编码。
+- **自带的传输只有 UDP**，没有 TCP 退回，也不做打洞和中继；需要时应用自己实现 `Transport`。
+- **不追求画质**：没有 HDR、4:4:4。文字模式下不是文字的内容会比普通模式差。
+- **只采集一块屏**：一个 Host 对应一块显示器，多块屏要开多个 Host。
+- 密钥由应用提供，库里没有登录和身份认证。
 
 ## 用法
 
@@ -81,8 +90,9 @@ KEY=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')         # 32 字节密钥，�
 | [集成指南](docs/integration.md) | 两端各做什么、线程、生命周期、传输选择、加密、常用配置、出错处理、平台要求 |
 | [架构](docs/architecture.md) | 一帧怎么走、分流的四条路、传输和拥塞控制、码率控制、光标、代码布局、配置开关 |
 | [设计背景与范围](docs/design.md) | 目标、为什么分层混合编码、库的边界和接口约定、参考文献 |
-| [评测](docs/benchmarks.md) | 分区编码、视频区域、模拟网络、渐进首帧、光标通道、Mac 弱网的实测数字和复现命令 |
+| [评测](docs/benchmarks.md) | Mac 弱网、分区编码的实测数字和复现命令 |
 | [构建与测试](docs/building.md) | macOS 构建、示例工具、sanitizer、fuzz |
+| [测试片段](docs/clips.md) | 录制和重放屏幕片段，比较两个版本的流量和文字清晰度 |
 | [发版](docs/releasing.md) | 发版步骤和兼容性约定 |
 
 ## 构建
