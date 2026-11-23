@@ -276,10 +276,21 @@ class HostSession {
   // the full-screen picture does not follow.
   static constexpr int32_t kVideoSurround = 2;
   void SurroundVideoRects(const capture::CapturedFrame& frame, const std::vector<tile::TileChange>& taken);
+  // Text mode flattens each lossless rect in the encoder's picture (the viewer
+  // paints the rect over it), and the pixels the viewer takes from the
+  // picture next to such a rect take on some of its colour: a tint along the
+  // last row of a wallpaper or icon tile beside a text tile, kept for good as
+  // text mode codes such tiles once. SurroundVideoRects does not reach these
+  // (it skips keyframes and the inside of the rects taken). Before a picture
+  // is coded, the pixels of `lossless` within kVideoSurround of a pixel taken
+  // from it are given the screen's content.
+  void KeepScreenNextToVideo(const capture::CapturedFrame& frame, const std::vector<tile::TileChange>& taken,
+                             const std::vector<codec::PaletteTile>& lossless);
   void Send(transport::Channel ch, const proto::Message& m);
 
   transport::ITransport* transport_;
   std::unique_ptr<codec::IHevcEncoder> encoder_;
+  std::vector<uint8_t> video_px_;  // KeepScreenNextToVideo: the pixels taken from the picture (reused)
   int32_t width_, height_;
   HostOptions options_;
   tile::TileDiffer differ_;

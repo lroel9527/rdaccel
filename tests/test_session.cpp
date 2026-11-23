@@ -1425,6 +1425,37 @@ TEST(Session, TheEncoderSeesTheScreenJustOutsideWhatTheViewerTakesFromAPicture) 
   PipeStopper stop{host_end, viewer_end};
 }
 
+TEST(Session, TextModeGivesTheEncoderTheScreenNextToAPhotoInTheKeyframeToo) {
+  // As above, in the keyframe: text mode codes the photo once, so the
+  // keyframe's picture is where its outermost pixels get their colour for
+  // good. They took on some of the flattened text's one colour (rdaccel
+  // 3.4.0 and before: SurroundVideoRects skips keyframes).
+  constexpr int W = 256, H = 128, kFps = 30;
+  auto [host_end, viewer_end] = transport::MakeLocalPipe();
+  std::vector<uint8_t> input;
+  auto enc = std::make_unique<FakeEncoder>();
+  enc->input = &input;
+  session::HostSession host(host_end.get(), std::move(enc), W, H,
+                            {.text_mode = true, .fps = kFps, .bitrate_bps = 20'000'000});
+  std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 255);
+  uint32_t seed = 9;
+  FillText(px, W, {0, 0, 128, H}, seed, 3);
+  FillNoise(px, W, {128, 0, 128, H}, seed);
+  host.OnFrame({{px.data(), W, H, W * 4}, {}, 1'000'000});
+  ASSERT_EQ(input.size(), px.size());
+  EXPECT_GT(host.stats().lossless_tiles, 0u);
+  size_t beside = 0, further = 0;
+  for (int y = 0; y < H; ++y) {
+    for (int x = 120; x < 128; ++x) {
+      const size_t i = (static_cast<size_t>(y) * W + x) * 4;
+      (x >= 126 ? beside : further) += std::memcmp(&input[i], &px[i], 3) != 0;
+    }
+  }
+  EXPECT_EQ(beside, 0u);
+  EXPECT_GT(further, 128u);  // still one colour there
+  PipeStopper stop{host_end, viewer_end};
+}
+
 TEST(Session, OwedTextGoesOutAFewTilesAFrameOnASlowPath) {
   // A screenful of dense text that went as video while it moved, on a
   // 0.4 Mbps path where frames come 200 ms apart (the transport skips the
@@ -1824,6 +1855,7 @@ struct TextRig {
   static constexpr int W = 256, H = 128, kFps = 30;
   std::unique_ptr<transport::LocalPipeEndpoint> host_end, viewer_end;
   size_t pictures = 0;
+  std::vector<uint8_t> input;  // the encoder's last picture (BGRA)
   std::unique_ptr<session::HostSession> host;
   std::unique_ptr<session::ViewerSession> viewer;
   Shown shown;
@@ -1835,6 +1867,7 @@ struct TextRig {
     viewer_end = std::move(b);
     auto enc = std::make_unique<FakeEncoder>();
     enc->pictures = &pictures;
+    enc->input = &input;
     o.fps = kFps;
     o.bitrate_bps = 20'000'000;
     host = std::make_unique<session::HostSession>(host_end.get(), std::move(enc), W, H, o);
@@ -1907,6 +1940,35 @@ TEST(Session, TextModeSendsTextBesideAPhotoExactlyAndThePhotoOnce) {
       EXPECT_GT(rig.Diff(TextHalf(2, 1)), 0u);
     }
   }
+}
+
+TEST(Session, TextModeGivesTheEncoderTheScreenNextToThePhotoInsideASplitTile) {
+  // Text between two photos in one tile (an icon, its label, the next
+  // icon): the encoder gets one rect around the photo cells, so the text
+  // cells lie inside the rect the viewer takes from the picture (it paints
+  // them over it), where SurroundVideoRects does not go. The two columns of
+  // text next to each photo are the screen's in the encoder's input all the
+  // same; further away the text stays flattened.
+  TextRig rig({.text_mode = true});
+  rig.Settle();
+  uint32_t seed = 41;
+  FillNoise(rig.px, TextRig::W, {64, 0, 16, 64}, seed);
+  FillStrokes(rig.px, TextRig::W, {80, 0, 32, 64}, seed);
+  FillNoise(rig.px, TextRig::W, {112, 0, 16, 64}, seed);
+  const auto before = rig.host->stats();
+  rig.input.clear();
+  rig.Frame();
+  ASSERT_EQ(rig.input.size(), rig.px.size());
+  EXPECT_EQ(rig.host->stats().lossless_tiles - before.lossless_tiles, 4u);  // the text, in this picture
+  size_t beside = 0, further = 0;
+  for (int y = 0; y < 64; ++y) {
+    for (int x = 80; x < 112; ++x) {
+      const size_t i = (static_cast<size_t>(y) * TextRig::W + x) * 4;
+      (x < 82 || x >= 110 ? beside : further) += std::memcmp(&rig.input[i], &rig.px[i], 3) != 0;
+    }
+  }
+  EXPECT_EQ(beside, 0u);
+  EXPECT_GT(further, 64u);  // still one colour there
 }
 
 TEST(Session, TextModeSplitChangesNothingForTextAloneOrAPhotoAlone) {

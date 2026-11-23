@@ -1444,6 +1444,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& frame, std::string* erro
   for (const auto& t : region_tiles) TakenFromVideo(t.rect);
   for (size_t i = 0; i < lossless_tiles.size(); ++i) SetPixelQuality(lossless_tiles[i].rect, lossless_px[i]);
   if (!key) SurroundVideoRects(frame, region_tiles);
+  if (text) KeepScreenNextToVideo(frame, region_tiles, lossless_tiles);
   const uint64_t t1 = capture::MonotonicMicros();
 
   std::optional<codec::HevcAccessUnit> au;
@@ -1662,6 +1663,65 @@ uint8_t HostSession::WorstPixelQuality(const Rect& r) const {
     worst = std::max(worst, *std::max_element(p, p + r.w));
   }
   return worst;
+}
+
+void HostSession::KeepScreenNextToVideo(const capture::CapturedFrame& frame,
+                                        const std::vector<tile::TileChange>& taken,
+                                        const std::vector<codec::PaletteTile>& lossless) {
+  if (taken.empty() || lossless.empty()) return;
+  const int32_t w = width_, h = height_, k = kVideoSurround;
+  // The pixels the viewer takes from this picture: the rects taken, less the
+  // lossless rects painted over them.
+  video_px_.assign(static_cast<size_t>(w) * h, 0);
+  auto mark = [&](const Rect& r, uint8_t v) {
+    const int32_t x0 = std::max(0, r.x), x1 = std::min(w, r.right());
+    if (x1 <= x0) return;
+    for (int32_t y = std::max(0, r.y); y < std::min(h, r.bottom()); ++y) {
+      std::memset(video_px_.data() + static_cast<size_t>(y) * w + x0, v, static_cast<size_t>(x1 - x0));
+    }
+  };
+  for (const auto& t : taken) mark(t.rect, 1);
+  for (const auto& l : lossless) mark(l.rect, 0);
+  auto video_near = [&](int32_t x, int32_t y) {  // a taken pixel within k of (x, y)
+    for (int32_t yy = std::max(0, y - k); yy <= std::min(h - 1, y + k); ++yy) {
+      const uint8_t* row = video_px_.data() + static_cast<size_t>(yy) * w;
+      for (int32_t xx = std::max(0, x - k); xx <= std::min(w - 1, x + k); ++xx) {
+        if (row[xx]) return true;
+      }
+    }
+    return false;
+  };
+  const int32_t stride = w * 4;
+  for (const auto& l : lossless) {
+    const Rect& r = l.rect;
+    // Only within k of its edge can a pixel of it be within k of video;
+    // most lossless rects have none beside them (the band around it is
+    // checked first).
+    bool beside = false;
+    for (int32_t y = std::max(0, r.y - k); y < std::min(h, r.bottom() + k) && !beside; ++y) {
+      const bool band_row = y < r.y || y >= r.bottom();
+      for (int32_t x = std::max(0, r.x - k); x < std::min(w, r.right() + k); ++x) {
+        if (!band_row && x == r.x) x = r.right();  // skip the rect itself
+        if (x < w && video_px_[static_cast<size_t>(y) * w + x]) {
+          beside = true;
+          break;
+        }
+      }
+    }
+    if (!beside) continue;
+    for (int32_t y = std::max(0, r.y); y < std::min(h, r.bottom()); ++y) {
+      const bool edge_row = y < r.y + k || y >= r.bottom() - k;
+      for (int32_t x = std::max(0, r.x); x < std::min(w, r.right()); ++x) {
+        if (!edge_row && r.w > 2 * k && x == r.x + k) {
+          x = r.right() - k - 1;
+          continue;
+        }
+        if (!video_near(x, y)) continue;
+        std::memcpy(enc_input_.data() + static_cast<size_t>(y) * stride + static_cast<size_t>(x) * 4,
+                    frame.bgra.data + static_cast<size_t>(y) * frame.bgra.stride + static_cast<size_t>(x) * 4, 4);
+      }
+    }
+  }
 }
 
 void HostSession::SurroundVideoRects(const capture::CapturedFrame& frame,
