@@ -3,6 +3,7 @@
 #include "tile/text_cell.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <optional>
 #include <set>
@@ -64,6 +65,9 @@ HostSession::HostSession(transport::ITransport* transport,
         [this](transport::Channel ch, std::span<const uint8_t> bytes) { OnReceive(ch, bytes); });
   }
   if (options_.text_mode) SetBitrate(options_.bitrate_bps);  // the encoder's share
+  if (options_.mirror_decoder_factory && options_.text_video_min_db > 0) {
+    if (auto decoder = options_.mirror_decoder_factory()) mirror_ = std::make_unique<PictureMirror>(std::move(decoder));
+  }
   SendHello();
 }
 
@@ -135,6 +139,7 @@ struct HostSession::Frame {
 
   // Work owed from earlier frames (PlanOwedWork, PlanPolish).
   bool coarse_now = false;               // a screenful owed: tiles get their quick pass first
+  std::vector<tile::TileChange> retakes;  // poor video taken again (PlanRetakes)
   std::vector<size_t> refresh;           // tiles to code again
   std::vector<uint8_t> progressive_now;  // per tile: its turn of the owed queue now
   size_t progressive_sent = 0;
@@ -174,6 +179,8 @@ struct HostSession::Frame {
   bool sharpen = false;  // the picture that ends a progressive keyframe
   bool still = false;    // coded with the still-screen QP floor
   std::optional<codec::HevcAccessUnit> au;
+  bool picture_coded = false;                     // the full-screen encoder made a picture
+  std::optional<codec::HevcAccessUnit> mirrored;  // ... kept for the mirror (text mode)
 
   FrameTrace trace;  // filled only for HostOptions::trace
   bool tracing = false;
@@ -207,6 +214,7 @@ bool HostSession::OnFrame(const capture::CapturedFrame& in, std::string* error) 
   FillLosslessBucket(f);
   PlanOwedWork(f);
   PlanPolish(f);
+  PlanRetakes(f);
   if (NothingToDo(f)) {
     quiet_ = true;
     moving_ = false;
@@ -225,18 +233,19 @@ bool HostSession::OnFrame(const capture::CapturedFrame& in, std::string* error) 
   bool done = false;
   const bool ok = EncodePicture(f, error, &done);
   if (done) return ok;
+  f.trace.picture_bytes = f.au ? f.au->nal_data.size() : 0;
+  f.t2 = capture::MonotonicMicros();
+  SendFrame(f);
+  MeasureVideo(f);
   if (f.tracing) {
     f.trace.frame_no = frame_no_;
     f.trace.mass_motion = f.mass_motion;
     f.trace.key = f.key;
     f.trace.still = f.still;
     f.trace.sharpen = f.sharpen;
-    f.trace.picture_bytes = f.au ? f.au->nal_data.size() : 0;
     f.trace.video_rects = static_cast<int>(f.video_tiles.size());
     options_.trace(f.trace);
   }
-  f.t2 = capture::MonotonicMicros();
-  SendFrame(f);
   return true;
 }
 
@@ -302,7 +311,7 @@ void HostSession::TrackAreas(Frame& f) {
       f.region_dirty[static_cast<size_t>(k)] = true;
       f.busy[idx] = f.region_changed[idx] = 1;
       CopyRectInto(f.in.bgra, c.rect, prev_.data(), width_ * 4);
-      ledger_.EnterArea(idx, frame_no_);
+      ledger_.EnterArea(idx, frame_no_, f.in.capture_time_us);
       return true;
     });
   }
@@ -478,9 +487,86 @@ void HostSession::PlanPolish(Frame& f) {
   }
 }
 
+// Poor video (see MeasureVideo) is taken again from the next picture, cell
+// by cell, once its tile has stood still, the screen is nearly still and the
+// encoder has rested (kRetakeRestUs): it then has the bits to refine what it
+// coded coarsely in a busy picture. Only the poor cells are listed; the text
+// beside them, which the viewer has exactly, is not sent again.
+void HostSession::PlanRetakes(Frame& f) {
+  if (!ledger_.poor_possible()) return;
+  if (!f.text || !mirror_ || !mirror_->in_step()) {
+    ledger_.GiveUpPoor();  // nothing measures the pictures any more
+    return;
+  }
+  if (f.key) return;  // every tile is coded afresh
+  const bool now = f.changes.size() * 50 <= f.n_tiles &&
+                   f.in.capture_time_us - std::min(f.in.capture_time_us, last_picture_us_) >= kRetakeRestUs;
+  std::vector<uint8_t> busy(f.n_tiles, 0);  // coded in this frame anyway
+  for (const auto& c : f.changes) busy[TileIndex(c)] = 1;
+  for (size_t idx : f.refresh) busy[idx] = 1;
+  for (const auto& t : carry_video_tiles_) busy[TileIndex(t)] = 1;
+  bool any = false;
+  size_t tiles = 0;
+  for (size_t idx = 0; idx < f.n_tiles; ++idx) {
+    if (!ledger_.HasPoor(TileRect(idx))) continue;
+    any = true;
+    const TileState& t = ledger_[idx];
+    // (Unchanged for as long as the encoder rested: by time, as the frames
+    // that would count it are not sent for it, see work_pending.)
+    if (!now || busy[idx] || t.owed || t.stale != 0 || t.refine > 0 ||
+        f.in.capture_time_us - std::min(f.in.capture_time_us, t.born_us) < kRetakeRestUs || InArea(idx) ||
+        tiles >= kMaxRetakeTilesPerFrame) {
+      continue;
+    }
+    tiles += PlanRetakesOfTile(f, idx);
+  }
+  if (!any) ledger_.ClearPoorPossible();
+}
+
+// The runs of poor cells of one tile to take again (at most
+// kMaxRetakeRectsPerTile, the rest next time). False if none.
+bool HostSession::PlanRetakesOfTile(Frame& f, size_t idx) {
+  const Rect rect = TileRect(idx);
+  std::vector<Rect> runs;
+  for (int32_t y = rect.y; y < rect.bottom(); y += kCellSize) {
+    const int32_t h = std::min(kCellSize, rect.bottom() - y);
+    bool open = false;  // the last cell of this row went into runs.back()
+    for (int32_t x = rect.x; x < rect.right(); x += kCellSize) {
+      const Rect cell{x, y, std::min(kCellSize, rect.right() - x), h};
+      const auto mix = ledger_.MixOf(cell);
+      bool take = false;
+      if (mix.poor && (mix.exact || ledger_.retakes(x, y) >= options_.text_video_retakes)) {
+        // Exact pixels share the cell (a scroll by other than a multiple of
+        // 16 brought them): taken from a picture they would blur, and coding
+        // the tile again whole delayed the text a scroll had left owed. Left
+        // as it is, as before 3.5. So is a cell retaken often enough.
+        ledger_.Replace(cell, kPxPoor, kPxPolished);
+      } else {
+        take = mix.poor;
+      }
+      if (take && open) {
+        runs.back().w += cell.w;
+      } else if (take) {
+        runs.push_back(cell);
+      }
+      open = take;
+    }
+  }
+  if (runs.empty()) return false;
+  if (runs.size() > kMaxRetakeRectsPerTile) runs.resize(kMaxRetakeRectsPerTile);
+  const auto col = static_cast<int32_t>(idx % differ_.cols());
+  const auto row = static_cast<int32_t>(idx / differ_.cols());
+  for (const Rect& r : runs) {
+    for (int32_t x = r.x; x < r.right(); x += kCellSize) ++ledger_.retakes(x, r.y);
+    f.retakes.push_back({col, row, 0, 0, r});
+  }
+  f.trace.retake_rects += static_cast<int>(runs.size());
+  return true;
+}
+
 bool HostSession::NothingToDo(const Frame& f) const {
   return f.changes.empty() && !f.key && ledger_.refining() == 0 && f.refresh.empty() && !f.regions_to_send &&
-         !sharpen_video_ && !polish_owed_ && (!f.text || carry_video_tiles_.empty());
+         !sharpen_video_ && !polish_owed_ && (!f.text || carry_video_tiles_.empty()) && f.retakes.empty();
 }
 
 // Tile cache, part 1: before this frame's updates, keep what the viewer
@@ -553,6 +639,7 @@ void HostSession::ClassifyChanges(Frame& f) {
                           (holding_back && t.hot_us != 0 && f.in.capture_time_us - t.hot_us <= kHotHoldUs));
     t.hot_us = f.hot[i] ? f.in.capture_time_us : 0;
     t.born = frame_no_;
+    t.born_us = f.in.capture_time_us;
   }
   size_t n_hot = 0;
   for (bool h : f.hot) n_hot += h;
@@ -731,6 +818,7 @@ void HostSession::CodeChange(Frame& f, size_t i) {
   // it can be taken as unchanged, so it is coded whole.
   const bool was_stale = t.stale != 0;
   if (f.text) f.recoded[idx] = 1;
+  ledger_.NewContent(idx);
   if (i < f.n_changed) {
     t.coarse = false;  // new content
     for (int32_t y = 0; y < c.rect.h; ++y) {
@@ -814,9 +902,10 @@ void HostSession::CodeMovedTile(Frame& f, size_t i, bool was_stale) {
     if (worst == kPxExact) {
       q = kExact;
       owed = false;
-    } else if (worst == kPxPolished) {
+    } else if (worst == kPxPolished || worst == kPxPoor) {
       // Text where it is text, and video that is finished: coding it
-      // again would send the same picture.
+      // again would send the same picture. (Poor video is taken again
+      // where it is now, see PlanRetakes.)
       q = std::max(q, kRefined);
       owed = false;
     }
@@ -1197,6 +1286,10 @@ std::vector<Rect> HostSession::PaintFromSlot(Frame& f, const tile::TileChange& c
 // What the viewer takes from this frame's picture, and the picture itself.
 void HostSession::AssemblePicture(Frame& f) {
   ListCarriedTiles(f);
+  for (const auto& r : f.retakes) {
+    picture_.Copy(f.in.bgra, r.rect);  // (moved there, or the screen's already)
+    f.region_tiles.push_back(r);
+  }
   CoarsenVideoParts(f);
   ContinueRefinement(f);
   // A progressive keyframe's picture is left as it is until the text is
@@ -1421,6 +1514,9 @@ bool HostSession::EncodePicture(Frame& f, std::string* error, bool* done) {
   // (Text mode ends a progressive keyframe without the intra picture: the
   // tiles left at the first picture's quality are refined by the next.)
   f.au = encoder_->Encode(picture_.view(), f.in.capture_time_us, f.key || (f.sharpen && !f.text));
+  f.picture_coded = f.au.has_value();
+  if (f.au) last_picture_us_ = f.in.capture_time_us;
+  if (f.au && f.text && mirror_) f.mirrored = f.au;
   if (f.au && f.text) {
     for (size_t idx = 0; idx < f.n_tiles; ++idx) ledger_[idx].stale &= static_cast<uint8_t>(~kStaleVideo);
   }
@@ -1579,6 +1675,100 @@ void HostSession::SendFrame(Frame& f) {
   }
 }
 
+// The picture that just went out, decoded as the viewer decodes it: each
+// 16 x 16 cell of finished (or poor) video the viewer took from it is
+// finished if it is within text_video_min_db of the screen, poor otherwise
+// (and taken again, see PlanRetakes).
+void HostSession::MeasureVideo(Frame& f) {
+  if (!mirror_ || !f.picture_coded) return;
+  if (!f.text) {
+    mirror_->Lose();  // (the pictures of normal mode are not followed)
+    return;
+  }
+  const bool decoded = mirror_->Decode(*f.mirrored, f.in.capture_time_us, [&](const ImageView& picture) {
+    const std::vector<uint8_t> cells = MarkTaken(f);
+    const int32_t cell_cols = (width_ + kCellSize - 1) / kCellSize;
+    for (size_t k = 0; k < cells.size(); ++k) {
+      if (!cells[k]) continue;
+      const auto cx = static_cast<int32_t>(k % static_cast<size_t>(cell_cols));
+      const auto cy = static_cast<int32_t>(k / static_cast<size_t>(cell_cols));
+      const Rect cell{cx * kCellSize, cy * kCellSize, std::min(kCellSize, std::min(width_, picture.width) - cx * kCellSize),
+                      std::min(kCellSize, std::min(height_, picture.height) - cy * kCellSize)};
+      if (cell.w > 0 && cell.h > 0) JudgeCell(f, picture, cell);
+    }
+  });
+  if (!decoded) ledger_.GiveUpPoor();
+}
+
+// The pixels the viewer takes from this frame's picture, in taken_: all of
+// it for a keyframe, else the rects listed (the lossless ones painted over
+// them are exact: they are not looked at). Returns, per cell, whether any
+// pixel of it is taken.
+std::vector<uint8_t> HostSession::MarkTaken(const Frame& f) {
+  const int32_t cell_cols = (width_ + kCellSize - 1) / kCellSize, cell_rows = (height_ + kCellSize - 1) / kCellSize;
+  taken_.assign(static_cast<size_t>(width_) * height_, f.key ? 1 : 0);
+  std::vector<uint8_t> cells(static_cast<size_t>(cell_cols) * cell_rows, f.key ? 1 : 0);
+  if (f.key) return cells;
+  for (const auto& t : f.region_tiles) {
+    const Rect& r = t.rect;
+    for (int32_t y = r.y; y < r.bottom(); ++y) {
+      std::memset(taken_.data() + static_cast<size_t>(y) * width_ + r.x, 1, static_cast<size_t>(r.w));
+    }
+    for (int32_t cy = r.y / kCellSize; cy <= (r.bottom() - 1) / kCellSize; ++cy) {
+      for (int32_t cx = r.x / kCellSize; cx <= (r.right() - 1) / kCellSize; ++cx) {
+        cells[static_cast<size_t>(cy) * cell_cols + cx] = 1;
+      }
+    }
+  }
+  return cells;
+}
+
+// One cell of what the viewer took from `picture`: its finished or poor
+// video pixels against the screen. Close enough, they are finished. Not
+// close, they are poor while retakes bring them closer (by kRetakeGainDb)
+// and fewer than text_video_retakes were made; otherwise they are as good
+// as the encoder makes them here, and finished all the same.
+void HostSession::JudgeCell(Frame& f, const ImageView& picture, const Rect& cell) {
+  auto video = [&](uint8_t q, uint8_t taken) { return taken && (q == kPxPolished || q == kPxPoor); };
+  double se = 0;
+  int64_t n = 0;
+  for (int32_t y = cell.y; y < cell.bottom(); ++y) {
+    const uint8_t* q = ledger_.PixelRow(y);
+    const uint8_t* tk = taken_.data() + static_cast<size_t>(y) * width_;
+    const uint8_t* a = picture.data + static_cast<size_t>(y) * picture.stride;
+    const uint8_t* b = f.in.bgra.data + static_cast<size_t>(y) * f.in.bgra.stride;
+    for (int32_t x = cell.x; x < cell.right(); ++x) {
+      if (!video(q[x], tk[x])) continue;
+      const int d0 = a[x * 4] - b[x * 4], d1 = a[x * 4 + 1] - b[x * 4 + 1], d2 = a[x * 4 + 2] - b[x * 4 + 2];
+      se += d0 * d0 + d1 * d1 + d2 * d2;
+      ++n;
+    }
+  }
+  if (n == 0) return;
+  const double db = se == 0 ? 99.0 : std::min(99.0, 10 * std::log10(255.0 * 255.0 * 3.0 * static_cast<double>(n) / se));
+  const bool close = db >= options_.text_video_min_db;
+  const int tries = ledger_.retakes(cell.x, cell.y);
+  uint8_t& last = ledger_.measured(cell.x, cell.y);
+  const bool closer = tries == 0 || db >= last + kRetakeGainDb;
+  const bool poor = !close && closer && tries < options_.text_video_retakes;
+  last = static_cast<uint8_t>(db);
+  if (tries > 0) {
+    f.trace.retaken_close += close;
+    f.trace.retaken_left += !close && !poor;
+  }
+  for (int32_t y = cell.y; y < cell.bottom(); ++y) {
+    uint8_t* q = ledger_.PixelRow(y);
+    const uint8_t* tk = taken_.data() + static_cast<size_t>(y) * width_;
+    for (int32_t x = cell.x; x < cell.right(); ++x) {
+      if (video(q[x], tk[x])) q[x] = poor ? kPxPoor : kPxPolished;
+    }
+  }
+  if (poor) {
+    ++f.trace.poor_cells;
+    ledger_.NotePoor();
+  }
+}
+
 Rect HostSession::TileRect(size_t idx) const {
   const auto col = static_cast<int32_t>(idx % differ_.cols());
   const auto row = static_cast<int32_t>(idx / differ_.cols());
@@ -1625,6 +1815,9 @@ void HostSession::SetTextMode(bool on) {
   options_.text_mode = on;
   // Exact colours again, and nothing stale: a full refresh.
   if (!on) force_keyframe_ = true;
+  // The mirror did not follow the pictures of normal mode: it measures
+  // again from a keyframe.
+  if (on && mirror_ && !mirror_->in_step()) force_keyframe_ = true;
 }
 
 void HostSession::SetBitrate(int64_t bps) {

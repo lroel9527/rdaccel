@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <cstdlib>
+#include <deque>
 #include <mutex>
 #include <thread>
 
@@ -1830,6 +1831,46 @@ void TextBesidePhoto(std::vector<uint8_t>& px, int w, int tx, int ty, uint32_t& 
   FillStrokes(px, w, {tx * 64 + 32, ty * 64, 32, 64}, seed);
 }
 Rect TextHalf(int tx, int ty) { return {tx * 64 + 32, ty * 64, 32, 64}; }
+Rect PhotoHalf(int tx, int ty) { return {tx * 64, ty * 64, 32, 64}; }
+
+// The pictures as the host's mirror (HostOptions::mirror_decoder_factory)
+// decodes them: the fake encoder's input mixed with grey, picture by picture
+// as the test says: 100% of the input is the screen as it was given, 0% is
+// "starved" (every pixel grey, far from any screen).
+struct MirrorLink {
+  const std::vector<uint8_t>* input = nullptr;  // the encoder's last picture
+  int w = 0, h = 0;
+  std::deque<int> percent;  // per picture to come; once empty, 0 if always_starved, else 100
+  bool always_starved = false;
+  size_t decoded = 0;
+};
+
+class MirrorDecoder final : public codec::IHevcDecoder {
+ public:
+  explicit MirrorDecoder(MirrorLink* link) : link_(link) {}
+  std::string name() const override { return "mirror"; }
+  const std::string& last_error() const override { return err_; }
+  bool Decode(const std::vector<std::vector<uint8_t>>&, const std::vector<uint8_t>&, uint64_t pts,
+              const codec::DecodedFrameFn& on_frame) override {
+    ++link_->decoded;
+    int percent = link_->always_starved ? 0 : 100;
+    if (!link_->percent.empty()) {
+      percent = link_->percent.front();
+      link_->percent.pop_front();
+    }
+    px_ = *link_->input;
+    for (size_t i = 0; i < px_.size(); i += 4) {
+      for (int c = 0; c < 3; ++c) px_[i + c] = static_cast<uint8_t>(128 + (px_[i + c] - 128) * percent / 100);
+    }
+    on_frame({px_.data(), link_->w, link_->h, link_->w * 4}, pts);
+    return true;
+  }
+
+ private:
+  MirrorLink* link_;
+  std::vector<uint8_t> px_;
+  std::string err_;
+};
 
 // Pixels of `r` that differ between `want` and what the viewer shows once
 // frame `id` has been shown (SIZE_MAX: it was not).
@@ -1861,7 +1902,8 @@ struct TextRig {
   Shown shown;
   std::vector<uint8_t> px = std::vector<uint8_t>(static_cast<size_t>(W) * H * 4, 245);
   uint64_t t = 1'000'000;
-  explicit TextRig(session::HostOptions o, bool end_keyframe = true) {
+  // `mirror`: the host decodes its pictures through it (else not at all).
+  explicit TextRig(session::HostOptions o, bool end_keyframe = true, MirrorLink* mirror = nullptr) {
     auto [a, b] = transport::MakeLocalPipe();
     host_end = std::move(a);
     viewer_end = std::move(b);
@@ -1870,6 +1912,12 @@ struct TextRig {
     enc->input = &input;
     o.fps = kFps;
     o.bitrate_bps = 20'000'000;
+    if (mirror) {
+      mirror->input = &input;
+      mirror->w = W;
+      mirror->h = H;
+      o.mirror_decoder_factory = [mirror] { return std::make_unique<MirrorDecoder>(mirror); };
+    }
     host = std::make_unique<session::HostSession>(host_end.get(), std::move(enc), W, H, o);
     viewer = std::make_unique<session::ViewerSession>(nullptr, std::make_unique<FakeDecoder>());
     shown.Attach(*viewer);
@@ -1890,6 +1938,9 @@ struct TextRig {
   ~TextRig() {
     host_end.reset();
     viewer_end.reset();
+    // Frames still queued go to `shown`'s handler: the decode worker must be
+    // done before `shown` (declared after `viewer`) goes.
+    viewer->Stop();
   }
   void Frame() {
     t += 1'000'000 / kFps;
@@ -2258,4 +2309,221 @@ TEST(Session, TextModeOffStillRefinesAndPolishesTextBesideAPhoto) {
   const size_t settled = rig.pictures;
   for (int f = 0; f < 3 * TextRig::kFps; ++f) rig.Frame();
   EXPECT_EQ(rig.pictures, settled);
+}
+
+TEST(Session, TextModeTakesPoorVideoAgainUntilItIsCloseToTheScreen) {
+  // A photo's one picture comes out far from the screen (a busy picture at a
+  // modest bitrate: blocks of plain colour beside sharp text). Measured on
+  // the host's own decode of the picture, its cells are poor, not finished:
+  // once the screen is still they are taken again from the next picture,
+  // and only they: the text beside them, which the viewer has exactly, is
+  // neither sent nor taken again. Close to the screen then, they are
+  // finished, and nothing more is sent.
+  MirrorLink link;
+  TextRig rig({.text_mode = true}, true, &link);
+  rig.Settle();
+  const size_t after_key = rig.pictures;
+  uint32_t seed = 61;
+  TextBesidePhoto(rig.px, TextRig::W, 1, 0, seed);
+  link.percent = {0};
+  rig.Frame();
+  EXPECT_EQ(rig.pictures, after_key + 1);
+  EXPECT_EQ(rig.host->ShownQuality(PhotoHalf(1, 0)), 2);  // poor
+  EXPECT_EQ(rig.host->ShownQuality(TextHalf(1, 0)), 0);
+  EXPECT_TRUE(rig.host->work_pending());
+  // A source's idle loop has nothing to send for it until the encoder has
+  // rested: a frame sent sooner would do nothing but count as a frame.
+  EXPECT_FALSE(rig.host->work_pending(rig.t + 100'000));
+  EXPECT_TRUE(rig.host->work_pending(rig.t + 500'000));
+  const auto first = rig.host->stats();
+  rig.Settle();
+  EXPECT_EQ(rig.pictures, after_key + 2);  // one retake
+  EXPECT_EQ(rig.host->ShownQuality(PhotoHalf(1, 0)), 1);  // finished
+  EXPECT_EQ(rig.host->stats().lossless_tiles, first.lossless_tiles);  // no text sent again
+  EXPECT_EQ(rig.Diff(TextHalf(1, 0)), 0u);  // ... nor taken from the picture (the fake decoder's is black)
+  EXPECT_FALSE(rig.host->work_pending());
+  const size_t settled = rig.pictures;
+  for (int f = 0; f < 10 * TextRig::kFps; ++f) rig.Frame();
+  EXPECT_EQ(rig.pictures, settled);
+}
+
+TEST(Session, TextModeLeavesVideoAsItIsWhenARetakeBringsItNoCloser) {
+  // A cell a retake brings no closer to the screen is as good as the
+  // encoder makes it there (colour at half resolution along sharp colour
+  // edges): it is left as it is after that one retake, finished, and
+  // nothing more is sent.
+  MirrorLink link;
+  link.always_starved = true;
+  TextRig rig({.text_mode = true}, true, &link);
+  rig.Settle();
+  const size_t after_key = rig.pictures;
+  uint32_t seed = 63;
+  TextBesidePhoto(rig.px, TextRig::W, 1, 0, seed);
+  rig.Frame();
+  rig.Settle();
+  EXPECT_EQ(rig.pictures, after_key + 1 + 1);
+  EXPECT_EQ(rig.host->ShownQuality(PhotoHalf(1, 0)), 1);
+  EXPECT_FALSE(rig.host->work_pending());
+  const size_t settled = rig.pictures;
+  for (int f = 0; f < 10 * TextRig::kFps; ++f) rig.Frame();
+  EXPECT_EQ(rig.pictures, settled);
+}
+
+TEST(Session, TextModeTakesVideoAgainAtMostTextVideoRetakesTimes) {
+  // Each retake brings the cell closer (the encoder refines it) but never
+  // close enough: it is taken text_video_retakes times, then left as it is.
+  MirrorLink link;
+  link.percent = {0, 50, 75, 90, 95};  // ~11, 17, 23, 31, 37 dB: closer every time
+  TextRig rig({.text_mode = true, .text_video_retakes = 2}, true, &link);
+  rig.Settle();
+  link.percent = {0, 50, 75, 90, 95};  // (the keyframe's pictures had their own)
+  const size_t after_key = rig.pictures;
+  uint32_t seed = 64;
+  TextBesidePhoto(rig.px, TextRig::W, 1, 0, seed);
+  rig.Frame();
+  rig.Settle();
+  EXPECT_EQ(rig.pictures, after_key + 1 + 2);
+  EXPECT_EQ(rig.host->ShownQuality(PhotoHalf(1, 0)), 1);
+  EXPECT_FALSE(rig.host->work_pending());
+}
+
+TEST(Session, TextModeTakesPoorVideoAgainOnlyOnceTheEncoderHasRested) {
+  // Right after a busy picture the encoder's rate control is still paying
+  // for it, and a retake comes out as poor as the picture was. Poor cells
+  // wait until no full-screen picture has been coded for half a second.
+  MirrorLink link;
+  TextRig rig({.text_mode = true}, true, &link);
+  rig.Settle();
+  const size_t after_key = rig.pictures;
+  uint32_t seed = 66;
+  TextBesidePhoto(rig.px, TextRig::W, 1, 0, seed);
+  link.percent = {0};
+  rig.Frame();
+  // Something else keeps the encoder busy (a photo changing elsewhere) for
+  // longer than the tile needs to stand still.
+  for (int f = 0; f < 30; ++f) {
+    FillNoise(rig.px, TextRig::W, {192, 64, 64, 64}, seed);
+    rig.Frame();
+  }
+  EXPECT_EQ(rig.host->ShownQuality(PhotoHalf(1, 0)), 2);  // still poor: not taken again yet
+  const size_t busy = rig.pictures;
+  // Then still: half a second later, the retake.
+  for (int f = 0; f < 10; ++f) rig.Frame();
+  EXPECT_EQ(rig.host->ShownQuality(PhotoHalf(1, 0)), 2);
+  rig.Settle();
+  EXPECT_GE(busy, after_key + 2);
+  EXPECT_EQ(rig.host->ShownQuality(PhotoHalf(1, 0)), 1);
+  EXPECT_FALSE(rig.host->work_pending());
+}
+
+TEST(Session, TextModeFinishesVideoCloseToTheScreenAtOnce) {
+  // A picture that comes out close to the screen is all the video gets, as
+  // without the mirror: finished at once, no picture after it.
+  for (const bool mirrored : {true, false}) {
+    MirrorLink link;
+    TextRig rig({.text_mode = true}, true, mirrored ? &link : nullptr);
+    rig.Settle();
+    const size_t after_key = rig.pictures;
+    uint32_t seed = 65;
+    TextBesidePhoto(rig.px, TextRig::W, 1, 0, seed);
+    rig.Frame();
+    EXPECT_EQ(rig.host->ShownQuality(PhotoHalf(1, 0)), 1) << mirrored;
+    EXPECT_FALSE(rig.host->work_pending()) << mirrored;
+    for (int f = 0; f < 10 * TextRig::kFps; ++f) rig.Frame();
+    EXPECT_EQ(rig.pictures, after_key + 1) << mirrored;
+    EXPECT_EQ(link.decoded > 0, mirrored);
+  }
+}
+
+TEST(Session, TextModeWithoutTheMirrorFinishesEvenAPoorPicture) {
+  // No mirror (or text_video_min_db 0): nothing measures the pictures, and
+  // the one picture is finished whatever it is like, as before 3.5.
+  for (const int min_db : {30, 0}) {
+    MirrorLink link;
+    link.always_starved = true;
+    session::HostOptions o{.text_mode = true};
+    o.text_video_min_db = min_db;
+    TextRig rig(o, true, min_db > 0 ? nullptr : &link);
+    rig.Settle();
+    const size_t after_key = rig.pictures;
+    uint32_t seed = 67;
+    TextBesidePhoto(rig.px, TextRig::W, 1, 0, seed);
+    rig.Frame();
+    rig.Settle();
+    EXPECT_EQ(rig.pictures, after_key + 1) << min_db;
+    EXPECT_EQ(rig.host->ShownQuality(PhotoHalf(1, 0)), 1) << min_db;
+    EXPECT_EQ(link.decoded, 0u) << min_db;
+  }
+}
+
+TEST(Session, NormalModeDoesNotDecodeItsPictures) {
+  // Normal mode refines and polishes its video; the mirror is text mode's.
+  MirrorLink link;
+  TextRig rig({.text_mode = false}, true, &link);
+  rig.Settle();
+  uint32_t seed = 69;
+  TextBesidePhoto(rig.px, TextRig::W, 1, 0, seed);
+  rig.Frame();
+  rig.Settle();
+  EXPECT_GT(rig.pictures, 0u);
+  EXPECT_EQ(link.decoded, 0u);
+}
+
+TEST(Session, TurningTextModeOnStartsTheMirrorAtAKeyframe) {
+  // The mirror has to have decoded every picture since a keyframe; it skips
+  // normal mode's, so turning text mode on brings a keyframe.
+  MirrorLink link;
+  TextRig rig({.text_mode = false}, true, &link);
+  rig.Settle();
+  const auto before = rig.host->stats();
+  rig.host->SetTextMode(true);
+  EXPECT_TRUE(rig.host->keyframe_pending());
+  rig.Frame();
+  EXPECT_EQ(rig.host->stats().keyframes, before.keyframes + 1);
+  EXPECT_GT(link.decoded, 0u);
+  // Off and on again with no picture in between: still in step, no keyframe.
+  rig.Settle();
+  rig.host->SetTextMode(false);
+  rig.host->SetTextMode(true);
+  EXPECT_TRUE(rig.host->keyframe_pending());  // (off asked for one: exact colours again)
+}
+
+TEST(Session, TextModeTakesPoorVideoAgainWhenItComesBackFromTheCache) {
+  // Poor video covered before its retake (a menu over it) goes into the
+  // tile cache as poor; uncovered, it comes back as poor and is taken again
+  // where it is.
+  MirrorLink link;
+  TextRig rig({.text_mode = true}, true, &link);
+  rig.Settle();
+  uint32_t seed = 71;
+  TextBesidePhoto(rig.px, TextRig::W, 1, 0, seed);
+  const std::vector<uint8_t> screen = rig.px;
+  link.percent = {0};
+  rig.Frame();
+  // Something else keeps changing (a spinner), so the screen is not still
+  // and no retake comes; the photo's tile stands still long enough to be
+  // stored when it is covered.
+  for (int f = 0; f < 12; ++f) {
+    for (int y = 64; y < 128; ++y) std::memset(&rig.px[(static_cast<size_t>(y) * TextRig::W + 192) * 4], 100 + 7 * f, 64 * 4);
+    rig.Frame();
+  }
+  EXPECT_EQ(rig.host->ShownQuality(PhotoHalf(1, 0)), 2);
+  const std::vector<uint8_t> spun = rig.px;
+  for (int y = 0; y < 64; ++y) {
+    for (int x = 64; x < 128; ++x) std::memset(&rig.px[(static_cast<size_t>(y) * TextRig::W + x) * 4], 120, 3);
+  }
+  rig.Frame();
+  rig.Settle(20);
+  const auto covered = rig.host->stats();
+  const size_t pictures = rig.pictures;
+  rig.px = spun;
+  rig.Frame();
+  EXPECT_EQ(rig.host->stats().cached_tiles, covered.cached_tiles + 1);
+  EXPECT_EQ(rig.host->ShownQuality(PhotoHalf(1, 0)), 2);  // poor, as it was stored
+  EXPECT_TRUE(rig.host->work_pending());
+  rig.Settle();
+  EXPECT_EQ(rig.pictures, pictures + 1);  // the retake
+  EXPECT_EQ(rig.host->ShownQuality(PhotoHalf(1, 0)), 1);
+  EXPECT_EQ(rig.host->stats().lossless_tiles, covered.lossless_tiles);
+  EXPECT_FALSE(rig.host->work_pending());
 }

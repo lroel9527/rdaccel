@@ -42,6 +42,7 @@
 #include "proto/messages.h"
 #include "session/encoder_picture.h"
 #include "session/lossless_bucket.h"
+#include "session/picture_mirror.h"
 #include "session/slot_book.h"
 #include "session/tile_ledger.h"
 #include "tile/motion.h"
@@ -72,6 +73,10 @@ struct FrameTrace {
   int video_motion = 0;          // text mode: part of motion, too many colours for a hot rect
   int refine_tiles = 0;  // tiles taken again from the picture: ordinary refinement
   int polish_tiles = 0;  // ... the still-screen polish
+  int retake_rects = 0;  // ... text mode: cells of poor video taken again (HostOptions::text_video_min_db)
+  int poor_cells = 0;    // cells of video this picture left poor (text mode, measured)
+  int retaken_close = 0;  // cells a retake brought close enough: finished
+  int retaken_left = 0;   // cells left as they are after a retake: no closer, or retaken often enough
   int lossless_rects = 0;
   int hot = 0;          // tiles that also changed in the frame before
   int hot_unmoved = 0;  // ... of which no move accounts for (text mode)
@@ -163,6 +168,27 @@ struct HostOptions {
   // the first re-submit instead of the third, and its text is sharp about
   // 200 ms after the motion instead of 450. 0 = as without text mode.
   int64_t text_linger_us = 100'000;
+  // Text mode: the video the viewer takes from a picture counts as finished
+  // only where it is close to the screen. Every full-screen picture is
+  // decoded here as the viewer will decode it (session/picture_mirror.h),
+  // and each 16 x 16 cell of video the viewer took from it is measured
+  // against the screen (PSNR over the cell's video pixels). At
+  // text_video_min_db or more it is finished; below, it is poor and is taken
+  // again from a later picture, once the screen is nearly still and the
+  // encoder has made no picture for half a second (it refines what it coded
+  // coarsely only when its rate control is not paying for a busy picture).
+  // A retake that brings the cell no closer ends it: the encoder does no
+  // better there (colour at half resolution along a sharp colour edge). At
+  // most text_video_retakes since the cell's tile changed. Until 3.5 the one
+  // picture was finished whatever it was like: a picture coded while most
+  // of the screen changed at once (an app switch, leaving full screen) at a
+  // modest bitrate gave a hundred rects a kilobyte or two between them, and
+  // the menu bar, the dock and icons stayed in blocks of plain colour beside
+  // sharp text until they changed. No factory, or 0 dB: as before.
+  using DecoderFactory = std::function<std::unique_ptr<codec::IHevcDecoder>()>;
+  DecoderFactory mirror_decoder_factory = nullptr;
+  int text_video_min_db = 30;
+  int text_video_retakes = 3;
   // Text mode's tiles (2..16 colours) go through the context model
   // (codec/context_tiles.h), about half the bytes of deflate on text. Only
   // for a viewer that decodes it (proto::kCapContextTiles); see
@@ -233,22 +259,33 @@ class HostSession {
   bool keyframe_pending() const { return force_keyframe_; }
   // Something is still owed to the viewer that needs no new picture: a
   // keyframe, video tiles of a picture the encoder dropped, tiles waiting to
-  // be sent losslessly or still refining, a video area that is open (it
-  // closes, and its picture is sharpened, only on a frame). A source that
+  // be sent losslessly or still refining, poor video to be taken again, a
+  // video area that is open (it closes, and its picture is sharpened, only
+  // on a frame). A source that
   // stops delivering frames while the screen is static (ScreenCaptureKit)
   // would leave them at video quality, or stale, until the next change (a
   // paused video stayed at the area's quality); the Host re-submits the last
   // frame instead. Not thread-safe against OnFrame.
-  bool work_pending() const {
-    return force_keyframe_ || !carry_video_tiles_.empty() || ledger_.owed_count() > 0 || ledger_.refining() > 0 ||
-           polish_owed_ || coarse_count_ > 0 || rough_waiting_ || !pending_sharpen_.empty() || !regions_.regions().empty();
+  bool work_pending() const { return WorkOwed() || ledger_.poor_possible(); }
+  // ... that is due by `now_us` (a capture time, as the frames'): poor video
+  // is taken again only once the encoder has rested (kRetakeRestUs), and a
+  // frame sent sooner would do nothing for it (counted as a frame, it also
+  // made what changed after a pause look like new content rather than a
+  // scroll resuming). For a source's idle loop.
+  bool work_pending(uint64_t now_us) const {
+    return WorkOwed() ||
+           (ledger_.poor_possible() && now_us - std::min(now_us, last_picture_us_) >= kRetakeRestUs);
   }
 
   // How the viewer has `r` as of the last frame: 0 = all of it from the
-  // lossless layer (or a copy of that), 1 = some of it video that had its
-  // still-screen polish, 2 = some of it other video. For tools that measure
-  // (rdaccel_clip). Not thread-safe against OnFrame.
-  int ShownQuality(const Rect& r) const { return ledger_.size() == 0 ? 2 : ledger_.WorstPixel(r); }
+  // lossless layer (or a copy of that), 1 = some of it finished video (it
+  // had its still-screen polish, or text mode measured it close to the
+  // screen), 2 = some of it other video (poor video waiting to be taken
+  // again included). For tools that measure (rdaccel_clip). Not thread-safe
+  // against OnFrame.
+  int ShownQuality(const Rect& r) const {
+    return ledger_.size() == 0 ? 2 : std::min<int>(ledger_.WorstPixel(r), 2);
+  }
 
   // The screen as of the last frame passed to OnFrame (BGRA, rows of
   // width * 4 bytes), e.g. to encode a requested keyframe when no new frame
@@ -273,6 +310,7 @@ class HostSession {
   void FillLosslessBucket(Frame& f);
   void PlanOwedWork(Frame& f);
   void PlanPolish(Frame& f);
+  void PlanRetakes(Frame& f);
   bool NothingToDo(const Frame& f) const;
   void StoreLeavingTiles(Frame& f);
   void ClassifyChanges(Frame& f);
@@ -281,6 +319,11 @@ class HostSession {
   void AssemblePicture(Frame& f);
   bool EncodePicture(Frame& f, std::string* error, bool* done);
   void SendFrame(Frame& f);
+  void MeasureVideo(Frame& f);
+  // PlanRetakes and MeasureVideo, cell by cell.
+  bool PlanRetakesOfTile(Frame& f, size_t idx);
+  std::vector<uint8_t> MarkTaken(const Frame& f);
+  void JudgeCell(Frame& f, const ImageView& picture, const Rect& cell);
 
   // CodeTiles, for one changed (or owed) tile, by how it can be sent.
   void CodeChange(Frame& f, size_t i);
@@ -306,6 +349,11 @@ class HostSession {
   void SharpenAfterProgressive(Frame& f);
   void PolishStillScreen(Frame& f);
 
+  // What work_pending reports besides poor video.
+  bool WorkOwed() const {
+    return force_keyframe_ || !carry_video_tiles_.empty() || ledger_.owed_count() > 0 || ledger_.refining() > 0 ||
+           polish_owed_ || coarse_count_ > 0 || rough_waiting_ || !pending_sharpen_.empty() || !regions_.regions().empty();
+  }
   void OnReceive(transport::Channel ch, std::span<const uint8_t> bytes);
   size_t TileIndex(const tile::TileChange& c) const { return static_cast<size_t>(c.row) * differ_.cols() + c.col; }
   Rect TileRect(size_t idx) const;
@@ -333,6 +381,27 @@ class HostSession {
   TileLedger ledger_;
   // What the video encoder is fed (session/encoder_picture.h).
   EncoderPicture picture_;
+  // Text mode: the pictures as the viewer decodes them (null: not measured).
+  std::unique_ptr<PictureMirror> mirror_;
+  std::vector<uint8_t> taken_;  // MeasureVideo: the pixels the viewer takes from the picture (reused)
+  // Poor video is taken again only once the full-screen encoder has made no
+  // picture for this long. Right after a busy picture its rate control is
+  // still paying for it: taken again 0.2 s later, starved cells came out
+  // as they were; after 0.5 s without pictures they gained 4.5 dB on average
+  // (switching clip, 1 Mbps).
+  static constexpr uint64_t kRetakeRestUs = 500'000;
+  uint64_t last_picture_us_ = 0;  // capture time of the last full-screen picture
+  // A cell still poor after a retake is taken again only if that retake
+  // brought it this much closer (dB): otherwise the encoder does no better
+  // there (colour at half resolution along sharp colour edges: an icon's
+  // outline stays at 22-25 dB whatever the bitrate).
+  static constexpr int kRetakeGainDb = 1;
+  // Poor video taken again in one frame, at most this many tiles of it
+  // (spreads the cost out, as kMaxRefreshPerFrame does).
+  static constexpr size_t kMaxRetakeTilesPerFrame = 24;
+  // ... and at most this many rects per tile: more make CoarsenVideoParts
+  // take the rect around them, over cells the viewer has exactly.
+  static constexpr size_t kMaxRetakeRectsPerTile = 4;
   codec::LosslessEncoder lossless_;
   // The previous frame as captured (updated tile by tile as tiles are
   // coded), for move detection and what the tile cache stores.

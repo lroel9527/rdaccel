@@ -199,7 +199,7 @@ struct Host::Impl {
       if (!skipped_px.empty()) {
         px = std::move(skipped_px);
         skipped_px.clear();
-      } else if (s->keyframe_pending() || (screen_capture && s->work_pending())) {
+      } else if (s->keyframe_pending() || (screen_capture && s->work_pending(now))) {
         // Screen capture (ScreenCaptureKit, PipeWire) delivers no frames
         // while nothing changes, so what the last change left owed would
         // wait for the next one. An application feeding frames itself
@@ -687,6 +687,9 @@ struct Host::Impl {
           return platform::CreateVideoEncoder(c, e);
         };
       }
+      // Text mode measures the video it sends by decoding its own pictures
+      // (HostOptions::text_video_min_db).
+      opts.mirror_decoder_factory = [] { return platform::CreateVideoDecoder(nullptr); };
       opts.fps = config.fps;
       opts.bitrate_bps = rate ? rate->encoder_bps() : StartBitrate();
       opts.region_min_qp = config.video_region_min_qp;

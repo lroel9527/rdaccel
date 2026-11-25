@@ -42,9 +42,19 @@ inline constexpr uint8_t kExact = 2;    // lossless (or a copy of that)
 // How the viewer has a pixel. Ordered from best to worst: a rect is as good
 // as its worst pixel (WorstPixel).
 inline constexpr uint8_t kPxExact = 0;     // lossless, or a copy of that
-inline constexpr uint8_t kPxPolished = 1;  // video that is finished (polished, or text mode's one picture)
-inline constexpr uint8_t kPxVideo = 2;     // any other video: may be text that went as video in
+inline constexpr uint8_t kPxPolished = 1;  // video that is finished (polished, or text mode's picture
+                                           // measured close to the screen)
+// Text mode: video measured far from the screen (HostOptions::
+// text_video_min_db), to be taken again from a later picture once the
+// screen is nearly still (the retake plan). It used to count as finished
+// whatever the picture was like, and a starved picture's blocks stayed.
+inline constexpr uint8_t kPxPoor = 2;
+inline constexpr uint8_t kPxVideo = 3;     // any other video: may be text that went as video in
                                            // motion or for want of budget, or a photo not yet refined
+
+// The cells video is measured and taken again by (16 x 16, as text mode
+// decides tiles that do not fit a palette).
+inline constexpr int32_t kCellSize = 16;
 
 // Text mode: why a tile shows something other than what the host had in the
 // previous frame (TileState::stale, bits).
@@ -97,6 +107,7 @@ struct TileState {
 
   // --- Its content. ---
   uint64_t born = 0;    // the frame number when its content appeared
+  uint64_t born_us = 0;  // ... and its capture time
   uint64_t hot_us = 0;  // capture time it last changed as a hot tile (0 = not hot)
   // The tile cache slot that last stored what was here, and the content it
   // stored: when a dragged window uncovers part of the tile, the uncovered
@@ -139,7 +150,7 @@ class TileLedger {
   // it).
   bool Refined(size_t idx);
   // Content arrived in a video area: the area's stream shows it.
-  void EnterArea(size_t idx, uint64_t frame_no);
+  void EnterArea(size_t idx, uint64_t frame_no, uint64_t now_us);
 
   // --- Plans. ---
 
@@ -172,9 +183,42 @@ class TileLedger {
   // turn.
   size_t cursor = 0;
 
+  // --- Poor video and its retakes (text mode). ---
+
+  // New content in the tile: its cells' retakes count from 0 again.
+  void NewContent(size_t idx);
+  // How often the video of the cell holding pixel (x, y) was taken again
+  // since its tile's content changed.
+  uint8_t& retakes(int32_t x, int32_t y) {
+    return retakes_[static_cast<size_t>(y / kCellSize) * cell_cols_ + x / kCellSize];
+  }
+  // What the cell holding pixel (x, y) measured when its video was last
+  // taken from a picture (PSNR in dB, 0 = not measured since it changed).
+  uint8_t& measured(int32_t x, int32_t y) {
+    return measured_[static_cast<size_t>(y / kCellSize) * cell_cols_ + x / kCellSize];
+  }
+  // Whether some pixel may be kPxPoor (set when one may have become so,
+  // cleared by the scan that found none). Work is pending meanwhile.
+  bool poor_possible() const { return poor_possible_; }
+  void NotePoor() { poor_possible_ = true; }
+  void ClearPoorPossible() { poor_possible_ = false; }
+  // Poor video is no longer followed (the pictures cannot be measured): it
+  // counts as finished, as before the measuring.
+  void GiveUpPoor();
+  struct Mix {
+    bool exact = false;  // some pixel of it is exact
+    bool poor = false;   // some pixel of it is poor
+  };
+  Mix MixOf(const Rect& r) const;
+  bool HasPoor(const Rect& r) const;
+  // The pixels of `r` of quality `from` become `to`.
+  void Replace(const Rect& r, uint8_t from, uint8_t to);
+
   // --- Pixels. ---
 
   void SetPixels(const Rect& r, uint8_t q);
+  // A row of the pixels' qualities (width bytes), for measuring.
+  uint8_t* PixelRow(int32_t y) { return px_.data() + static_cast<size_t>(y) * width_; }
   // Exact pixels of `r` become kPxVideo: the viewer takes `r` from a picture.
   void TakenFromVideo(const Rect& r);
   uint8_t WorstPixel(const Rect& r) const;
@@ -186,8 +230,11 @@ class TileLedger {
   void RestorePixels(const Rect& tile, const Rect& r, const uint8_t* saved);
 
  private:
-  int32_t width_ = 0, height_ = 0, cols_ = 0;
+  int32_t width_ = 0, height_ = 0, cols_ = 0, cell_cols_ = 0;
   std::vector<TileState> tiles_;
+  std::vector<uint8_t> retakes_;   // per 16 x 16 cell
+  std::vector<uint8_t> measured_;  // per 16 x 16 cell
+  bool poor_possible_ = false;
   size_t owed_count_ = 0;
   size_t refining_ = 0;
   std::vector<uint8_t> px_;  // width_ * height_

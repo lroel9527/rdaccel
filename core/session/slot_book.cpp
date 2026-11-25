@@ -22,6 +22,8 @@ void SlotBook::Restore(uint32_t slot, const Rect& tile, const Rect& r, TileLedge
     return;
   }
   ledger.RestorePixels(tile, r, pixel_quality_.data() + slot * kSlotPixels);
+  // Poor video comes back poor, and is to be taken again where it is now.
+  if (ledger.HasPoor(r)) ledger.NotePoor();
 }
 
 }  // namespace rdacore::session

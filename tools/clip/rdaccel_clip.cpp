@@ -370,9 +370,10 @@ int Eval(const Args& args) {
   // What the full-screen encoder's pictures were coded for, and why rects
   // went to it (session::FrameTrace).
   struct {
-    double b_key = 0, b_new = 0, b_refine = 0, b_polish = 0, b_other = 0;
+    double b_key = 0, b_new = 0, b_refine = 0, b_polish = 0, b_retake = 0, b_other = 0;
     uint64_t pictures = 0, pictures_no_new = 0;
     uint64_t colours = 0, hot = 0, budget = 0, keyframe_first = 0, motion = 0, lossless = 0;
+    uint64_t retake_rects = 0, poor_cells = 0, retaken_close = 0, retaken_left = 0;
   } why;
   session::FrameTrace last_trace;
 
@@ -629,8 +630,20 @@ int Eval(const Args& args) {
       o.region_encoder_factory = [](const codec::EncoderConfig& c, std::string* e) {
         return platform::CreateVideoEncoder(c, e);
       };
+      // Text mode measures its video by decoding its own pictures, as the
+      // Host does (HostOptions::text_video_min_db): --mirror=0 leaves that
+      // out (the one picture is finished whatever it is like, as up to
+      // 3.4), --min-db and --retakes change the threshold and how often a
+      // poor cell is taken again.
+      if (args.num("mirror", 1) != 0) o.mirror_decoder_factory = [] { return platform::CreateVideoDecoder(nullptr); };
+      if (args.has("min-db")) o.text_video_min_db = static_cast<int>(args.num("min-db", o.text_video_min_db));
+      if (args.has("retakes")) o.text_video_retakes = static_cast<int>(args.num("retakes", o.text_video_retakes));
       o.trace = [&](const session::FrameTrace& f) {
         last_trace = f;
+        why.retake_rects += f.retake_rects;
+        why.poor_cells += f.poor_cells;
+        why.retaken_close += f.retaken_close;
+        why.retaken_left += f.retaken_left;
         why.colours += f.video_colours;
         why.hot += f.video_hot;
         why.budget += f.video_budget;
@@ -645,7 +658,7 @@ int Eval(const Args& args) {
           return;
         }
         // A picture's bytes go to what it was coded for, by tiles.
-        const double all = f.video_rects + f.refine_tiles + f.polish_tiles;
+        const double all = f.video_rects + f.refine_tiles + f.polish_tiles + f.retake_rects;
         if (all <= 0) {
           why.b_other += bytes;
           return;
@@ -653,6 +666,7 @@ int Eval(const Args& args) {
         why.b_new += bytes * f.video_rects / all;
         why.b_refine += bytes * f.refine_tiles / all;
         why.b_polish += bytes * f.polish_tiles / all;
+        why.b_retake += bytes * f.retake_rects / all;
         if (f.video_rects == 0) ++why.pictures_no_new;
       };
       host = std::make_unique<session::HostSession>(host_end.get(), std::move(enc), W, H, o);
@@ -667,7 +681,7 @@ int Eval(const Args& args) {
     }
     // The Host's idle loop between changes.
     while (frames > 0 && clip.time_us() - last_submit >= kResubmitUs &&
-           (host->keyframe_pending() || host->work_pending())) {
+           (host->keyframe_pending() || host->work_pending(last_submit + kResubmitUs))) {
       submit(last_submit + kResubmitUs, {}, true);
       ++resent;
     }
@@ -684,7 +698,7 @@ int Eval(const Args& args) {
     return 1;
   }
   // What is still owed once the clip ends (up to 3 s).
-  for (int k = 0; k < 30 && (host->keyframe_pending() || host->work_pending()); ++k) {
+  for (int k = 0; k < 30 && (host->keyframe_pending() || host->work_pending(last_submit + kResubmitUs)); ++k) {
     submit(last_submit + kResubmitUs, {}, true);
     ++resent;
   }
@@ -754,9 +768,13 @@ int Eval(const Args& args) {
                 superseded ? superseded_ms / static_cast<double>(superseded) : 0.0, static_cast<unsigned long long>(never));
   }
   std::printf("  pictures: %llu (%llu with nothing new) | keyframes %.0f kB, new content %.0f, refinement %.0f, still polish "
-              "%.0f, other %.0f kB\n",
+              "%.0f, retakes %.0f, other %.0f kB | poor video: %llu cells measured poor, %llu rects taken again, "
+              "%llu cells then close, %llu left as they were\n",
               static_cast<unsigned long long>(why.pictures), static_cast<unsigned long long>(why.pictures_no_new),
-              why.b_key / 1e3, why.b_new / 1e3, why.b_refine / 1e3, why.b_polish / 1e3, why.b_other / 1e3);
+              why.b_key / 1e3, why.b_new / 1e3, why.b_refine / 1e3, why.b_polish / 1e3, why.b_retake / 1e3,
+              why.b_other / 1e3, static_cast<unsigned long long>(why.poor_cells),
+              static_cast<unsigned long long>(why.retake_rects), static_cast<unsigned long long>(why.retaken_close),
+              static_cast<unsigned long long>(why.retaken_left));
   std::printf("  rects: %llu lossless | to video: %llu too many colours, %llu too many for content that keeps changing, "
               "%llu over the lossless budget, %llu in motion (saver), %llu video first with a keyframe\n",
               static_cast<unsigned long long>(why.lossless), static_cast<unsigned long long>(why.colours),
@@ -1165,7 +1183,7 @@ int Decisions(const Args& args) {
     }
     // The Host's idle loop between changes.
     while (frames > 0 && clip.time_us() - last_submit >= kResubmitUs &&
-           (host->keyframe_pending() || host->work_pending())) {
+           (host->keyframe_pending() || host->work_pending(last_submit + kResubmitUs))) {
       submit(last_submit + kResubmitUs, {}, true);
       ++resent;
     }
@@ -1179,7 +1197,7 @@ int Decisions(const Args& args) {
     return 1;
   }
   // What is still owed once the clip ends (up to 3 s).
-  for (int k = 0; k < 30 && (host->keyframe_pending() || host->work_pending()); ++k) {
+  for (int k = 0; k < 30 && (host->keyframe_pending() || host->work_pending(last_submit + kResubmitUs)); ++k) {
     submit(last_submit + kResubmitUs, {}, true);
     ++resent;
   }
