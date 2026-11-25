@@ -22,6 +22,11 @@
 // keeps seeing the area as it was when the area opened (so it spends nothing
 // there), and when the area goes quiet its tiles are sent once more through
 // the normal path, so a paused video ends up sharp.
+//
+// What the viewer shows of every tile and pixel, and the work each tile
+// still has coming, is the TileLedger's (session/tile_ledger.h); the picture
+// the encoder is fed is the EncoderPicture's (session/encoder_picture.h).
+// OnFrame takes each frame through a fixed series of stages (see there).
 
 #include <array>
 #include <atomic>
@@ -35,6 +40,10 @@
 #include "codec/lossless.h"
 #include "codec/video_codec.h"
 #include "proto/messages.h"
+#include "session/encoder_picture.h"
+#include "session/lossless_bucket.h"
+#include "session/slot_book.h"
+#include "session/tile_ledger.h"
 #include "tile/motion.h"
 #include "tile/tile_cache.h"
 #include "tile/tile_diff.h"
@@ -231,7 +240,7 @@ class HostSession {
   // paused video stayed at the area's quality); the Host re-submits the last
   // frame instead. Not thread-safe against OnFrame.
   bool work_pending() const {
-    return force_keyframe_ || !carry_video_tiles_.empty() || pending_lossless_count_ > 0 || refining_ > 0 ||
+    return force_keyframe_ || !carry_video_tiles_.empty() || ledger_.owed_count() > 0 || ledger_.refining() > 0 ||
            polish_owed_ || coarse_count_ > 0 || rough_waiting_ || !pending_sharpen_.empty() || !regions_.regions().empty();
   }
 
@@ -239,7 +248,7 @@ class HostSession {
   // lossless layer (or a copy of that), 1 = some of it video that had its
   // still-screen polish, 2 = some of it other video. For tools that measure
   // (rdaccel_clip). Not thread-safe against OnFrame.
-  int ShownQuality(const Rect& r) const { return pixel_quality_.empty() ? 2 : WorstPixelQuality(r); }
+  int ShownQuality(const Rect& r) const { return ledger_.size() == 0 ? 2 : ledger_.WorstPixel(r); }
 
   // The screen as of the last frame passed to OnFrame (BGRA, rows of
   // width * 4 bytes), e.g. to encode a requested keyframe when no new frame
@@ -254,89 +263,102 @@ class HostSession {
   uint64_t next_frame_id() const { return next_frame_id_; }  // under the frame path
 
  private:
+  // What one frame works with on its way through OnFrame's stages (defined
+  // in host_session.cpp).
+  struct Frame;
+
+  // OnFrame's stages, in order (see OnFrame).
+  void BeginFrame(Frame& f);
+  void TrackAreas(Frame& f);
+  void FillLosslessBucket(Frame& f);
+  void PlanOwedWork(Frame& f);
+  void PlanPolish(Frame& f);
+  bool NothingToDo(const Frame& f) const;
+  void StoreLeavingTiles(Frame& f);
+  void ClassifyChanges(Frame& f);
+  void DetectMotion(Frame& f);
+  void CodeTiles(Frame& f);
+  void AssemblePicture(Frame& f);
+  bool EncodePicture(Frame& f, std::string* error, bool* done);
+  void SendFrame(Frame& f);
+
+  // CodeTiles, for one changed (or owed) tile, by how it can be sent.
+  void CodeChange(Frame& f, size_t i);
+  void CodeMovedTile(Frame& f, size_t i, bool was_stale);
+  bool LoadFromCache(Frame& f, size_t i);
+  bool CodeFromSlot(Frame& f, size_t i, bool was_stale);
+  bool CodeSplitTile(Frame& f, size_t i);
+  void CodeWholeTile(Frame& f, size_t i);
+  // Codes `r` (all or part of tile `c`) losslessly if it has few colours,
+  // else through the video encoder (see the definition). CodeRect also keeps
+  // the pixels' quality up to date with what `r` is now.
+  enum : int { kCodedLossless = 0, kCodedVideo = 1, kDeferred = 2 };
+  int CodeRectAs(Frame& f, const tile::TileChange& c, const Rect& r, bool is_hot);
+  int CodeRect(Frame& f, const tile::TileChange& c, const Rect& r, bool is_hot);
+  // Paints the parts of `r` (inside tile `c`) that equal what the tile's
+  // last stored slot holds from that slot; returns the parts still to code.
+  std::vector<Rect> PaintFromSlot(Frame& f, const tile::TileChange& c, const Rect& r, double min_share, uint8_t& q);
+  // AssemblePicture's parts.
+  void ListCarriedTiles(Frame& f);
+  void CoarsenVideoParts(Frame& f);
+  void ContinueRefinement(Frame& f);
+  void FinishVideoTiles(Frame& f);
+  void SharpenAfterProgressive(Frame& f);
+  void PolishStillScreen(Frame& f);
+
   void OnReceive(transport::Channel ch, std::span<const uint8_t> bytes);
+  size_t TileIndex(const tile::TileChange& c) const { return static_cast<size_t>(c.row) * differ_.cols() + c.col; }
+  Rect TileRect(size_t idx) const;
   // Tile indices covered by `r` (tile aligned).
   std::vector<size_t> TilesOf(const Rect& r) const;
+  bool InArea(size_t idx) const;
+  // A copied rect is as good as the worst tile it was copied from.
+  uint8_t QualityUnder(const Rect& r) const;
   // Encodes the video areas that need it into `out`; false = a region
   // encoder failed (the areas are then dropped and a keyframe is scheduled).
   bool EncodeRegions(const capture::CapturedFrame& frame, const std::vector<bool>& dirty,
                      uint64_t frame_id, std::vector<uint8_t>& out, size_t& bytes, size_t& pictures,
                      uint64_t& us);
   void FinishRegions(const std::vector<uint8_t>& busy, const std::vector<uint8_t>& changed, uint64_t now_us);
-  // The encoder's picture is not the screen: lossless tiles are one plain
-  // colour in it, and tiles the viewer got by a copy or from its cache are
-  // whatever was there before. Colour is coded at half resolution, so the
-  // outermost pixels of a rect the viewer takes from the picture took on
-  // some of the colour next to them: a line of the wrong tint along the
-  // edge of a wallpaper or an icon, 28 levels off where the tile beside it
-  // still held a frame of a full-screen transition, and there for good (the
-  // tile counted as polished). Before a picture is coded, the pixels within
-  // kVideoSurround of each rect taken from it (`taken`) that are not taken
-  // themselves are given the screen's content. Not in video areas, which
-  // the full-screen picture does not follow.
-  static constexpr int32_t kVideoSurround = 2;
-  void SurroundVideoRects(const capture::CapturedFrame& frame, const std::vector<tile::TileChange>& taken);
-  // Text mode flattens each lossless rect in the encoder's picture (the viewer
-  // paints the rect over it), and the pixels the viewer takes from the
-  // picture next to such a rect take on some of its colour: a tint along the
-  // last row of a wallpaper or icon tile beside a text tile, kept for good as
-  // text mode codes such tiles once. SurroundVideoRects does not reach these
-  // (it skips keyframes and the inside of the rects taken). Before a picture
-  // is coded, the pixels of `lossless` within kVideoSurround of a pixel taken
-  // from it are given the screen's content.
-  void KeepScreenNextToVideo(const capture::CapturedFrame& frame, const std::vector<tile::TileChange>& taken,
-                             const std::vector<codec::PaletteTile>& lossless);
+  int64_t RegionBitrate(const Rect& r) const;
   void Send(transport::Channel ch, const proto::Message& m);
 
   transport::ITransport* transport_;
   std::unique_ptr<codec::IHevcEncoder> encoder_;
-  std::vector<uint8_t> video_px_;  // KeepScreenNextToVideo: the pixels taken from the picture (reused)
   int32_t width_, height_;
   HostOptions options_;
   tile::TileDiffer differ_;
-  // What the video encoder is fed: the captured frame with lossless tiles
-  // flattened (see the comment at the top).
-  std::vector<uint8_t> enc_input_;
+  // What the viewer shows of every tile and pixel, and what each tile still
+  // has coming (session/tile_ledger.h).
+  TileLedger ledger_;
+  // What the video encoder is fed (session/encoder_picture.h).
+  EncoderPicture picture_;
   codec::LosslessEncoder lossless_;
-  // The previous frame as captured, for move detection.
+  // The previous frame as captured (updated tile by tile as tiles are
+  // coded), for move detection and what the tile cache stores.
   std::vector<uint8_t> prev_;
-  std::vector<uint8_t> scratch_;
-  // Per tile: video frames left in which the viewer still takes this tile.
-  std::vector<uint8_t> refine_;
+  // The viewer's tile cache (session/slot_book.h).
+  SlotBook slots_;
   // Video tiles of a picture the encoder dropped, listed with the next one.
   std::vector<tile::TileChange> carry_video_tiles_;
-  size_t refining_ = 0;  // tiles with refine_ > 0
-  // Still-screen polish (HostOptions::still_refine_frames). Per tile: 0 =
-  // nothing owed (lossless, polished, or not in the encoder's picture);
-  // kUnpolished = its content changed since it was last polished; otherwise
-  // the still pictures it is yet to be taken from.
-  static constexpr uint8_t kUnpolished = 255;
-  std::vector<uint8_t> polish_;
   bool polish_owed_ = false;  // some tile is waiting for, or in, its polish
   // Text mode: some tile was left rough without refinement to follow (it
   // kept changing and went to the encoder whole) and will be owed once it
   // has stood still for kRefreshDelay frames. Until then frames must keep
   // coming, or it stays as it is until the screen changes again.
   bool rough_waiting_ = false;
+  size_t coarse_count_ = 0;  // tiles showing the quick pass (TileState::coarse)
 
-  // Text mode. Per tile, what the viewer shows is not what the host had in
-  // the previous frame: kStaleText = part of it waits for the lossless
-  // budget (it is in pending_lossless_ too); kStaleVideo = a video picture
-  // that carries it was held back or dropped. Such a tile is coded whole
-  // when it changes again (nothing in it may be assumed unchanged), is not
-  // stored in the tile cache, and what is copied out of it is owed as well.
-  static constexpr uint8_t kStaleText = 1;
-  static constexpr uint8_t kStaleVideo = 2;
-  // ... and what it shows there is a keyframe's placeholder (the tile's
-  // background colour), not older content. Nothing is copied out of such a
-  // tile: that painted blocks of plain colour over tiles that were fine.
-  // Out of a tile that shows older content copies do go (a window being
-  // dragged over it moves on as it is, a little behind, and is repaired
-  // when its tiles' turn comes): without them one tile that had to wait
-  // made every tile the window touched wait, each coded whole in every
-  // frame, which no budget covers.
-  static constexpr uint8_t kStalePlaceholder = 4;
-  std::vector<uint8_t> stale_;
+  // Text mode: many tiles that change frame after frame are motion (a
+  // scroll that re-renders its text, a window zooming to full screen, a
+  // film), not typing. Motion goes through the video encoder as a whole,
+  // as without text mode: every tile of it in the same picture, a little
+  // soft, and what is text is sent again exactly once it stops. Deciding
+  // tile by tile (this one sharp now, that one later, a third as video)
+  // showed the screen cut into pieces of different ages for as long as it
+  // moved. A few such tiles (typing, a caret, a clock) stay exact.
+  static constexpr size_t kTextMaxHotTiles = 8;
+
   // Text may use all of the bitrate: the allowance is on video, and what
   // the path cannot take is held back by the rate control's queue limit.
   // (At three quarters a fast scroll left rows of older text standing.)
@@ -345,98 +367,29 @@ class HostSession {
   // picture, a new window, a page that scrolled in), tiles the viewer has
   // nothing useful for first go out at kTextCoarseColors: a third of the
   // bytes again, so a page is readable in a third of the time. Such a tile
-  // counts as rough (coarse_ remembers that it had its quick pass) and is
-  // sent again at text_colors once the rest is done and the screen is
-  // nearly still.
+  // counts as rough (TileState::coarse remembers that it had its quick
+  // pass) and is sent again at text_colors once the rest is done and the
+  // screen is nearly still.
   // Only when the backlog would take longer than kTextCoarseBacklogSeconds
   // at the current bitrate: on a path that takes the screen in a moment the
   // quick pass would only add its bytes to the bill.
   static constexpr double kTextCoarseBacklogSeconds = 1.5;
   static constexpr size_t kTextCoarseBacklog = 48;
   static constexpr int kTextCoarseColors = 4;
-  std::vector<uint8_t> coarse_;
-  size_t coarse_count_ = 0;
-  // Tiles deferred when they changed (not a keyframe's): they go before the
-  // rest of what is owed, newest first, so that what the user is typing
-  // does not wait behind a screenful that is still turning sharp.
-  std::vector<size_t> urgent_;
   // Deflated size of lossless tiles over their raw (palette + index) size,
   // a running estimate: what a tile is counted at against the budget.
   double lossless_ratio_ = 0.25;
 
-  // Tile cache bookkeeping (see OnFrame).
+  // Tile cache bookkeeping (see StoreLeavingTiles).
   static constexpr uint64_t kStableFrames = 8;
   static constexpr uint64_t kHotHoldUs = 250'000;  // a hot tile stays hot over gaps this short
   static constexpr size_t kMaxSeen = 1 << 16;
   static constexpr size_t kMaxRecurringStores = 16;
   uint64_t frame_no_ = 0;
-  std::vector<uint64_t> born_;  // per tile: frame_no_ when its content appeared
-  std::vector<uint64_t> hot_us_;  // per tile: capture time it last changed as a hot tile
   std::unordered_map<uint64_t, uint8_t> seen_;  // content hash -> times it appeared
-  tile::TileCacheIndex cache_{proto::kTileCacheSlots};
 
-  // What the viewer shows for each tile, compared with the host's pixels.
-  // Rough tiles that stay static are refreshed (see HostOptions::refresh).
-  static constexpr uint8_t kRough = 0;    // first-pass video, or copied from it
-  static constexpr uint8_t kRefined = 1;  // video after its refinement frames
-  static constexpr uint8_t kExact = 2;    // lossless
-  static constexpr uint64_t kRefreshDelay = 6;      // frames static before a refresh
-  static constexpr size_t kMaxRefreshPerFrame = 24;  // spreads the cost out
-  std::vector<uint8_t> quality_;
-  std::vector<uint8_t> slot_quality_ = std::vector<uint8_t>(proto::kTileCacheSlots, kRough);
-  // The same for each pixel, which is what a copy needs. A scroll is one
-  // copy of most of the screen, and going by tiles it was as good as the
-  // worst tile it read from: one icon or a strip of wallpaper at video
-  // quality made every tile the scroll touched count as rough. In text mode
-  // each of them was then owed: once the scroll stopped the whole page went
-  // out again, text the viewer already showed exactly (about a quarter of a
-  // slow scroll's traffic), and the photos were coded, refined and polished
-  // anew although nothing about them had changed. Here every pixel keeps
-  // what it is through the copies, and a moved tile is judged by the pixels
-  // it ends up with:
-  //   kPxExact     lossless, or a copy of that;
-  //   kPxPolished  video that had its still-screen polish (a tile that is
-  //                not text, as good as video gets), or a copy of that;
-  //   kPxVideo     any other video: it may be text that went as video while
-  //                it moved or because the budget was spent, or a photo that
-  //                was never refined.
-  // A tile of exact pixels is exact; one with polished ones besides is not
-  // owed either (it would be coded as video again and come out the same);
-  // any kPxVideo pixel leaves it owed, as before.
-  // Never better than what the viewer shows: a pixel marked worse than it
-  // is costs a re-send, one marked better would stay as it is for good.
-  static constexpr uint8_t kPxExact = 0;
-  static constexpr uint8_t kPxPolished = 1;
-  static constexpr uint8_t kPxVideo = 2;
-  std::vector<uint8_t> pixel_quality_;  // width_ * height_
-  std::vector<uint8_t> pixel_quality_scratch_;
-  void SetPixelQuality(const Rect& r, uint8_t q);
-  // Exact pixels of `r` become kPxVideo (the viewer takes `r` from a picture).
-  void TakenFromVideo(const Rect& r);
-  uint8_t WorstPixelQuality(const Rect& r) const;
-  void RestorePixelQuality(uint32_t slot, const Rect& tile, const Rect& r);
+  static constexpr size_t kMaxRefreshPerFrame = 24;  // HostOptions::refresh: spreads the cost out
 
-  // Palette content that went as video because it kept changing (a hot
-  // tile takes lossless_max_colors_hot colours at most: a terminal printing,
-  // a page that re-renders as it scrolls) ended, once it stopped, refined
-  // and polished by the encoder, and stayed that: never rough with nothing
-  // going on, it was not owed. Such a tile is looked at once it stands
-  // still, and owed losslessly if a palette takes it. Per tile: born_ + 1
-  // of the content that was looked at (0 = none), so each is tried once.
-  std::vector<uint64_t> palette_checked_;
-
-  // The host's own copy of each slot's pixels, and per tile position the slot
-  // that last stored what was there. When a dragged window uncovers part of
-  // a tile, the uncovered pixels usually equal that stored content, so they
-  // can be painted from the slot instead of being coded.
-  std::vector<uint8_t> slot_pixels_;  // kTileCacheSlots tiles of kTileSize^2 BGRA
-  // ... and how the viewer had each of those pixels when the slot was stored
-  // (pixel_quality_'s values): a tile is text here and video there, and a
-  // load restores that, so that text that came back from the cache exact is
-  // not owed again and video that was text in motion still is.
-  std::vector<uint8_t> slot_pixel_quality_;  // kTileCacheSlots tiles of kTileSize^2
-  std::vector<int64_t> tile_slot_;     // per tile, -1 = none
-  std::vector<uint64_t> tile_slot_hash_;
   // Video areas and their encoders (by stream id).
   tile::VideoRegionTracker regions_;
   struct RegionEncoder {
@@ -444,19 +397,14 @@ class HostSession {
     bool need_key = true;
   };
   std::unordered_map<uint8_t, RegionEncoder> region_enc_;
-  int64_t RegionBitrate(const Rect& r) const;
   bool regions_disabled_ = false;      // a region encoder could not be created
   std::vector<size_t> pending_sharpen_;  // tiles of closed areas, for the next frame
-  // Progressive keyframes: tiles still owed their lossless version.
-  std::vector<uint8_t> pending_lossless_;
-  size_t pending_lossless_count_ = 0;
-  size_t pending_cursor_ = 0;              // where the next frame continues
-  double lossless_bytes_per_tile_ = 1500;  // running estimate, for the budget
-  uint64_t progressive_last_us_ = 0;       // capture time of the last frame that sent some
-  // Lossless budget (see OnFrame). New content deflates to about half its
-  // raw palette + index size; content seen before costs much less (the
-  // stream's history), but that cannot be told in advance.
-  uint64_t last_frame_us_ = 0;                        // capture time of the previous frame
+  double lossless_bytes_per_tile_ = 1500;  // running estimate, for the owed tiles' budget
+  uint64_t progressive_last_us_ = 0;       // capture time of the last frame that sent owed tiles
+  // Lossless budget (see FillLosslessBucket). New content deflates to about
+  // half its raw palette + index size; content seen before costs much less
+  // (the stream's history), but that cannot be told in advance.
+  uint64_t last_frame_us_ = 0;          // capture time of the previous frame
   std::array<uint64_t, 3> late_us_{};  // capture times of the last frames that came late
   // The budget is a bucket of bytes: it fills at kLosslessRateShare of the
   // bitrate, holds at most kLosslessBurstFrames frame intervals of the
@@ -469,14 +417,9 @@ class HostSession {
   // hardly ever exceeds, so a frame stays within the bucket; content seen
   // before costs less, and the bucket is charged only what it cost.
   static constexpr double kLosslessRawShare = 1.0;
-  double lossless_tokens_ = 0;  // bytes, may go negative
-  double lossless_cap_ = 0;     // what the bucket holds at most, bytes
-  bool lossless_tokens_set_ = false;
-  bool progressive_active_ = false;        // a progressive keyframe is being completed
-  bool sharpen_video_ = false;             // ... and was: re-send the video tiles sharp
-  // Tiles sent losslessly by a progressive keyframe whose text is still in
-  // the encoder's input (flattened in one go, at the end).
-  std::vector<uint8_t> unflattened_;
+  LosslessBucket bucket_;
+  bool progressive_active_ = false;  // a progressive keyframe is being completed
+  bool sharpen_video_ = false;       // ... and was: re-send the video tiles sharp
   // Share of the bitrate the owed tiles may use. The screen is usually static
   // meanwhile; changes still go first, and the transport's queue limit holds
   // latency down if the estimate is off.
@@ -490,8 +433,7 @@ class HostSession {
   bool moving_ = false;
   // The previous frame changed at most 2% of the tiles.
   bool quiet_ = true;
-  bool holding_back_ = false;        // the previous frame's view
-  uint64_t lossless_tokens_us_ = 0;  // when the bucket was last filled
+  bool holding_back_ = false;  // the previous frame's view
   static constexpr size_t kMaxProgressivePerFrame = 64;
   uint64_t next_frame_id_ = 1;
   std::atomic<bool> force_keyframe_{true};

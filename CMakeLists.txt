@@ -109,6 +109,9 @@ set(RDACCEL_SOURCES
   core/net/reliable_transport.cpp
   core/net/fec.cpp
   core/session/host_session.cpp
+  core/session/tile_ledger.cpp
+  core/session/encoder_picture.cpp
+  core/session/slot_book.cpp
   core/session/link.cpp
   core/session/viewer_session.cpp
   core/session/rate_control.cpp

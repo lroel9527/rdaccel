@@ -37,6 +37,33 @@ rdaccel 是一个“分层混合编码”的远程桌面库：先判断哪些块
 - **静止后的细修**（`still_refine_frames` / `still_min_qp`，1.4.5）：画面接近静止（变化的块不超过 2%）时，还停在视频画质的块（图标、照片、渐变：颜色太多、走不了无损层的）再从之后 60 个画面里取，这些画面把编码器的 QP 下限从 `min_qp`（24）放到 12。适合运动画面的下限会让静止画面看得出发软，编码器换到更细的下限也要大约 1 秒才用得上。画面在动时不多花码率；块一变就重新来过。`refine_frames` 为 0（不精修）时不做。
 - **关键帧请求**：接收端解码失败或中途接入时自动要一次全屏刷新（最多每 250 ms 一次），应用也可以调用 `RequestKeyframe()`。画面静止时，Host 100 ms 后用最后一帧补发（拥塞时跳过的帧也一样）。
 
+## 每一块的账
+
+Host 决定接收端显示的一切，所以不用问也知道接收端每一块、每个像素现在是什么。这份账在 `core/session/tile_ledger.h`（`TileLedger`）：
+
+- **块的状态**（`TileState`）：接收端有的是 Host 的像素（无损）、已完成的视频，还是要再发的粗视频；显示的是不是旧内容（文字模式：等无损预算的、所在画面被扣下或丢掉的、关键帧的底色占位）；是不是只发了快速的少色版本。
+- **块的计划**：欠着（再发一次：放得进调色板就无损，否则视频）、还要从之后几张画面取（精修，`refine_frames`）、静止后的细修（`still_refine_frames`）、调色板内容查过没有。
+- **像素的质量**：无损、已完成的视频、其他视频。拷贝（滚动、拖窗）和块缓存贴回时，像素的质量跟着像素走，收到拷贝的块按它最后的像素判断。按块算时，一次滚动（大半屏的一次拷贝）会因为页面里一个视频画质的图标，让经过的每块都变成粗的，文字模式下停下后全部重发。
+- 规则只有一条：只许比接收端实际的差，不许比它好。记差了多发一次；记好了，就再也没有什么会去看它。
+- 状态只在有名字的转换里改（`Owe`、`Settle`、`SetRefine`、`Refined`、`EnterArea`、`StartKeyframe`、`ForgetAll`……）；哪些块有活要干，由账本回答（`DueRefresh`、`DueOwing`、`DuePaletteCheck`、`RoughWaiting`）。
+
+一帧在 Host 里按固定的几个阶段走（`HostSession::OnFrame`）：
+
+| 阶段 | 做什么 |
+| --- | --- |
+| `BeginFrame` | 比对出变化的块；关键帧和新尺寸从头来 |
+| `TrackAreas` | 视频区域里的块离开普通路径 |
+| `FillLosslessBucket` | 无损预算的桶按时间补（`core/session/lossless_bucket.h`） |
+| `PlanOwedWork`、`PlanPolish` | 按账本挑出这帧要补的块：欠着的、刚关掉的区域里的、要细修的 |
+| （`NothingToDo`） | 没有变化也没有要补的：整帧跳过 |
+| `StoreLeavingTiles` | 要被盖住的块先存进块缓存（`core/session/slot_book.h`） |
+| `ClassifyChanges`、`DetectMotion` | 哪些块一直在变，是不是运动；平移和拖窗变成拷贝 |
+| `CodeTiles` | 每块选一条路：拷贝、缓存、按条贴回、按格拆开、整块无损或视频 |
+| `AssemblePicture` | 接收端要从这张画面取哪些矩形（加上被丢掉的画面的、细修和打磨的）；编码器的画面（`EncoderPicture`，`core/session/encoder_picture.h`）在这些矩形周围放上屏幕的内容，免得边缘串色 |
+| `EncodePicture`、`SendFrame` | 编码，发出 |
+
+改这些阶段时，`tools/clip/check_decisions.sh`（见 [测试片段](clips.md)）拿确定性的假编码器把所有片段重放一遍，核对每一帧的决定和改之前逐字节相同。
+
 ## 传输
 
 传输是可插拔的（`rda_transport_vtable` / `rdaccel::Transport`）。库自带进程内管道和 UDP（TCP 传输在 2.0.0 删除了），应用也可以接自己的 QUIC、WebRTC 或中继。每条连接分 7 个通道：
