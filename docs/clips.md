@@ -6,11 +6,12 @@
 
 | 文件 | 作用 |
 | --- | --- |
-| `rdaccel_clip`（`rdaccel_clip.cpp`） | 录制、把示例场景生成片段、测评一个片段、取出某一帧 |
+| `rdaccel_clip`（`rdaccel_clip.cpp`） | 录制、把示例场景生成片段、测评一个片段、取出某一帧、记下 Host 的每个决定 |
 | `clip.h` | 片段文件格式 |
 | `text_cells.h` | 测评用的文字格判断（见“怎么找文字格”） |
 | `compare.sh` | 当前代码和某个旧版本在一组片段上逐个对比 |
 | `compare_runs.py` | 同一个 `rdaccel_clip` 在一组片段上按几种设置对比 |
+| `check_decisions.sh` | 重构 Host 前后，在一组片段上比较它做的每个决定（见“检查重构有没有改变决定”） |
 | `scenarios/record.sh` | 在 Mac 上自动操作真实应用，每个场景录一个片段 |
 | `scenarios/drive.swift` | `record.sh` 用的键盘鼠标驱动 |
 | `scenarios/make_content.sh` | 生成场景要显示的内容（长网页、测试视频和带字幕的版本、终端脚本、四个文字场景的页面；字幕要 Python 的 Pillow） |
@@ -184,6 +185,17 @@ soft 格再按这一格在原画面上有几种颜色分开：最多 16 种、17
 
 `--split-cells=0 --text-refine=1` 按 3.0.1 的规则决定（视频区域的改动除外，见 [CHANGELOG](../CHANGELOG.md) 3.1.0）。
 
+`--fps=N`（默认 60）改 Host 的帧率（`HostOptions::fps` 和编码器的设置），比如照 rdmachine 的 30。片段里的帧照录制时的时间送，不按这个帧率丢帧。
+
+### 账对不对：`--audit=1`
+
+Host 记着对端每个像素是什么（无损、已完成的视频、其他视频，`HostSession::ShownQuality`），后面的决定都靠这份账：记成无损或已完成的，再也不会重发。`--audit=1` 每送一帧就逐个 16 × 16 格核对账和对端实际显示的像素：
+
+- 账上全是无损、实际和原画面差 30 dB 以上的格：账错了；
+- 账上是已完成的视频、实际低于 `--audit-db`（默认 20 dB）的格：画面差，却不会再有人补它。
+
+第一次出现时打一行（最多 60 行），片段结束时把仍然这样的格全部列出，最后一行是总数，以及片段结束时低于 25 dB、20 dB 的格（不管账上怎么记）和账上仍有工作没做完没有。`--dump=前缀` 另外把最后的原画面、对端画面和一张账的示意图（绿：无损，蓝：已完成的视频，红：其他视频，品红：账不对）写成 PPM。这些图就是真实屏幕：和片段一样只留在本机。
+
 `--cells=1` 在最后列出片段结束时既不是 exact 也不是 sharp 的文字格，用来查原因：每格一行，左上角坐标、PSNR、对端这一格来自哪里（`lossless`、`polished video`、`video`，即 `HostSession::ShownQuality`）、这一格在原画面上有几种颜色，低于 25 dB 的标 `WRONG`。
 
 ### 怎么找文字格
@@ -226,6 +238,88 @@ tools/clip/compare_runs.py --only idle,typing --markdown base='--text=1' old='--
 每次运行的完整输出存在 `--out`（默认 `clips/baseline/runs/`）的 `<片段>.<设置>.txt`，第一行记着 ARGS；同样的 ARGS、比片段和程序都新的输出直接拿来用，不重跑，`--force` 才重跑。`--list` 只列出会跑什么。
 
 打出的表：流量；文字（exact+sharp 旁边是只看像素 40 dB 以内的比例，旧的输出里没有这一行时显示“-”，也不算缺）；视频画面编的目的和矩形送进视频的原因；最后是比参照差的地方（regressions：文字格 exact 加 sharp 少 0.5 个百分点以上、只看像素 40 dB 以内的少 1.0 个百分点以上、wrong 多 0.05 个百分点以上、变化后到 exact 或 sharp 的 95% 时间多 50 ms 以上、流量多 2% 以上，或者没有结果）。`--markdown` 打 Markdown 表。程序没有输出某一项（旧版本、另一种模式）时显示“-”，stderr 说缺了哪些。
+
+## 检查重构有没有改变决定
+
+只改 Host 的结构（拆函数、挪代码）、不打算改它的行为时，要能证明它在每一帧做的决定都和原来一样。`eval` 做不到：硬件编码器每次的结果略有不同，Host 接下来怎么做又取决于编码器给了什么（画面多大、丢没丢），同一份代码跑两遍也不一样。
+
+```sh
+build/bin/rdaccel_clip decisions clips/drag.clip --out=clips/drag.decisions.txt --text=1 --bitrate=1000000 --fps=30
+```
+
+`decisions` 和 `eval` 一样读片段、一样送帧（屏幕变化时送这一帧；有东西欠着时每 100 ms 再送一次上一帧；片段结束后最多再送 30 次），`HostOptions` 也一样设（`--text`、`--bitrate`、`--fps` 和上面的实验选项，开着视频区域和 `trace`）。不同的是：
+
+- 全屏和每个视频区域都用一个确定的假编码器（见下）；
+- 没有对端，也没有进程内管道：Host 发出的字节由一个假的 transport 按通道记下，什么也不回（没有关键帧请求，没有输入）。
+
+同一份代码、同一个片段和选项，输出逐字节相同。重构前记一份，重构后再跑一遍：完全相同，就是每一帧发出的字节和 `FrameTrace` 记下的决定都没有变。
+
+Host 的决定不读墙上时钟：`host_session.cpp` 读 `capture::MonotonicMicros()` 只为三项用时统计（`encode_us_total`、`lossless_us_total`、`region_encode_us_total`，不在输出里），`tile/`、`codec/lossless*`、`codec/context_tiles*` 不读时钟。和时间有关的决定（无损预算、补发、热块、视频区域关闭）都按帧的采集时间，也就是片段里录下的时间。
+
+### 假编码器
+
+画面只取决于输入和这一次调用，和时间、地址、之前的调用都无关：输入的 BGRA 画面（每行宽 × 4 字节，不算 stride 多出的部分）连同宽高、`force_keyframe`、最近一次 `SetMinQp` 的值，算一个 64 位哈希（按 8 字节一个字的 FNV-1a，最后再混合一次）。
+
+| 项 | 怎么来 |
+| --- | --- |
+| 关键帧 | 正好在 `force_keyframe` 时；只有关键帧带参数集（几个固定字节，第一个是 VPS 的 NAL 头） |
+| 画面 | 一个带长度前缀的 NAL：两字节头、8 字节哈希，再加“哈希 % 3000”字节填充，所以大小随内容变 |
+| 丢帧 | 不是关键帧、且哈希 % 29 为 0 时返回空、不报错，和 VideoToolbox 低码率时丢帧一样：Host 把这一帧的视频块并到下一幅画面 |
+| `SetBitrate` | 只记下，不影响画面 |
+
+视频区域的编码器是同一种，每个区域一个，按各自的 `EncoderConfig` 创建。
+
+同一幅画面再编一次还是同一个哈希：丢掉的画面原样重送还会被丢，直到输入变了。所以丢帧比 1/29 稍多（各设置 3%–6%），文字模式下 Host 还可能一段时间什么也发不出：不加扰动时最长是 `terminal` 在 300 kbps 时的 1.8 秒（连着 19 次），加扰动时 `idle` 有 6.4 秒（关键帧之后结束渐进关键帧的那幅被丢）。真的编码器不会这样，但结果仍然确定，不影响比较。
+
+### 输出
+
+都是“键=值”，每次 `OnFrame` 一行 `call=`，另有几种行：
+
+| 行 | 内容 |
+| --- | --- |
+| `decisions` | 第一行：格式版本（行的内容一变就加一，旧工具记的日志在第一行就不同）、画面大小、选项 |
+| `init` | 构造 HostSession 时发的（Hello） |
+| `call=` | 序号；`t_us`：从片段第一帧起的采集时间（微秒）；`resent`：1 = 补送的上一帧；`ok`：`OnFrame` 的返回值；这次调用在每个通道上发的字节数和按发送顺序算的哈希（如 `video=1234:…`，没发的通道不列）；这一帧的 `FrameTrace`（`trace` 之后，字段名和结构里的一样；没有回调时是 `trace=none`）；调用之后的 `work_pending`、`keyframe_pending` |
+| `perturb` | `--perturb=1` 做的一次扰动（见下），写在它之前的那次调用上面 |
+| `between` | 两次调用之间发出的东西（应该没有） |
+| `stats` | 最后一行：HostSession 自己的计数（`HostStats`），去掉三项用时（`*_us_total`）；其余字段是 Host 的（按墙上时钟的补送、transport 的测量和跟着它的码率、光标、声音），这里总是 0 |
+
+日志里只有大小和哈希，没有画面内容；但它们是从私人片段算出来的，和片段一样留在 `clips/` 下（在 `.gitignore` 里），不提交、不上传。
+
+### 扰动：`--perturb=1`
+
+光重放片段走不到的几条路。按片段自己的时间（从第一帧算，不是墙上时钟），在到点后送的第一帧（补送也算）之前做：
+
+| 时间 | 做什么 |
+| --- | --- |
+| 5 s 起每 10 s | `RequestKeyframe()` |
+| 3 s 起每 7 s | `SetBitrate()`，依次是 `--bitrate`、它的 1/2、1/4，再从头来 |
+| 15 s，一次 | 全屏编码器的下一次 `Encode` 失败（返回空并带错误信息），Host 走编码器失败的路：这次 `ok=0`，下一帧是关键帧 |
+| 20 s、22 s 各一次（只在 `--text=1` 时） | `SetTextMode(false)` 紧接着 `SetTextMode(true)` |
+
+同一帧之前到点的几项按时间先后做，同时到点的按上表的顺序。
+
+### 脚本：`check_decisions.sh`
+
+```sh
+tools/clip/check_decisions.sh record  [CLIPS_DIR] [OUT_DIR]   # 写 OUT_DIR/<设置>/<片段>.txt
+tools/clip/check_decisions.sh compare [CLIPS_DIR] [OUT_DIR]   # 重跑到临时目录，和 OUT_DIR 比较
+```
+
+CLIPS_DIR 默认 `clips`（里面所有的 `*.clip`），OUT_DIR 默认 CLIPS_DIR/decisions，即 `clips/decisions`。先构建 `rdaccel_clip`（`build/`，免得拿旧程序和它自己比）；设了 `RDACCEL_CLIP=路径` 就直接用那个程序。每个片段按下面六种设置各跑一次，一个接一个：
+
+| 设置 | 选项 |
+| --- | --- |
+| `normal` | `--text=0 --bitrate=8000000 --fps=60` |
+| `saver8m` | `--text=1 --bitrate=8000000 --fps=30` |
+| `saver1m` | `--text=1 --bitrate=1000000 --fps=30` |
+| `saver300k` | `--text=1 --bitrate=300000 --fps=30` |
+| `normal-perturb` | `--text=0 --bitrate=8000000 --fps=60 --perturb=1` |
+| `saver1m-perturb` | `--text=1 --bitrate=1000000 --fps=30 --perturb=1` |
+
+`compare` 每个日志打一行 `same` 或 `DIFFERS`，不同的打出第一处不同（行号、记录的那行、现在的那行）。有任何不同、缺记录或者某次运行失败就以 1 退出，新日志留在 OUT_DIR 旁边的 `decisions.compare.*` 里；全都相同就删掉。临时目录在 OUT_DIR 旁边，所以同样在 `clips/` 下。
+
+用法：动手之前（或者在一个干净的检出里，CLIPS_DIR 指向原来的 `clips/`）`record` 一次，之后每改一步 `compare`。这台 Mac 上 13 个片段、六种设置全部跑一遍约 6 分钟（大片段每次 7–12 秒），日志共约 22 MB。
 
 ## 合成场景做成片段
 

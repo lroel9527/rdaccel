@@ -24,21 +24,34 @@
 //   rdaccel_clip frame CLIP --index=N --out=FRAME.ppm [--textmap=1]
 //       Frame N of the clip as a PPM, to look at what was recorded;
 //       --textmap=1 dims what is not counted as text.
+//   rdaccel_clip decisions CLIP --out=FILE [--text=0] [--bitrate=8000000] [--fps=60] [--perturb=1]
+//                          [--refine=N] [--still-refine=N] [--split-cells=N] [--split-hot=1] [--text-refine=1] [--linger-ms=N]
+//       Plays the clip into a host as eval does, with a fake encoder whose
+//       pictures depend only on its input and no viewer, and writes one line
+//       per frame of what the host decided (what it sent on each channel, as
+//       sizes and hashes; session::FrameTrace). Two builds that decide alike
+//       write the same file: check_decisions.sh compares them on every clip.
+//       --perturb=1 also requests keyframes, changes the bitrate, fails the
+//       encoder once and switches text mode, at fixed points of the clip.
 //
 // eval works on the internals (session::HostSession), not the public API, so
 // it sees every frame the host decides on; the numbers are what the Host
 // sends on a fast path (no congestion, a fixed bitrate).
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include "args.h"
 #include "clip.h"
@@ -63,7 +76,9 @@ int Usage() {
                "       rdaccel_clip render OUT.clip --scenario=NAME [--background=SCREEN.ppm] [--seconds=20]\n"
                "       rdaccel_clip eval CLIP [--text=0] [--bitrate=8000000] [--label=NAME] [--csv=FRAMES.csv] [--focus=x,y,w,h]\n"
                "                    [--refine=N] [--still-refine=N] [--split-cells=N] [--split-hot=1] [--text-refine=1] [--cells=1]\n"
-               "       rdaccel_clip frame CLIP --index=N --out=FRAME.ppm [--textmap=1]\n");
+               "       rdaccel_clip frame CLIP --index=N --out=FRAME.ppm [--textmap=1]\n"
+               "       rdaccel_clip decisions CLIP --out=FILE [--text=0] [--bitrate=8000000] [--fps=60] [--perturb=1]\n"
+               "                    [--refine=N] [--still-refine=N] [--split-cells=N] [--split-hot=1] [--text-refine=1] [--linger-ms=N]\n");
   return 2;
 }
 
@@ -180,6 +195,19 @@ int Frame(const Args& args) {
   std::fclose(f);
   std::printf("frame %lld of the clip\n", i);
   return 0;
+}
+
+// The experiments eval and decisions take. How much the refinement and the
+// still-screen polish cost and give (HostOptions::refine_frames,
+// still_refine_frames). Text mode's decisions (HostOptions): --split-cells=0
+// --text-refine=1 is text mode as it was up to rdaccel 3.0.1.
+void SetExperiments(const Args& args, session::HostOptions& o) {
+  o.split_cells = static_cast<int>(args.num("split-cells", o.split_cells));
+  o.split_hot = args.num("split-hot", o.split_hot ? 1 : 0) != 0;
+  o.text_refine = args.num("text-refine", o.text_refine ? 1 : 0) != 0;
+  if (args.has("linger-ms")) o.text_linger_us = static_cast<int64_t>(args.num("linger-ms", 0) * 1000);
+  if (args.has("refine")) o.refine_frames = static_cast<int>(args.num("refine", o.refine_frames));
+  if (args.has("still-refine")) o.still_refine_frames = static_cast<int>(args.num("still-refine", o.still_refine_frames));
 }
 
 int Eval(const Args& args) {
@@ -354,14 +382,76 @@ int Eval(const Args& args) {
     if (csv) std::fprintf(csv, "t_ms,resent,dirty_px,video_b,lossless_b,lossless_rects,moved_tiles,cached_tiles,owed_tiles,video_frame,exact_pct,text_exact_pct,text_sharp_pct,text_before_pct,text_soft_pct,text_wrong_pct,hot,hot_unmoved,moves,motion,video_rects,text_px40_pct,text_px30_pct\n");
   }
 
+  // --audit=1: cells whose pixels on the viewer contradict what the host
+  // believes it shows there (HostSession::ShownQuality): all from the
+  // lossless layer yet far from the screen, or finished video very far from
+  // it. Nothing is owed for such a cell, so it stays as it is until its
+  // content changes.
+  const bool audit = args.num("audit", 0) != 0;
+  constexpr double kAuditLosslessDb = 30.0;
+  const double kAuditFinishedDb = static_cast<double>(args.num("audit-db", 20));
+  std::vector<uint64_t> bad_since;  // per cell: when it turned bad (0 = fine)
+  uint64_t bad_events = 0, bad_printed = 0;
+  auto cell_error = [&](const Rect& r, uint64_t& same) {
+    double se = 0;
+    same = 0;
+    for (int32_t y = r.y; y < r.bottom(); ++y) {
+      const size_t off = (static_cast<size_t>(y) * W + r.x) * 4;
+      for (int32_t x = 0; x < r.w; ++x) {
+        const size_t i = off + static_cast<size_t>(x) * 4;
+        const int d0 = shown[i] - screen[i], d1 = shown[i + 1] - screen[i + 1], d2 = shown[i + 2] - screen[i + 2];
+        same += (d0 | d1 | d2) == 0;
+        se += d0 * d0 + d1 * d1 + d2 * d2;
+      }
+    }
+    const double n = static_cast<double>(r.w) * r.h;
+    return se == 0 ? 99.0 : 10 * std::log10(255.0 * 255.0 / (se / (n * 3)));
+  };
+  // 1 = lossless by the host's account but far, 2 = finished video but very far.
+  auto audit_kind = [&](const Rect& r, double& db, int& q) {
+    uint64_t same = 0;
+    db = cell_error(r, same);
+    q = host->ShownQuality(r);
+    if (same == static_cast<uint64_t>(r.w) * r.h) return 0;
+    if (q == 0 && db < kAuditLosslessDb) return 1;
+    if (q == 1 && db < kAuditFinishedDb) return 2;
+    return 0;
+  };
+  auto audit_cells = [&](uint64_t t) {
+    bad_since.resize(static_cast<size_t>(cols) * rows, 0);
+    for (int32_t cy = 0; cy < rows; ++cy) {
+      for (int32_t cx = 0; cx < cols; ++cx) {
+        const size_t idx = static_cast<size_t>(cy) * cols + cx;
+        const Rect r = cell_rect(cx, cy);
+        double db = 0;
+        int q = 0;
+        const int kind = audit_kind(r, db, q);
+        if (kind == 0) {
+          bad_since[idx] = 0;
+          continue;
+        }
+        if (bad_since[idx] != 0) continue;
+        bad_since[idx] = t;
+        ++bad_events;
+        if (bad_printed++ < 60) {
+          std::printf("  audit %8.0f ms: cell %4d,%4d %s, PSNR %5.1f%s\n", (t - first_t) / 1e3, r.x, r.y,
+                      kind == 1 ? "lossless by the host's account" : "finished video", db,
+                      text_cell.size() > idx && text_cell[idx] ? "  (text)" : "");
+        }
+      }
+    }
+  };
+
   auto measure = [&](uint64_t t) {
     // Wait (briefly) until the viewer shows what the host sent. Some frames
     // never reach the screen as their own picture; then what the viewer
     // shows meanwhile is what is measured.
     const uint64_t want = host->next_frame_id() - 1;
     std::unique_lock<std::mutex> lock(mu);
-    if (!cv.wait_for(lock, std::chrono::milliseconds(400), [&] { return shown_id >= want; })) ++missed;
+    const bool caught_up = cv.wait_for(lock, std::chrono::milliseconds(400), [&] { return shown_id >= want; });
+    if (!caught_up) ++missed;
     if (shown.size() != screen.size()) return;
+    if (audit && caught_up) audit_cells(t);
     if (last_q_t) {
       const double dt = static_cast<double>(t - last_q_t);
       w_exact += last_exact * dt;
@@ -522,7 +612,8 @@ int Eval(const Args& args) {
       W = clip.width();
       H = clip.height();
       first_t = clip.time_us();
-      codec::EncoderConfig ec{W, H, 60, bitrate, 24};
+      const auto fps = static_cast<int32_t>(args.num("fps", 60));
+      codec::EncoderConfig ec{W, H, fps, bitrate, 24};
       auto enc = platform::CreateVideoEncoder(ec, &err);
       if (!enc) {
         std::fprintf(stderr, "encoder: %s\n", err.c_str());
@@ -532,18 +623,9 @@ int Eval(const Args& args) {
       o.text_mode = text;
       o.context_tiles = text;
       o.context_tiles_64 = text;
-      o.fps = 60;
+      o.fps = fps;
       o.bitrate_bps = bitrate;
-      // Experiments: how much the refinement and the still-screen polish
-      // cost and give (HostOptions::refine_frames, still_refine_frames).
-      // Text mode's decisions (HostOptions): --split-cells=0 --text-refine=1
-      // is text mode as it was up to rdaccel 3.0.1.
-      o.split_cells = static_cast<int>(args.num("split-cells", o.split_cells));
-      o.split_hot = args.num("split-hot", o.split_hot ? 1 : 0) != 0;
-      o.text_refine = args.num("text-refine", o.text_refine ? 1 : 0) != 0;
-      if (args.has("linger-ms")) o.text_linger_us = static_cast<int64_t>(args.num("linger-ms", 0) * 1000);
-      if (args.has("refine")) o.refine_frames = static_cast<int>(args.num("refine", o.refine_frames));
-      if (args.has("still-refine")) o.still_refine_frames = static_cast<int>(args.num("still-refine", o.still_refine_frames));
+      SetExperiments(args, o);
       o.region_encoder_factory = [](const codec::EncoderConfig& c, std::string* e) {
         return platform::CreateVideoEncoder(c, e);
       };
@@ -707,6 +789,82 @@ int Eval(const Args& args) {
       }
     }
   }
+  if (audit && shown.size() == screen.size()) {
+    // At the end: the cells still contradicting the host, and text left at
+    // video quality with nothing owed for it.
+    uint64_t still = 0, text_video = 0, text_video_finished = 0, below25 = 0, below20 = 0;
+    for (int32_t cy = 0; cy < rows; ++cy) {
+      for (int32_t cx = 0; cx < cols; ++cx) {
+        const size_t idx = static_cast<size_t>(cy) * cols + cx;
+        const Rect r = cell_rect(cx, cy);
+        double db = 0;
+        int q = 0;
+        const int kind = audit_kind(r, db, q);
+        if (kind != 0) {
+          ++still;
+          std::printf("  audit at the end: cell %4d,%4d %s, PSNR %5.1f, since %.0f ms%s\n", r.x, r.y,
+                      kind == 1 ? "lossless by the host's account" : "finished video", db,
+                      bad_since.size() > idx && bad_since[idx] ? (bad_since[idx] - first_t) / 1e3 : -1.0,
+                      text_cell[idx] ? "  (text)" : "");
+        }
+        below25 += db < 25.0;
+        below20 += db < 20.0;
+        if (text_cell[idx] && q != 0 && db < 35.0) {
+          ++text_video;
+          text_video_finished += q == 1;
+        }
+      }
+    }
+    std::printf("  audit: %llu cells turned bad during the clip, %llu at the end | cells below 25 dB at the end: %llu (below 20: "
+                "%llu), whatever the host's account | text cells at video quality at the end: %llu "
+                "(%llu of them finished, nothing owed) | work pending at the end: %s\n",
+                static_cast<unsigned long long>(bad_events), static_cast<unsigned long long>(still),
+                static_cast<unsigned long long>(below25), static_cast<unsigned long long>(below20),
+                static_cast<unsigned long long>(text_video), static_cast<unsigned long long>(text_video_finished),
+                host->work_pending() || host->keyframe_pending() ? "yes" : "no");
+    // --dump=PREFIX: the screen, what the viewer shows, and a map of the
+    // host's account per cell (green lossless, blue finished video, red
+    // other video, magenta contradicted), as PPM files. They show the real
+    // screen: keep them on this machine (docs/clips.md, privacy).
+    const std::string dump = args.str("dump");
+    if (!dump.empty()) {
+      auto write = [&](const std::string& path, const std::vector<uint8_t>& px) {
+        std::FILE* f = std::fopen(path.c_str(), "wb");
+        if (!f) return;
+        std::fprintf(f, "P6 %d %d 255\n", W, H);
+        for (size_t k = 0; k < px.size(); k += 4) {
+          const uint8_t rgb[3] = {px[k + 2], px[k + 1], px[k]};
+          std::fwrite(rgb, 1, 3, f);
+        }
+        std::fclose(f);
+      };
+      write(dump + "-screen.ppm", screen);
+      write(dump + "-viewer.ppm", shown);
+      std::vector<uint8_t> map(screen.size());
+      for (int32_t cy = 0; cy < rows; ++cy) {
+        for (int32_t cx = 0; cx < cols; ++cx) {
+          const Rect r = cell_rect(cx, cy);
+          double db = 0;
+          int q = 0;
+          const int kind = audit_kind(r, db, q);
+          const uint8_t tint[4][3] = {{0, 160, 0}, {0, 0, 200}, {200, 0, 0}, {255, 0, 255}};
+          const uint8_t* c = tint[kind != 0 ? 3 : q];
+          for (int32_t y = r.y; y < r.bottom(); ++y) {
+            for (int32_t x = r.x; x < r.right(); ++x) {
+              const size_t i = (static_cast<size_t>(y) * W + x) * 4;
+              // BGRA: half the screen's grey, half the tint.
+              const int g = (77 * screen[i + 2] + 150 * screen[i + 1] + 29 * screen[i]) >> 9;
+              map[i] = static_cast<uint8_t>(g + c[2] / 2);
+              map[i + 1] = static_cast<uint8_t>(g + c[1] / 2);
+              map[i + 2] = static_cast<uint8_t>(g + c[0] / 2);
+              map[i + 3] = 255;
+            }
+          }
+        }
+      }
+      write(dump + "-map.ppm", map);
+    }
+  }
   if (focus.w > 0 && w_time > 0) std::printf("  PSNR inside the focus %.1f, outside %.1f\n", w_in / w_time, w_out / w_time);
   std::printf("  video areas: %llu opened, %llu closed, %.0f kB in their streams\n",
               static_cast<unsigned long long>(s.regions_opened), static_cast<unsigned long long>(s.regions_closed),
@@ -717,6 +875,341 @@ int Eval(const Args& args) {
   }
   if (csv) std::fclose(csv);
   viewer.Stop();
+  return 0;
+}
+
+// decisions: everything the host decides on a clip, as a file two builds can
+// be compared by. The platform's encoder cannot be used for that: its
+// pictures differ from run to run, and what the host does next depends on
+// them (their sizes, the pictures it drops).
+
+// 64-bit FNV-1a over 8-byte words, with splitmix64's finalizer: the same
+// value on every run (no seed, no addresses), and fast enough for a
+// full-screen picture per frame.
+class Hash64 {
+ public:
+  void Word(uint64_t w) { h_ = (h_ ^ w) * 0x100000001b3ull; }
+  // Whole words, then what is left in one word with zeros above it (callers
+  // mix in the length where it is not fixed).
+  void Bytes(const uint8_t* p, size_t n) {
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+      uint64_t w;
+      std::memcpy(&w, p + i, 8);
+      Word(w);
+    }
+    if (i < n) {
+      uint64_t w = 0;
+      std::memcpy(&w, p + i, n - i);
+      Word(w);
+    }
+  }
+  uint64_t Final() const {
+    uint64_t z = h_;
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+    return z ^ (z >> 31);
+  }
+
+ private:
+  uint64_t h_ = 0xcbf29ce484222325ull;
+};
+
+// The encoder of `decisions`, full screen and video areas alike: a picture
+// depends only on the input and the call (force_keyframe, the QP floor last
+// asked for), never on time, addresses or the calls before, so a run repeats
+// exactly. Its size varies with the content, as a real picture's does, and
+// some pictures are dropped as VideoToolbox drops them at low rates, so the
+// host's paths for those (the video tiles carried to the next picture) are
+// taken too.
+class DeterministicEncoder final : public codec::IHevcEncoder {
+ public:
+  explicit DeterministicEncoder(const codec::EncoderConfig& config) : config_(config) {}
+  std::string name() const override { return "deterministic fake (rdaccel_clip decisions)"; }
+  const std::string& last_error() const override { return err_; }
+  void SetBitrate(int64_t bps) override { config_.bitrate_bps = bps; }  // kept, not used
+  void SetMinQp(int qp) override { min_qp_ = qp; }
+  // --perturb: the next picture fails, as on an encoder that broke.
+  void FailNext() { fail_next_ = true; }
+
+  std::optional<codec::HevcAccessUnit> Encode(const tile::ImageView& img, uint64_t, bool force_keyframe) override {
+    err_.clear();
+    if (fail_next_) {
+      fail_next_ = false;
+      err_ = "the encoder failed (--perturb)";
+      return std::nullopt;
+    }
+    Hash64 h;
+    h.Word(static_cast<uint64_t>(img.width));
+    h.Word(static_cast<uint64_t>(img.height));
+    const size_t row = static_cast<size_t>(img.width) * 4;
+    for (int32_t y = 0; y < img.height; ++y) h.Bytes(img.data + static_cast<size_t>(y) * img.stride, row);
+    h.Word(force_keyframe ? 1 : 0);
+    h.Word(static_cast<uint64_t>(static_cast<int64_t>(min_qp_)));
+    const uint64_t hash = h.Final();
+    if (!force_keyframe && hash % 29 == 0) return std::nullopt;  // dropped: no error
+    codec::HevcAccessUnit au;
+    au.keyframe = force_keyframe;
+    if (force_keyframe) au.parameter_sets = {std::vector<uint8_t>{static_cast<uint8_t>(codec::kNalVps << 1), 1}};
+    std::vector<uint8_t> nal = {static_cast<uint8_t>((force_keyframe ? codec::kNalIdrWRadl : 1) << 1), 1};
+    for (int k = 0; k < 8; ++k) nal.push_back(static_cast<uint8_t>(hash >> (8 * k)));
+    nal.resize(nal.size() + hash % 3000, 0x55);
+    codec::AppendLengthPrefixed(nal, au.nal_data);
+    return au;
+  }
+
+ private:
+  codec::EncoderConfig config_;
+  int min_qp_ = 0;
+  bool fail_next_ = false;
+  std::string err_;
+};
+
+// The transport of `decisions`: keeps what the host sends on each channel
+// until it is taken (once per call). No viewer, so nothing comes back: no
+// keyframe requests, no input.
+class RecordingTransport final : public transport::ITransport {
+ public:
+  bool Send(transport::Channel ch, std::span<const uint8_t> bytes) override {
+    std::lock_guard<std::mutex> lock(mu_);
+    Sent& s = sent_[static_cast<size_t>(ch) % sent_.size()];
+    s.used = true;
+    s.bytes.insert(s.bytes.end(), bytes.begin(), bytes.end());
+    return true;
+  }
+  void SetReceiver(ReceiveFn) override {}
+  void Close() override {}
+
+  // " video=1234:0123456789abcdef" for each channel sent on since the last
+  // Take: how many bytes, and their hash in the order sent.
+  std::string Take() {
+    static const char* const kNames[] = {"control", "input", "surface", "video", "cursor", "message", "bulk"};
+    static_assert(static_cast<int>(std::size(kNames)) == kChannelCount);
+    std::lock_guard<std::mutex> lock(mu_);
+    std::string out;
+    for (size_t c = 0; c < sent_.size(); ++c) {
+      Sent& s = sent_[c];
+      if (!s.used) continue;
+      Hash64 h;
+      h.Bytes(s.bytes.data(), s.bytes.size());
+      h.Word(s.bytes.size());
+      char buf[80];
+      std::snprintf(buf, sizeof buf, " %s=%zu:%016llx", kNames[c], s.bytes.size(),
+                    static_cast<unsigned long long>(h.Final()));
+      out += buf;
+      s.used = false;
+      s.bytes.clear();
+    }
+    return out;
+  }
+
+ private:
+  struct Sent {
+    bool used = false;
+    std::vector<uint8_t> bytes;
+  };
+  std::mutex mu_;
+  std::array<Sent, kChannelCount> sent_;
+};
+
+int Decisions(const Args& args) {
+  ClipReader clip(args.positional().c_str());
+  if (!clip.ok()) {
+    std::fprintf(stderr, "cannot read %s\n", args.positional().c_str());
+    return 1;
+  }
+  const std::string out_path = args.str("out");
+  if (out_path.empty()) {
+    std::fprintf(stderr, "decisions needs --out=FILE\n");
+    return 2;
+  }
+  std::FILE* out = std::fopen(out_path.c_str(), "w");
+  if (!out) {
+    std::fprintf(stderr, "cannot write %s\n", out_path.c_str());
+    return 1;
+  }
+  const bool text = args.num("text", 0) != 0;
+  const int64_t bitrate = args.num("bitrate", 8'000'000);
+  const auto fps = static_cast<int32_t>(args.num("fps", 60));
+  const bool perturb = args.num("perturb", 0) != 0;
+  constexpr uint64_t kResubmitUs = 100'000;  // as the Host's idle loop (and eval)
+
+  // (Before the host, which keeps references to them.)
+  RecordingTransport transport;
+  std::vector<session::FrameTrace> traces;  // what the call in progress reported
+  DeterministicEncoder* encoder = nullptr;  // the full-screen one; the host owns it
+  std::unique_ptr<session::HostSession> host;
+  std::vector<uint8_t> screen;
+  int32_t W = 0, H = 0;
+  uint64_t first_t = 0, last_submit = 0, frames = 0, calls = 0, resent = 0;
+
+  // --perturb=1: calls the replay alone never makes (the Host makes them on
+  // a real screen), at fixed points of the clip's own time from its first
+  // frame. Each goes just before the first frame submitted at or after its
+  // point (a re-submit too); points due together go in time order, and in
+  // the order of this table at the same time.
+  enum Kind { kKeyframe, kBitrate, kEncoderFails, kTextModeOffOn };
+  struct Point {
+    Kind kind;
+    uint64_t first_us, every_us;
+    int times;  // -1 = for as long as the clip lasts
+    int done = 0;
+    uint64_t next_us() const { return first_us + static_cast<uint64_t>(done) * every_us; }
+  };
+  std::vector<Point> points;
+  if (perturb) {
+    points = {{kKeyframe, 5'000'000, 10'000'000, -1},
+              {kBitrate, 3'000'000, 7'000'000, -1},  // bitrate, then /2, /4, and again
+              {kEncoderFails, 15'000'000, 0, 1},
+              {kTextModeOffOn, 20'000'000, 2'000'000, text ? 2 : 0}};
+  }
+  auto apply_points = [&](uint64_t rel) {
+    for (;;) {
+      Point* due = nullptr;
+      for (Point& p : points) {
+        if ((p.times < 0 || p.done < p.times) && p.next_us() <= rel && (!due || p.next_us() < due->next_us())) due = &p;
+      }
+      if (!due) return;
+      std::fprintf(out, "perturb at=%llus call=%llu t_us=%llu", static_cast<unsigned long long>(due->next_us() / 1'000'000),
+                   static_cast<unsigned long long>(calls), static_cast<unsigned long long>(rel));
+      switch (due->kind) {
+        case kKeyframe:
+          host->RequestKeyframe();
+          std::fprintf(out, " keyframe\n");
+          break;
+        case kBitrate: {
+          const int64_t cycle[3] = {bitrate, bitrate / 2, bitrate / 4};
+          host->SetBitrate(cycle[due->done % 3]);
+          std::fprintf(out, " bitrate=%lld\n", static_cast<long long>(cycle[due->done % 3]));
+          break;
+        }
+        case kEncoderFails:
+          encoder->FailNext();
+          std::fprintf(out, " encoder_fails\n");
+          break;
+        case kTextModeOffOn:
+          host->SetTextMode(false);
+          host->SetTextMode(true);
+          std::fprintf(out, " text_mode=off,on\n");
+          break;
+      }
+      ++due->done;
+    }
+  };
+
+  auto submit = [&](uint64_t t, const std::vector<Rect>& dirty, bool resend) {
+    const uint64_t rel = t - first_t;
+    apply_points(rel);
+    // Nothing is sent between calls (the Hello went with "init"); should
+    // anything be, it is not lost.
+    const std::string between = transport.Take();
+    if (!between.empty()) std::fprintf(out, "between%s\n", between.c_str());
+    traces.clear();
+    const bool ok = host->OnFrame({{screen.data(), W, H, W * 4}, dirty, t});
+    last_submit = t;
+    std::fprintf(out, "call=%llu t_us=%llu resent=%d ok=%d%s", static_cast<unsigned long long>(calls),
+                 static_cast<unsigned long long>(rel), resend ? 1 : 0, ok ? 1 : 0, transport.Take().c_str());
+    if (traces.empty()) std::fprintf(out, " trace=none");
+    for (const auto& f : traces) {
+      std::fprintf(out,
+                   " trace frame_no=%llu key=%d still=%d sharpen=%d picture_bytes=%zu video_rects=%d video_colours=%d "
+                   "video_hot=%d video_budget=%d video_keyframe_first=%d video_motion=%d refine_tiles=%d polish_tiles=%d "
+                   "lossless_rects=%d hot=%d hot_unmoved=%d moved=%d mass_motion=%d",
+                   static_cast<unsigned long long>(f.frame_no), f.key ? 1 : 0, f.still ? 1 : 0, f.sharpen ? 1 : 0,
+                   f.picture_bytes, f.video_rects, f.video_colours, f.video_hot, f.video_budget, f.video_keyframe_first,
+                   f.video_motion, f.refine_tiles, f.polish_tiles, f.lossless_rects, f.hot, f.hot_unmoved, f.moved,
+                   f.mass_motion ? 1 : 0);
+    }
+    std::fprintf(out, " work_pending=%d keyframe_pending=%d\n", host->work_pending() ? 1 : 0,
+                 host->keyframe_pending() ? 1 : 0);
+    ++calls;
+  };
+
+  // As eval plays the clip, without the viewer.
+  while (clip.Next()) {
+    if (!host) {
+      W = clip.width();
+      H = clip.height();
+      first_t = clip.time_us();
+      session::HostOptions o;
+      o.text_mode = text;
+      o.context_tiles = text;
+      o.context_tiles_64 = text;
+      o.fps = fps;
+      o.bitrate_bps = bitrate;
+      SetExperiments(args, o);
+      o.region_encoder_factory = [](const codec::EncoderConfig& c, std::string*) -> std::unique_ptr<codec::IHevcEncoder> {
+        return std::make_unique<DeterministicEncoder>(c);
+      };
+      // What each frame went through, as eval has it. Tracing costs the host
+      // one more palette search per rect it codes as video, which must not
+      // change what it decides.
+      o.trace = [&](const session::FrameTrace& f) { traces.push_back(f); };
+      // format: raised whenever the lines change, so that a log recorded by
+      // an older rdaccel_clip differs on its first line.
+      std::fprintf(out,
+                   "decisions format=1 size=%dx%d text=%d bitrate=%lld fps=%d perturb=%d split_cells=%d split_hot=%d "
+                   "text_refine=%d text_linger_us=%lld refine_frames=%d still_refine_frames=%d\n",
+                   W, H, text ? 1 : 0, static_cast<long long>(bitrate), fps, perturb ? 1 : 0, o.split_cells,
+                   o.split_hot ? 1 : 0, o.text_refine ? 1 : 0, static_cast<long long>(o.text_linger_us), o.refine_frames,
+                   o.still_refine_frames);
+      auto enc = std::make_unique<DeterministicEncoder>(codec::EncoderConfig{W, H, fps, bitrate, 24});
+      encoder = enc.get();
+      host = std::make_unique<session::HostSession>(&transport, std::move(enc), W, H, o);
+      std::fprintf(out, "init%s\n", transport.Take().c_str());
+    } else if (clip.width() != W || clip.height() != H) {
+      std::fprintf(stderr, "the clip changes size at %.1f s: not supported, stopping there\n",
+                   (clip.time_us() - first_t) / 1e6);
+      std::fprintf(out, "stopped t_us=%llu: the clip changes size\n", static_cast<unsigned long long>(clip.time_us() - first_t));
+      break;
+    }
+    // The Host's idle loop between changes.
+    while (frames > 0 && clip.time_us() - last_submit >= kResubmitUs &&
+           (host->keyframe_pending() || host->work_pending())) {
+      submit(last_submit + kResubmitUs, {}, true);
+      ++resent;
+    }
+    screen = clip.frame();
+    submit(clip.time_us(), clip.dirty(), false);
+    ++frames;
+  }
+  if (!host) {
+    std::fprintf(stderr, "no frames\n");
+    std::fclose(out);
+    return 1;
+  }
+  // What is still owed once the clip ends (up to 3 s).
+  for (int k = 0; k < 30 && (host->keyframe_pending() || host->work_pending()); ++k) {
+    submit(last_submit + kResubmitUs, {}, true);
+    ++resent;
+  }
+  // The counters HostSession keeps, without its three timings (*_us_total).
+  // The rest of HostStats is the Host's (re-submits on a wall-clock timer,
+  // the transport's measurements and the bitrate that follows them, the
+  // cursor, sound) and stays 0 with a HostSession alone.
+  const auto s = host->stats();
+  const std::pair<const char*, uint64_t> counters[] = {
+      {"frames_captured", s.frames_captured},   {"frames_skipped", s.frames_skipped},
+      {"frames_encoded", s.frames_encoded},     {"video_frames", s.video_frames},
+      {"keyframes", s.keyframes},               {"keyframe_requests", s.keyframe_requests},
+      {"encode_errors", s.encode_errors},       {"encoder_drops", s.encoder_drops},
+      {"bytes_sent", s.bytes_sent},             {"video_bytes", s.video_bytes},
+      {"lossless_bytes", s.lossless_bytes},     {"lossless_tiles", s.lossless_tiles},
+      {"moved_tiles", s.moved_tiles},           {"cached_tiles", s.cached_tiles},
+      {"refreshed_tiles", s.refreshed_tiles},   {"progressive_tiles", s.progressive_tiles},
+      {"region_pictures", s.region_pictures},   {"region_bytes", s.region_bytes},
+      {"regions_opened", s.regions_opened},     {"regions_closed", s.regions_closed},
+  };
+  std::fprintf(out, "stats");
+  for (const auto& [name, v] : counters) std::fprintf(out, " %s=%llu", name, static_cast<unsigned long long>(v));
+  std::fprintf(out, "\n");
+  const bool written = std::ferror(out) == 0;
+  if (std::fclose(out) != 0 || !written) {
+    std::fprintf(stderr, "cannot write %s\n", out_path.c_str());
+    return 1;
+  }
+  std::printf("%llu calls, %llu of them re-sent\n", static_cast<unsigned long long>(calls),
+              static_cast<unsigned long long>(resent));
   return 0;
 }
 
@@ -731,5 +1224,6 @@ int main(int argc, char** argv) {
   if (cmd == "render") return Render(args);
   if (cmd == "eval") return Eval(args);
   if (cmd == "frame") return Frame(args);
+  if (cmd == "decisions") return Decisions(args);
   return Usage();
 }
