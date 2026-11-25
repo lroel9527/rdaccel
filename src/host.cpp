@@ -1,7 +1,6 @@
 #include "rdacore/host.h"
 
 #include <cstdlib>
-#include <unistd.h>
 #include <algorithm>
 #include <stdexcept>
 #include <atomic>
@@ -674,14 +673,6 @@ struct Host::Impl {
       opts.refresh = config.refresh;
       opts.progressive = config.progressive;
       opts.text_mode = text_applied;
-      // For comparing by eye, while 3.1's text mode is new: with this file
-      // present (or the variable set) text mode decides as it did up to
-      // 3.0.1. Read whenever the session is set up again, so switching text
-      // mode off and on is enough.
-      if (std::getenv("RDACCEL_TEXT_MODE_OLD") != nullptr || ::access("/tmp/rdaccel-text-mode-old", F_OK) == 0) {
-        opts.split_cells = 0;
-        opts.text_refine = true;
-      }
       if (config.video_regions) {
         opts.region_encoder_factory = [](const codec::EncoderConfig& c, std::string* e) {
           return platform::CreateVideoEncoder(c, e);

@@ -1927,7 +1927,7 @@ struct TextRig {
     if (end_keyframe) {
       // A tile of other plain colour and back: frames that are not skipped
       // end the progressive keyframe with everything exact (see
-      // TextModeGivesAPhotoThatIsTheFirstChangeAfterTheKeyframeTheSharpenPictureToo).
+      // TextModeGivesAPhotoThatIsTheFirstChangeAfterTheKeyframeOnePictureToo).
       std::vector<uint8_t> plain = px;
       for (int y = 64; y < 128; ++y) std::memset(&px[(static_cast<size_t>(y) * W + 192) * 4], 200, 64 * 4);
       Frame();
@@ -2112,11 +2112,12 @@ namespace {
 // A photo appears on a plain screen and stays: the pictures it costs, as
 // TextModeGivesAStillPhotoOnePictureAndNoPolish counts them.
 // `end_keyframe` false: the photo is the first change after the keyframe of
-// a still screen, so the picture that ends the progressive keyframe (the
-// "sharpen" picture, once per keyframe) follows it and takes the photo too.
+// a still screen and ends the progressive keyframe. With refinement
+// (text_refine) the picture that ends it (the "sharpen" picture, once per
+// keyframe) follows and takes the photo too; without, there is none.
 void ExpectOnePictureForAStillPhoto(bool end_keyframe) {
-  const size_t sharpen = end_keyframe ? 0 : 1;
   for (const bool refine : {false, true}) {
+    const size_t sharpen = end_keyframe || !refine ? 0 : 1;
     TextRig rig({.text_mode = true, .text_refine = refine}, end_keyframe);
     rig.Settle();
     const size_t after_key = rig.pictures;
@@ -2130,7 +2131,7 @@ void ExpectOnePictureForAStillPhoto(bool end_keyframe) {
     for (int f = 0; f < 20 * TextRig::kFps; ++f) rig.Frame();
     EXPECT_FALSE(rig.host->work_pending());
     if (!refine) {
-      EXPECT_EQ(rig.pictures, after_key + 1 + sharpen);
+      EXPECT_EQ(rig.pictures, after_key + 1);
     } else if (sharpen == 0) {
       EXPECT_EQ(rig.pictures, after_key + 1 + 8 + 60);  // the defaults: refine_frames, still_refine_frames
     } else {
@@ -2149,13 +2150,53 @@ TEST(Session, TextModeGivesAStillPhotoOnePictureAndNoPolish) {
   ExpectOnePictureForAStillPhoto(/*end_keyframe=*/true);
 }
 
-TEST(Session, TextModeGivesAPhotoThatIsTheFirstChangeAfterTheKeyframeTheSharpenPictureToo) {
+TEST(Session, TextModeGivesAPhotoThatIsTheFirstChangeAfterTheKeyframeOnePictureToo) {
   // When the photo is the first change after the keyframe of a still
-  // screen, the progressive keyframe ends with that frame, and the picture
-  // that ends it (once per keyframe: what is not exact is taken from the
-  // encoder once more, having shared the first picture with the whole
-  // screen) takes the photo too: two pictures, and none after them.
+  // screen, the progressive keyframe ends with that frame. Up to 3.5.0 a
+  // picture followed that took what was not exact from the encoder once
+  // more (the "sharpen" picture), the photo too: two pictures. Text mode
+  // without refinement has no such picture (see
+  // TextModeLeavesTextBesideAPhotoExactWhenAKeyframeEnds): one picture, and
+  // none after it. With refinement the sharpen picture starts it, as before.
   ExpectOnePictureForAStillPhoto(/*end_keyframe=*/false);
+}
+
+TEST(Session, TextModeLeavesTextBesideAPhotoExactWhenAKeyframeEnds) {
+  // Text beside a photo in one tile, in a keyframe, and the photo changes
+  // again in the next frame: still changing, the tile goes to the encoder
+  // whole, its text too, and stays rough, to be coded by cells once it
+  // stops. That frame ended the progressive keyframe, and up to 3.5.0 the
+  // next frame that was not skipped took every tile that was not exact from
+  // the encoder once more (the "sharpen" picture), which in text mode starts
+  // no refinement, and counted them refined: this tile was never coded by
+  // cells again, its text left at video quality. (In the typing clip at
+  // 8 Mbps the tiles were ones their owed turn had just split, text exact:
+  // they came back whole from that picture, and text exact or sharp fell
+  // from 99.6 to 97.0% until the end.) Text mode without refinement ends a
+  // progressive keyframe without that picture: the tile is coded by cells
+  // once still and its text is exact, in the host's account too. (The fake
+  // decoder paints nothing here, so the viewer's pixels cannot show it.)
+  TextRig rig({.text_mode = true});
+  rig.Settle();
+  uint32_t seed = 59;
+  TextBesidePhoto(rig.px, TextRig::W, 1, 0, seed);
+  rig.host->RequestKeyframe();
+  rig.Frame();
+  FillNoise(rig.px, TextRig::W, PhotoHalf(1, 0), seed);
+  rig.Frame();
+  rig.Settle();
+  EXPECT_EQ(rig.Diff(TextHalf(1, 0)), 0u);
+  const size_t settled = rig.pictures;
+  // Something else changes (a plain tile, sent losslessly): a frame that is
+  // not skipped, which the sharpen picture went out with.
+  for (int y = 64; y < 128; ++y) std::memset(&rig.px[(static_cast<size_t>(y) * TextRig::W + 192) * 4], 200, 64 * 4);
+  rig.Frame();
+  rig.Settle();
+  for (int f = 0; f < 10 * TextRig::kFps; ++f) rig.Frame();
+  EXPECT_EQ(rig.pictures, settled);
+  EXPECT_FALSE(rig.host->work_pending());
+  EXPECT_EQ(rig.Diff(TextHalf(1, 0)), 0u);
+  EXPECT_EQ(rig.host->ShownQuality(TextHalf(1, 0)), 0);
 }
 
 TEST(Session, TextModeDoesNotSendThePageAgainAfterTwoScrollsPastAPhoto) {

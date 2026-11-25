@@ -148,7 +148,7 @@ soft 格再按这一格在原画面上有几种颜色分开：最多 16 种、17
 
 | 项 | 含义 |
 | --- | --- |
-| keyframes | 关键帧，以及结束渐进关键帧的那一幅 |
+| keyframes | 关键帧，以及结束渐进关键帧的那一幅（文字模式 3.5.1 起没有这一幅，除非 `--text-refine=1`） |
 | new content | 新内容：对端从这幅画面取的新矩形 |
 | refinement | 普通细修：视频块编过以后，对端从后面几幅画面继续取（`HostOptions::refine_frames`） |
 | still polish | 屏幕快静止时，以更低的 QP 下限再取几幅（`HostOptions::still_refine_frames`） |

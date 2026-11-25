@@ -1434,8 +1434,14 @@ void HostSession::FinishVideoTiles(Frame& f) {
 // spends its bits on what is left (photos, gradients), which the first
 // picture had to share with all the text. Only tiles where the encoder's
 // input still matches the screen (not moved ones) are taken from it.
+// Text mode codes no intra picture here: its picture only starts the
+// refinement (text_refine), and without refinement there is none. It took
+// tiles whole from a P picture, which leaves what did not change as it
+// was, and counted them refined: text beside a photo went back to video
+// quality and was never coded by cells again. What the first picture left
+// poor is measured and taken again instead (PlanRetakes).
 void HostSession::SharpenAfterProgressive(Frame& f) {
-  f.sharpen = sharpen_video_ && !f.key;
+  f.sharpen = sharpen_video_ && !f.key && (!f.text || f.refine_frames > 0);
   sharpen_video_ = false;
   if (!f.sharpen) return;
   // Flatten the text the progressive tiles left in the encoder's input
@@ -1511,8 +1517,9 @@ void HostSession::PolishStillScreen(Frame& f) {
 bool HostSession::EncodePicture(Frame& f, std::string* error, bool* done) {
   if (!f.key && f.region_tiles.empty()) return true;
   encoder_->SetMinQp(f.still ? options_.still_min_qp : 0);
-  // (Text mode ends a progressive keyframe without the intra picture: the
-  // tiles left at the first picture's quality are refined by the next.)
+  // (Text mode ends a progressive keyframe without the intra picture: with
+  // refinement the tiles left at the first picture's quality are refined by
+  // the next; without, there is no such picture, see SharpenAfterProgressive.)
   f.au = encoder_->Encode(picture_.view(), f.in.capture_time_us, f.key || (f.sharpen && !f.text));
   f.picture_coded = f.au.has_value();
   if (f.au) last_picture_us_ = f.in.capture_time_us;
